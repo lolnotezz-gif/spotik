@@ -14,16 +14,24 @@ jobs:
       - name: Compile AntiCensor.dylib
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Using iOS SDK at: $SDK_PATH"
+          
           clang -arch arm64 \
             -isysroot "$SDK_PATH" \
             -miphoneos-version-min=14.0 \
             -fobjc-arc \
+            -Wno-deprecated-declarations \
+            -Wno-objc-multiple-method-names \
             -framework Foundation \
             -framework UIKit \
             -framework AVFoundation \
+            -framework CoreMedia \
             -dynamiclib \
             -o AntiCensor.dylib \
             tweak/AntiCensor.m
+
+          ls -lh AntiCensor.dylib
+          file AntiCensor.dylib
 
       - name: Upload AntiCensor.dylib Artifact
         uses: actions/upload-artifact@v4
