@@ -1645,7 +1645,8 @@ static void checkAndSyncLyricsOnScreen(void) {
             }
 
             // Плавное следование скролла за активной строкой (по центру экрана ~35%)
-            if (!scrollView.isDragging && !scrollView.isDecelerating && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
+            if (!scrollView.isDragging && !scrollView.isDecelerating
+                && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
                 UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
                 CGFloat targetY = actLbl.frame.origin.y - (scrollView.bounds.size.height * 0.35);
                 if (targetY < 0) targetY = 0;
