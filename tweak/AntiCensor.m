@@ -202,7 +202,7 @@ static void applyMuteStateToAllUnits(void) {
     for (int i = 0; i < g_activeUnitCount; i++) {
         void *u = g_activeUnits[i];
         if (u) {
-            // Мьютим только шины микшера Spotify. Параметр 14 (громкость наушников) не трогаем!
+            // Мьютим только шины микшера Spotify. Общую громкость наушников не трогаем!
             pAudioUnitSetParameter(u, 0 /* kMultiChannelMixerParam_Volume */, 1 /* Input */, 0 /* Bus 0 */, vol, 0);
             pAudioUnitSetParameter(u, 0, 1 /* Input */, 1 /* Bus 1 */, vol, 0);
             pAudioUnitSetParameter(u, 0, 2 /* Output */, 0, vol, 0);
@@ -309,7 +309,7 @@ static NSString *getServerURL(void) {
 #pragma mark - AntiCensor State & Sync Engine
 
 static AVPlayer *ourAudioPlayer = nil;
-static id statusObserverContext = &statusObserverContext;
+static void *kStatusObserverContext = &kStatusObserverContext;
 static BOOL isObservingPlayerItem = NO;
 
 static NSString *currentPlayingURI = nil;
@@ -346,14 +346,14 @@ static double getCurrentSpotifyPreciseTime(void) {
 
 - (void)observeValueForKeyPath:(NSString *)keyPath
                       ofObject:(id)object
-                        change:(NSDictionary<NSKeyValueChangeKey,id> *)change
+                        change:(NSDictionary *)change
                        context:(void *)context {
-    if (context == statusObserverContext) {
+    if (context == kStatusObserverContext) {
         AVPlayerItem *item = (AVPlayerItem *)object;
         if (item.status == AVPlayerItemStatusReadyToPlay) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
-                // Мгновенный скачок на текущее время трека Spotify без задержки буферизации
+                // Мгновенный прыжок на точную секунду трека Spotify без задержки
                 double targetSeconds = getCurrentSpotifyPreciseTime();
                 if (targetSeconds > 0.05) {
                     CMTime seekTime = CMTimeMakeWithSeconds(targetSeconds, NSEC_PER_SEC);
@@ -363,14 +363,12 @@ static double getCurrentSpotifyPreciseTime(void) {
                         }
                     }];
                 } else {
-                    if (isSpotifyCurrentlyPlaying) {
+                    if (isSpotifyCurrentlyPlaying && ourAudioPlayer) {
                         [ourAudioPlayer play];
                     }
                 }
             });
         }
-    } else {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
 }
 
@@ -388,7 +386,7 @@ static void stopReplacementAudio(void) {
 
     if (ourAudioPlayer && isObservingPlayerItem) {
         @try {
-            [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:statusObserverContext];
+            [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:kStatusObserverContext];
         } @catch (id ex) {}
         isObservingPlayerItem = NO;
     }
@@ -411,7 +409,7 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
     double ourTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
     double diff = fabs(ourTime - spotifyTime);
 
-    // Если разница больше 0.35 сек (например, нажали на текст песни), перематываем точно
+    // Если разница больше 0.35 сек (нажатие на текст или перемотка), перематываем точно
     if (diff > 0.35) {
         CMTime seekTime = CMTimeMakeWithSeconds(spotifyTime, NSEC_PER_SEC);
         [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
@@ -445,22 +443,16 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     if (!g_playerObserver) {
         g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
     }
-    [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:statusObserverContext];
+    [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
     isObservingPlayerItem = YES;
 
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
     ourAudioPlayer.volume = 1.0f;
 
     // Таймер точной синхронизации каждые 250 мс
-    periodicSyncTimer = [NSTimer scheduledTimerWithTimeInterval:0.25
-                                                         target:[NSBlockOperation blockOperationWithBlock:^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            onPeriodicSyncCheck(nil);
-        });
-    }]
-                                                       selector:@selector(main)
-                                                       userInfo:nil
-                                                        repeats:YES];
+    periodicSyncTimer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        onPeriodicSyncCheck(timer);
+    }];
     [[NSRunLoop mainRunLoop] addTimer:periodicSyncTimer forMode:NSRunLoopCommonModes];
 }
 
@@ -771,13 +763,13 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
     }
 }
 
-static UIMenu * (*orig_menuWithTitle_image_identifier_options_children)(id, SEL, NSString *, UIImage *, UIMenuIdentifier, UIMenuOptions, NSArray *);
-static UIMenu * custom_menuWithTitle_image_identifier_options_children(id target, SEL _cmd, NSString *title, UIImage *image, UIMenuIdentifier identifier, UIMenuOptions options, NSArray *children) {
+static UIMenu * (*orig_menuWithTitle_image_identifier_options_children)(id, SEL, NSString *, UIImage *, id, NSUInteger, NSArray *);
+static UIMenu * custom_menuWithTitle_image_identifier_options_children(id target, SEL _cmd, NSString *title, UIImage *image, id identifier, NSUInteger options, NSArray *children) {
     if (children && children.count > 0) {
         UIAction *action = [UIAction actionWithTitle:@"⚡ Заменить на SoundCloud (AntiCensor)"
                                                image:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"]
                                           identifier:@"com.anticensor.action"
-                                             handler:^(__kindof UIAction * _Nonnull a) {
+                                             handler:^(UIAction *a) {
             showReplacementDialogWithContext(currentActiveSpotifyTrackURI, title ?: currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
         }];
         children = [children arrayByAddingObject:action];
@@ -952,7 +944,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     if (menuClass) {
         Method mMenu = class_getClassMethod(menuClass, @selector(menuWithTitle:image:identifier:options:children:));
         if (mMenu) {
-            orig_menuWithTitle_image_identifier_options_children = (UIMenu * (*)(id, SEL, NSString *, UIImage *, UIMenuIdentifier, UIMenuOptions, NSArray *))method_getImplementation(mMenu);
+            orig_menuWithTitle_image_identifier_options_children = (UIMenu * (*)(id, SEL, NSString *, UIImage *, id, NSUInteger, NSArray *))method_getImplementation(mMenu);
             method_setImplementation(mMenu, (IMP)custom_menuWithTitle_image_identifier_options_children);
         }
     }
