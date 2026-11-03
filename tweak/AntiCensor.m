@@ -2,10 +2,25 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 #define DEFAULTS_OVERRIDES_KEY @"AntiCensor_Overrides"
 #define DEFAULTS_SERVER_KEY    @"AntiCensor_ServerURL"
-#define DEFAULT_SERVER_URL     @"https://anticensor-bridge.onrender.com"
+#define DEFAULT_SERVER_URL     @"https://spotik-in4b.onrender.com"
+
+@protocol AntiCensorPlayerProtocol <NSObject>
+@optional
+- (void)setVolume:(float)volume;
+- (id)track;
+- (NSURL *)URI;
+- (double)position;
+- (BOOL)isPaused;
+- (BOOL)isPlaying;
+@end
+
+@interface UIViewController (AntiCensorInternal)
+- (void)anticensor_handleLongPress:(UILongPressGestureRecognizer *)gr;
+@end
 
 static AVPlayer *ourAudioPlayer = nil;
 static BOOL isMutingSpotify = NO;
@@ -47,7 +62,7 @@ static NSString *cleanTrackID(NSString *rawUri) {
 
 #pragma mark - Audio Playback Engine
 
-static void stopReplacementAudio(id player) {
+static void stopReplacementAudio(id<AntiCensorPlayerProtocol> player) {
     if (ourAudioPlayer) {
         [ourAudioPlayer pause];
         ourAudioPlayer = nil;
@@ -61,7 +76,7 @@ static void stopReplacementAudio(id player) {
     currentPlayingURI = nil;
 }
 
-static void startReplacementAudio(NSString *trackURI, NSString *scUrl, double startPosition, id spotifyPlayer) {
+static void startReplacementAudio(NSString *trackURI, NSString *scUrl, double startPosition, id<AntiCensorPlayerProtocol> spotifyPlayer) {
     if (!scUrl || scUrl.length == 0) return;
 
     NSString *server = getServerURL();
@@ -105,7 +120,8 @@ static void startReplacementAudio(NSString *trackURI, NSString *scUrl, double st
 static void showReplacementDialog(NSString *trackURI, NSString *trackTitle, id spotifyPlayer) {
     if (!trackURI) return;
 
-    UIViewController *topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    UIViewController *topVC = window.rootViewController;
     while (topVC.presentedViewController) {
         topVC = topVC.presentedViewController;
     }
@@ -135,16 +151,16 @@ static void showReplacementDialog(NSString *trackURI, NSString *trackTitle, id s
         NSString *inputUrl = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (inputUrl.length > 0) {
             saveOverride(trackURI, inputUrl);
-            startReplacementAudio(trackURI, inputUrl, 0.0, spotifyPlayer);
+            startReplacementAudio(trackURI, inputUrl, 0.0, (id<AntiCensorPlayerProtocol>)spotifyPlayer);
         } else {
             saveOverride(trackURI, nil);
-            stopReplacementAudio(spotifyPlayer);
+            stopReplacementAudio((id<AntiCensorPlayerProtocol>)spotifyPlayer);
         }
     }];
 
     UIAlertAction *serverAction = [UIAlertAction actionWithTitle:@"Сервер моста" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         UIAlertController *serverAlert = [UIAlertController alertControllerWithTitle:@"URL Моста"
-                                                                             message:@"Укажи адрес твоего сервера AntiCensorBridge:"
+                                                                             message:@"Адрес сервера AntiCensorBridge:"
                                                                       preferredStyle:UIAlertControllerStyleAlert];
         [serverAlert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
             textField.placeholder = DEFAULT_SERVER_URL;
@@ -163,7 +179,7 @@ static void showReplacementDialog(NSString *trackURI, NSString *trackTitle, id s
 
     UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Удалить замену" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
         saveOverride(trackURI, nil);
-        stopReplacementAudio(spotifyPlayer);
+        stopReplacementAudio((id<AntiCensorPlayerProtocol>)spotifyPlayer);
     }];
 
     UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil];
@@ -183,30 +199,29 @@ static void showReplacementDialog(NSString *trackURI, NSString *trackTitle, id s
 // Hook SPTPlayer state changes
 static void (*orig_player_stateDidChange)(id, SEL, id, id);
 static void custom_player_stateDidChange(id self, SEL _cmd, id player, id state) {
-    orig_player_stateDidChange(self, _cmd, player, state);
+    if (orig_player_stateDidChange) {
+        orig_player_stateDidChange(self, _cmd, player, state);
+    }
 
     if (!state) return;
 
-    id track = [state respondsToSelector:@selector(track)] ? [state performSelector:@selector(track)] : nil;
-    NSURL *trackURI = track && [track respondsToSelector:@selector(URI)] ? [track performSelector:@selector(URI)] : nil;
+    id<AntiCensorPlayerProtocol> pState = (id<AntiCensorPlayerProtocol>)state;
+    id track = [pState respondsToSelector:@selector(track)] ? [pState track] : nil;
+    NSURL *trackURI = track && [track respondsToSelector:@selector(URI)] ? [track URI] : nil;
     NSString *cleanURI = cleanTrackID(trackURI.absoluteString);
 
     double position = 0.0;
-    if ([state respondsToSelector:@selector(position)]) {
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[state methodSignatureForSelector:@selector(position)]];
-        [inv setSelector:@selector(position)];
-        [inv setTarget:state];
-        [inv invoke];
-        [inv getReturnValue:&position];
+    if ([pState respondsToSelector:@selector(position)]) {
+        position = [pState position];
     }
 
     BOOL isPaused = NO;
-    if ([state respondsToSelector:@selector(isPaused)]) {
-        isPaused = ((BOOL (*)(id, SEL))objc_msgSend)(state, @selector(isPaused));
+    if ([pState respondsToSelector:@selector(isPaused)]) {
+        isPaused = [pState isPaused];
     }
 
     if (!cleanURI) {
-        stopReplacementAudio(player);
+        stopReplacementAudio((id<AntiCensorPlayerProtocol>)player);
         return;
     }
 
@@ -215,7 +230,7 @@ static void custom_player_stateDidChange(id self, SEL _cmd, id player, id state)
 
     if (repUrl && repUrl.length > 0) {
         if (![cleanURI isEqualToString:currentPlayingURI] || !ourAudioPlayer) {
-            startReplacementAudio(cleanURI, repUrl, position, player);
+            startReplacementAudio(cleanURI, repUrl, position, (id<AntiCensorPlayerProtocol>)player);
         } else {
             // Keep play / pause in sync
             if (isPaused && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
@@ -233,28 +248,8 @@ static void custom_player_stateDidChange(id self, SEL _cmd, id player, id state)
         }
     } else {
         if (ourAudioPlayer) {
-            stopReplacementAudio(player);
+            stopReplacementAudio((id<AntiCensorPlayerProtocol>)player);
         }
-    }
-}
-
-// Hook Now Playing UI to attach long-press gesture for replacement
-static void (*orig_viewDidAppear)(id, SEL, BOOL);
-static void custom_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
-    orig_viewDidAppear(self, _cmd, animated);
-
-    NSString *className = NSStringFromClass([self class]);
-    if ([className containsString:@"NowPlaying"]) {
-        UIView *view = self.view;
-        for (UIGestureRecognizer *gr in view.gestureRecognizers) {
-            if ([gr isKindOfClass:[UILongPressGestureRecognizer class]]) {
-                return; // already attached
-            }
-        }
-
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(anticensor_handleLongPress:)];
-        lp.minimumPressDuration = 0.6;
-        [view addGestureRecognizer:lp];
     }
 }
 
@@ -264,23 +259,43 @@ static void anticensor_handleLongPress(id self, SEL _cmd, UILongPressGestureReco
     }
 }
 
+// Hook NowPlaying viewDidAppear for gesture
+static void (*orig_viewDidAppear)(id, SEL, BOOL);
+static void custom_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    if (orig_viewDidAppear) {
+        orig_viewDidAppear(self, _cmd, animated);
+    }
+
+    NSString *className = NSStringFromClass([self class]);
+    if ([className containsString:@"NowPlaying"]) {
+        UIView *view = self.view;
+        for (UIGestureRecognizer *gr in view.gestureRecognizers) {
+            if ([gr isKindOfClass:[UILongPressGestureRecognizer class]]) {
+                return;
+            }
+        }
+
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(anticensor_handleLongPress:)];
+        lp.minimumPressDuration = 0.6;
+        [view addGestureRecognizer:lp];
+    }
+}
+
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
     NSLog(@"[AntiCensor] iOS Tweak Loaded!");
 
-    // Hook NowPlaying viewDidAppear for gesture
     Class npClass = objc_getClass("UIViewController");
-    Method mApp = class_getInstanceMethod(npClass, @selector(viewDidAppear:));
-    if (mApp) {
-        orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(mApp);
-        method_setImplementation(mApp, (IMP)custom_viewDidAppear);
+    if (npClass) {
+        class_addMethod(npClass, @selector(anticensor_handleLongPress:), (IMP)anticensor_handleLongPress, "v@:@");
+        Method mApp = class_getInstanceMethod(npClass, @selector(viewDidAppear:));
+        if (mApp) {
+            orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(mApp);
+            method_setImplementation(mApp, (IMP)custom_viewDidAppear);
+        }
     }
 
-    // Add long press handler to UIViewController class
-    class_addMethod(npClass, @selector(anticensor_handleLongPress:), (IMP)anticensor_handleLongPress, "v@:@");
-
-    // Hook Player state change observer
     Class obsClass = objc_getClass("SPTPlayerObserver");
     if (!obsClass) {
         obsClass = objc_getClass("SPTPlayerImpl");
