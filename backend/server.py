@@ -94,23 +94,95 @@ def resolve_sc_to_file(raw_url):
         return target_mp3
     return None
 
+import time
+
+SYNC_DB_FILE = os.path.join(CACHE_DIR, "sync_database.json")
+sync_lock = threading.Lock()
+
+def load_sync_db():
+    with sync_lock:
+        if os.path.exists(SYNC_DB_FILE):
+            try:
+                with open(SYNC_DB_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"overrides": {}, "lyrics": {}, "updated_at": 0}
+
+def save_sync_db(db):
+    with sync_lock:
+        try:
+            with open(SYNC_DB_FILE, "w", encoding="utf-8") as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("[AntiCensor] Save sync DB error:", e)
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 class AudioHandler(BaseHTTPRequestHandler):
     def send_cors(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Range, Content-Type')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization')
 
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_cors()
         self.end_headers()
 
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/sync':
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                payload = json.loads(body)
+                db = load_sync_db()
+                if "overrides" in payload and isinstance(payload["overrides"], dict):
+                    for k, v in payload["overrides"].items():
+                        if v and len(str(v).strip()) > 0:
+                            db["overrides"][k] = v
+                        elif k in db["overrides"]:
+                            del db["overrides"][k]
+                if "lyrics" in payload and isinstance(payload["lyrics"], dict):
+                    for k, v in payload["lyrics"].items():
+                        if v and len(str(v).strip()) > 0:
+                            db["lyrics"][k] = v
+                        elif k in db["lyrics"]:
+                            del db["lyrics"][k]
+                db["updated_at"] = time.time()
+                save_sync_db(db)
+                self.send_response(200)
+                self.send_cors()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(db).encode('utf-8'))
+                return
+            except Exception as e:
+                self.send_response(400)
+                self.send_cors()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                return
+
+        self.send_response(404)
+        self.send_cors()
+        self.end_headers()
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
+
+        if parsed.path == '/api/sync':
+            db = load_sync_db()
+            self.send_response(200)
+            self.send_cors()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(db).encode('utf-8'))
+            return
 
         if parsed.path == '/health' or parsed.path == '/':
             self.send_response(200)

@@ -21,11 +21,22 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
+#define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
+#define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 #define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
 
 static void setupFloatingBadge(void);
 static void checkAndInjectProfileDrawerButton(void);
+static void checkAndSyncLyricsOnScreen(void);
+static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count));
+static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics);
+static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targetTitle, NSString *targetArtist);
+static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *artist, NSString *displayTrack, NSString *existingUrl);
+static void showLyricsManagerDialog(NSString *targetURI, NSString *targetTitle, NSString *targetArtist, NSString *displayTrack);
+static void showLyricsEditPrompt(NSString *uri, NSString *title, NSString *artist, NSString *displayTrack, NSString *existingLyrics);
+static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist);
+static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics);
 
 #pragma mark - Fishhook (Mach-O Symbol Rebinding)
 
@@ -339,6 +350,210 @@ static NSString *cleanTrackID(NSString *rawUri) {
     return [rawUri componentsSeparatedByString:@"?"].firstObject;
 }
 
+static NSString *getServerURL(void) {
+    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:DEFAULTS_SERVER_KEY];
+    if (!url || url.length == 0) {
+        return DEFAULT_SERVER_URL;
+    }
+    return [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
+}
+
+static NSString *getLyricsFilePath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    return [docDir stringByAppendingPathComponent:@"AntiCensor_Lyrics.json"];
+}
+
+static NSMutableDictionary *loadAllLyrics(void) {
+    NSString *path = getLyricsFilePath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSDictionary *rawDict = nil;
+    if (data) {
+        rawDict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    }
+    if (!rawDict || ![rawDict isKindOfClass:[NSDictionary class]]) {
+        rawDict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_LYRICS_KEY];
+    }
+    NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
+    if (rawDict && [rawDict isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in rawDict) {
+            NSString *val = [rawDict[k] description];
+            if (val && val.length > 0) {
+                cleaned[normalizeKey(k)] = val;
+            }
+        }
+    }
+    return cleaned;
+}
+
+static void persistLyrics(NSDictionary *dict) {
+    if (!dict) return;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil];
+    if (data) {
+        [data writeToFile:getLyricsFilePath() atomically:YES];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:dict forKey:DEFAULTS_LYRICS_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
+    if (!key || key.length == 0) return;
+    NSString *server = getServerURL();
+    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
+    if (!syncUrl) return;
+
+    NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+    if (isLyrics) {
+        payload[@"lyrics"] = @{ key: value ?: @"" };
+    } else {
+        payload[@"overrides"] = @{ key: value ?: @"" };
+    }
+
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!bodyData) return;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = bodyData;
+    req.timeoutInterval = 7.0;
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (!err) {
+            NSLog(@"[AntiCensor] Cloud sync push SUCCESS for key: %@", key);
+        } else {
+            NSLog(@"[AntiCensor] Cloud sync push failed: %@", err);
+        }
+    }] resume];
+}
+
+static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count)) {
+    NSString *server = getServerURL();
+    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
+    if (!syncUrl) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+        return;
+    }
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
+    req.HTTPMethod = @"GET";
+    req.timeoutInterval = 7.0;
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (!data || err) {
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+            return;
+        }
+
+        @try {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+                return;
+            }
+
+            __block NSUInteger updatedCount = 0;
+
+            // 1. Оверрайды треков с ПК
+            NSDictionary *remoteOverrides = json[@"overrides"];
+            if (remoteOverrides && [remoteOverrides isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *localOverrides = loadAllOverrides();
+                for (NSString *k in remoteOverrides) {
+                    NSString *normK = normalizeKey(k);
+                    NSString *remoteVal = [remoteOverrides[k] description];
+                    if (remoteVal.length > 0) {
+                        NSString *curr = localOverrides[normK];
+                        if (!curr || ![curr hasPrefix:@"local://"]) {
+                            if (![curr isEqualToString:remoteVal]) {
+                                localOverrides[normK] = remoteVal;
+                                updatedCount++;
+                            }
+                        }
+                    }
+                }
+                persistOverrides(localOverrides);
+            }
+
+            // 2. Тексты песен с ПК
+            NSDictionary *remoteLyrics = json[@"lyrics"];
+            if (remoteLyrics && [remoteLyrics isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *localLyrics = loadAllLyrics();
+                for (NSString *k in remoteLyrics) {
+                    NSString *normK = normalizeKey(k);
+                    NSString *remoteTxt = [remoteLyrics[k] description];
+                    if (remoteTxt.length > 0) {
+                        NSString *currTxt = localLyrics[normK];
+                        if (![currTxt isEqualToString:remoteTxt]) {
+                            localLyrics[normK] = remoteTxt;
+                            updatedCount++;
+                        }
+                    }
+                }
+                persistLyrics(localLyrics);
+            }
+
+            NSLog(@"[AntiCensor] Cloud sync pull SUCCESS, merged entries: %lu", (unsigned long)updatedCount);
+            if (completion) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(YES, updatedCount);
+                });
+            }
+        } @catch (id ex) {
+            if (completion) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(NO, 0);
+                });
+            }
+        }
+    }] resume];
+}
+
+static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics) {
+    if (!trackKey) return;
+    NSString *normKey = normalizeKey(trackKey);
+    if (normKey.length < 3) return;
+
+    NSMutableDictionary *dict = loadAllLyrics();
+    if (lyrics && lyrics.length > 0) {
+        dict[normKey] = lyrics;
+        syncPushToCloud(normKey, lyrics, YES);
+    } else {
+        [dict removeObjectForKey:normKey];
+        syncPushToCloud(normKey, @"", YES);
+    }
+    persistLyrics(dict);
+}
+
+static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist) {
+    if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
+        return nil;
+    }
+    NSDictionary *dict = loadAllLyrics();
+    if (!dict || dict.count == 0) return nil;
+
+    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
+        NSString *val = dict[normalizeKey(uri)];
+        if (val && val.length > 0) return val;
+    }
+
+    if (title && title.length > 1 && artist && artist.length > 1) {
+        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
+        NSString *val = dict[normalizeKey(combined)];
+        if (val && val.length > 0) return val;
+
+        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
+        NSString *val2 = dict[normalizeKey(combined2)];
+        if (val2 && val2.length > 0) return val2;
+    }
+
+    if (title && title.length > 1) {
+        NSString *val = dict[normalizeKey(title)];
+        if (val && val.length > 0) return val;
+    }
+
+    return nil;
+}
+
 static void saveOverride(NSString *trackKey, NSString *scUrl) {
     if (!trackKey) return;
     NSString *normKey = normalizeKey(trackKey);
@@ -351,9 +566,12 @@ static void saveOverride(NSString *trackKey, NSString *scUrl) {
 
     NSMutableDictionary *dict = loadAllOverrides();
     if (scUrl && scUrl.length > 0) {
-        dict[normKey] = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *cleanVal = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        dict[normKey] = cleanVal;
+        syncPushToCloud(normKey, cleanVal, NO);
     } else {
         [dict removeObjectForKey:normKey];
+        syncPushToCloud(normKey, @"", NO);
     }
     persistOverrides(dict);
 }
@@ -392,14 +610,6 @@ static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *a
     }
 
     return nil;
-}
-
-static NSString *getServerURL(void) {
-    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:DEFAULTS_SERVER_KEY];
-    if (!url || url.length == 0) {
-        return DEFAULT_SERVER_URL;
-    }
-    return [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
 }
 
 #pragma mark - Direct Stream Cache & Resolution Engine (Zero Cooldown!)
@@ -690,6 +900,23 @@ static void safeSeekPlayerToTime(double targetSeconds) {
                         [ourAudioPlayer play];
                     }
                 }
+                // Плавное нарастание громкости при старте трека (0.0 -> 1.0 за 0.25 сек)
+                ourAudioPlayer.volume = 0.0f;
+                const int steps = 8;
+                for (int i = 1; i <= steps; i++) {
+                    float v = (float)i / (float)steps;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (ourAudioPlayer) {
+                            ourAudioPlayer.volume = v;
+                        }
+                    });
+                }
+            });
+        } else if (item.status == AVPlayerItemStatusFailed) {
+            NSLog(@"[AntiCensor] AVPlayerItem failed: %@. Reverting to Spotify audio!", item.error);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Гарантированно возвращаем звук Spotify при сбое потока
+                stopReplacementAudio();
             });
         }
     }
@@ -712,8 +939,18 @@ static void stopReplacementAudio(void) {
             } @catch (id ex) {}
             isObservingPlayerItem = NO;
         }
-        [ourAudioPlayer pause];
+        AVPlayer *p = ourAudioPlayer;
         ourAudioPlayer = nil;
+        // Мягкое угасание предыдущего плеера
+        for (int i = 1; i <= 5; i++) {
+            float v = 1.0f - ((float)i / 5.0f);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                p.volume = v;
+                if (v <= 0.05f) {
+                    [p pause];
+                }
+            });
+        }
     }
 
     isMutingSpotify = NO;
@@ -764,9 +1001,178 @@ static void updateNowPlayingCenter(void) {
     g_isUpdatingNowPlaying = NO;
 }
 
+static void checkAndSyncLyricsOnScreen(void) {
+    NSArray *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *win in windows) {
+        if (!win || win.hidden) continue;
+
+        UILabel *bannerLabel = nil;
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UILabel class]]) {
+                UILabel *lbl = (UILabel *)v;
+                NSString *txt = [lbl.text lowercaseString];
+                if (txt.length > 0 && ([txt containsString:@"синхронизация текста"] || [txt containsString:@"lyrics aren't synced"])) {
+                    bannerLabel = lbl;
+                    break;
+                }
+            }
+            [queue addObjectsFromArray:v.subviews];
+        }
+
+        if (!bannerLabel || bannerLabel.hidden || bannerLabel.alpha < 0.1) continue;
+
+        // 1. Обновляем статус плашки
+        bannerLabel.text = @"⚡ Синхронизировано через AntiCensor";
+        bannerLabel.textColor = [UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0];
+
+        // 2. Ищем родительский или соседний UIScrollView со строками текста
+        UIScrollView *scrollView = nil;
+        UIView *curr = bannerLabel;
+        while (curr && curr != win) {
+            if ([curr isKindOfClass:[UIScrollView class]]) {
+                scrollView = (UIScrollView *)curr;
+                break;
+            }
+            curr = curr.superview;
+        }
+
+        if (!scrollView) {
+            UIView *parent = bannerLabel.superview;
+            while (parent && parent != win) {
+                for (UIView *s in parent.subviews) {
+                    if ([s isKindOfClass:[UIScrollView class]]) {
+                        scrollView = (UIScrollView *)s;
+                        break;
+                    }
+                }
+                if (scrollView) break;
+                parent = parent.superview;
+            }
+        }
+
+        if (!scrollView) continue;
+
+        // 3. Собираем все строки текста
+        NSMutableArray<UILabel *> *lineLabels = [NSMutableArray array];
+        NSMutableArray *vQueue = [NSMutableArray arrayWithObject:scrollView];
+        while (vQueue.count > 0) {
+            UIView *v = vQueue.firstObject;
+            [vQueue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UILabel class]]) {
+                UILabel *lbl = (UILabel *)v;
+                if (lbl != bannerLabel && lbl.text.length > 1) {
+                    NSString *t = lbl.text;
+                    if (![t isEqualToString:@"✕"] && ![t isEqualToString:@"<"] && ![t isEqualToString:@"..."]) {
+                        [lineLabels addObject:lbl];
+                    }
+                }
+            } else {
+                [vQueue addObjectsFromArray:v.subviews];
+            }
+        }
+
+        if (lineLabels.count < 2) continue;
+
+        [lineLabels sortUsingComparator:^NSComparisonResult(UILabel *a, UILabel *b) {
+            CGRect fA = [a convertRect:a.bounds toView:scrollView];
+            CGRect fB = [b convertRect:b.bounds toView:scrollView];
+            if (fA.origin.y < fB.origin.y) return NSOrderedAscending;
+            if (fA.origin.y > fB.origin.y) return NSOrderedDescending;
+            return NSOrderedSame;
+        }];
+
+        // 4. Текущее время и длительность трека
+        double currentTime = 0.0;
+        double duration = 0.0;
+        if (ourAudioPlayer) {
+            currentTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+            duration = CMTimeGetSeconds(ourAudioPlayer.currentItem.duration);
+        } else {
+            currentTime = getCurrentSpotifyPreciseTime();
+            MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+            NSNumber *durNum = center.nowPlayingInfo[MPMediaItemPropertyPlaybackDuration];
+            if (durNum && [durNum doubleValue] > 0) {
+                duration = [durNum doubleValue];
+            }
+        }
+
+        if (isnan(currentTime) || currentTime < 0) currentTime = 0;
+        if (isnan(duration) || duration <= 10.0) duration = 180.0;
+
+        // 5. Вычисляем активную строку караоке
+        NSUInteger count = lineLabels.count;
+        double intro = MIN(10.0, duration * 0.06);
+        double outro = MAX(duration - 12.0, duration * 0.92);
+        double singDuration = MAX(10.0, outro - intro);
+
+        double totalWeight = 0.0;
+        double weights[count];
+        for (NSUInteger i = 0; i < count; i++) {
+            double w = MAX(14.0, (double)lineLabels[i].text.length);
+            weights[i] = w;
+            totalWeight += w;
+        }
+
+        NSUInteger activeIdx = 0;
+        double accumWeight = 0.0;
+        for (NSUInteger i = 0; i < count; i++) {
+            double lineStart = intro + (singDuration * (accumWeight / totalWeight));
+            accumWeight += weights[i];
+            if (currentTime >= lineStart) {
+                activeIdx = i;
+            } else {
+                break;
+            }
+        }
+
+        // 6. Подсветка активной строки
+        for (NSUInteger i = 0; i < count; i++) {
+            UILabel *lbl = lineLabels[i];
+            if (i == activeIdx) {
+                lbl.textColor = [UIColor whiteColor];
+                lbl.alpha = 1.0f;
+                lbl.transform = CGAffineTransformMakeScale(1.04f, 1.04f);
+            } else {
+                lbl.textColor = [UIColor whiteColor];
+                lbl.alpha = 0.38f;
+                lbl.transform = CGAffineTransformIdentity;
+            }
+        }
+
+        // 7. Плавный автоскролл
+        if (!scrollView.isDragging && !scrollView.isDecelerating) {
+            UILabel *activeLbl = lineLabels[activeIdx];
+            CGRect f = [activeLbl convertRect:activeLbl.bounds toView:scrollView];
+            CGFloat targetY = f.origin.y - (scrollView.bounds.size.height * 0.40);
+            CGFloat maxY = scrollView.contentSize.height - scrollView.bounds.size.height;
+            if (targetY < 0) targetY = 0;
+            if (targetY > maxY) targetY = maxY;
+
+            if (fabs(scrollView.contentOffset.y - targetY) > 20.0) {
+                [scrollView setContentOffset:CGPointMake(0, targetY) animated:YES];
+            }
+        }
+
+        break;
+    }
+}
+
 static void onPeriodicSyncCheck(NSTimer *timer) {
     // 0. Инжектим кнопку в боковое меню профиля только при его открытии, и вычищаем любые фантомные элементы
     checkAndInjectProfileDrawerButton();
+
+    // 1. Проверяем и синхронизируем текст песни в реальном времени (караоке)
+    checkAndSyncLyricsOnScreen();
+
+    // 2. Периодический фоновый Cloud Sync каждые 60 секунд (каждые 240 тиков по 0.25 сек)
+    static int s_cloudSyncCounter = 0;
+    if (++s_cloudSyncCounter >= 240) {
+        s_cloudSyncCounter = 0;
+        syncPullFromCloud(nil);
+    }
 
     if (!ourAudioPlayer) return;
 
@@ -817,7 +1223,6 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     applyMuteStateToAllUnits(); // Spotify в полном мьюте
 
     // КРИТИЧНО ДЛЯ DYNAMIC ISLAND И LOCK SCREEN:
-    // Ни в коем случае НЕ используем MixWithOthers! MixWithOthers отключает Dynamic Island и Now Playing!
     AVAudioSession *session = [AVAudioSession sharedInstance];
     [session setCategory:AVAudioSessionCategoryPlayback
              withOptions:AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowAirPlay
@@ -842,6 +1247,9 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
         isObservingPlayerItem = YES;
         ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
+        if (@available(iOS 10.0, *)) {
+            ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
+        }
         ourAudioPlayer.volume = 1.0f;
     }
 
@@ -858,20 +1266,14 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
         return;
     }
 
-    // 1. СТАРЫЙ ТРЕК ГЛУШИМ СРАЗУ ЖЕ, ЧТОБЫ ОН НЕ НАКЛАДЫВАЛСЯ!
-    if (ourAudioPlayer) {
-        [ourAudioPlayer pause];
-        ourAudioPlayer = nil;
-    }
-
-    // 2. SPOTIFY ГЛУШИМ СРАЗУ ЖЕ!
-    isMutingSpotify = YES;
-    applyMuteStateToAllUnits();
-
     currentPlayingKey = trackKey;
     isReplacementLoading = YES;
 
-    // Проверяем кэш (0 мс задержки!)
+    // Spotify глушим для заменяющего трека
+    isMutingSpotify = YES;
+    applyMuteStateToAllUnits();
+
+    // Быстрый кэш (0 мс задержки!)
     if (!g_streamCache) {
         g_streamCache = [NSMutableDictionary dictionary];
     }
@@ -880,6 +1282,20 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
         isReplacementLoading = NO;
         playStreamUrl(cached, trackKey, initialPosition);
         return;
+    }
+
+    // Мягкое угасание старого плеера, пока новый разрешается в сети (без резких щелчков!)
+    if (ourAudioPlayer) {
+        AVPlayer *oldP = ourAudioPlayer;
+        for (int i = 1; i <= 5; i++) {
+            float v = 1.0f - ((float)i / 5.0f);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                oldP.volume = v;
+                if (v <= 0.01f) {
+                    [oldP pause];
+                }
+            });
+        }
     }
 
     // Разрешаем в фоне
@@ -1008,30 +1424,49 @@ static void showManageAllTracksDialog(void) {
         UIViewController *topVC = getTopViewController();
         if (!topVC) return;
 
-        NSDictionary *all = loadAllOverrides();
-        if (all.count == 0) {
+        NSDictionary *allOverrides = loadAllOverrides();
+        NSDictionary *allLyrics = loadAllLyrics();
+
+        if (allOverrides.count == 0 && allLyrics.count == 0) {
             UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"AntiCensor Память"
-                                                                                message:@"Сохранённых замен пока нет."
+                                                                                message:@"Сохранённых замен и текстов пока нет."
                                                                          preferredStyle:UIAlertControllerStyleAlert];
             [emptyAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
             [topVC presentViewController:emptyAlert animated:YES completion:nil];
             return;
         }
 
-        UIAlertController *manageAlert = [UIAlertController alertControllerWithTitle:@"Все замены AntiCensor"
-                                                                             message:[NSString stringWithFormat:@"Всего сохранено: %lu треков", (unsigned long)all.count]
+        UIAlertController *manageAlert = [UIAlertController alertControllerWithTitle:@"База данных AntiCensor"
+                                                                             message:[NSString stringWithFormat:@"Замен треков: %lu | Текстов: %lu", (unsigned long)allOverrides.count, (unsigned long)allLyrics.count]
                                                                       preferredStyle:UIAlertControllerStyleActionSheet];
 
-        for (NSString *key in all) {
-            NSString *val = all[key];
+        UIAlertAction *cloudSyncAction = [UIAlertAction actionWithTitle:@"🌐 Синхронизировать всё с ПК" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            syncPullFromCloud(^(BOOL success, NSUInteger count) {
+                NSString *resMsg = success ? [NSString stringWithFormat:@"Синхронизация завершена!\nОбновлено элементов: %lu", (unsigned long)count] : @"Ошибка подключения к облаку.";
+                UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"🌐 AntiCensor Cloud" message:resMsg preferredStyle:UIAlertControllerStyleAlert];
+                [resAlert addAction:[UIAlertAction actionWithTitle:@"ОК" style:UIAlertActionStyleDefault handler:nil]];
+                [topVC presentViewController:resAlert animated:YES completion:nil];
+            });
+        }];
+        [manageAlert addAction:cloudSyncAction];
+
+        for (NSString *key in allOverrides) {
+            NSString *val = allOverrides[key];
             NSString *icon = [val hasPrefix:@"local://"] ? @"📁" : @"☁️";
-            NSString *rowTitle = [NSString stringWithFormat:@"%@ Удалить: %@", icon, key];
+            NSString *rowTitle = [NSString stringWithFormat:@"%@ Удалить замену: %@", icon, key];
             [manageAlert addAction:[UIAlertAction actionWithTitle:rowTitle style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
                 saveOverride(key, nil);
                 if ([normalizeKey(currentActiveSpotifyTrackTitle) isEqualToString:key] ||
                     [normalizeKey(currentActiveSpotifyTrackURI) isEqualToString:key]) {
                     stopReplacementAudio();
                 }
+            }]];
+        }
+
+        for (NSString *key in allLyrics) {
+            NSString *rowTitle = [NSString stringWithFormat:@"📝 Удалить текст: %@", key];
+            [manageAlert addAction:[UIAlertAction actionWithTitle:rowTitle style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+                saveLyricsForTrack(key, nil);
             }]];
         }
 
@@ -1042,6 +1477,13 @@ static void showManageAllTracksDialog(void) {
         }]];
 
         [manageAlert addAction:[UIAlertAction actionWithTitle:@"Закрыть" style:UIAlertActionStyleCancel handler:nil]];
+
+        if (manageAlert.popoverPresentationController) {
+            manageAlert.popoverPresentationController.sourceView = topVC.view;
+            manageAlert.popoverPresentationController.sourceRect = CGRectMake(topVC.view.bounds.size.width / 2.0, topVC.view.bounds.size.height / 2.0, 1, 1);
+            manageAlert.popoverPresentationController.permittedArrowDirections = 0;
+        }
+
         [topVC presentViewController:manageAlert animated:YES completion:nil];
     });
 }
@@ -1170,7 +1612,161 @@ static void openLocalAudioPicker(NSString *targetURI, NSString *targetTitle, NSS
     [topVC presentViewController:picker animated:YES completion:nil];
 }
 
-static void showReplacementDialogWithContext(NSString *targetURI, NSString *targetTitle, NSString *targetArtist) {
+static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *artist, NSString *displayTrack, NSString *existingUrl) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *topVC = getTopViewController();
+        if (!topVC) return;
+
+        NSString *disp = (displayTrack && displayTrack.length > 0) ? displayTrack : @"Текущий трек";
+        NSString *initialText = (existingUrl && ![existingUrl hasPrefix:@"local://"]) ? existingUrl : @"";
+
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"☁️ AntiCensor SoundCloud"
+                                                                        message:[NSString stringWithFormat:@"Трек: %@\n\nВведите ссылку на трек из SoundCloud:", disp]
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull tf) {
+            tf.placeholder = @"https://soundcloud.com/...";
+            tf.text = initialText;
+            tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        }];
+
+        UIAlertAction *pasteAction = [UIAlertAction actionWithTitle:@"📋 Вставить из буфера" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            NSString *clip = [UIPasteboard generalPasteboard].string;
+            if (clip && clip.length > 0) {
+                showSoundCloudInputPrompt(uri, title, artist, displayTrack, [clip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]);
+            } else {
+                showSoundCloudInputPrompt(uri, title, artist, displayTrack, initialText);
+            }
+        }];
+
+        UIAlertAction *saveAction = [UIAlertAction actionWithTitle:@"✓ Применить замену" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            NSString *inputUrl = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (inputUrl.length > 0) {
+                resolveSoundCloudUrl(inputUrl, ^(NSURL *u) {});
+
+                if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
+                    saveOverride(uri, inputUrl);
+                }
+                if (disp.length > 1) {
+                    saveOverride(disp, inputUrl);
+                }
+                if (title && title.length > 1) {
+                    saveOverride(title, inputUrl);
+                    if (artist && artist.length > 1) {
+                        saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
+                    }
+                }
+                startReplacementAudio(uri ?: (title ?: disp), inputUrl, getCurrentSpotifyPreciseTime());
+            }
+        }];
+
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil];
+
+        [alert addAction:pasteAction];
+        [alert addAction:saveAction];
+        [alert addAction:cancelAction];
+
+        [topVC presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+static void showLyricsEditPrompt(NSString *uri, NSString *title, NSString *artist, NSString *displayTrack, NSString *existingLyrics) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = getTopViewController();
+        if (!top) return;
+
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📝 Текст песни"
+                                                                        message:@"Вставьте текст песни (обычный или LRC с таймингами [00:15.20]):"
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull tf) {
+            tf.placeholder = @"Текст песни...";
+            tf.text = existingLyrics ?: @"";
+            tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        }];
+
+        UIAlertAction *pasteBtn = [UIAlertAction actionWithTitle:@"📋 Вставить из буфера" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            NSString *clip = [UIPasteboard generalPasteboard].string;
+            if (clip && clip.length > 0) {
+                showLyricsEditPrompt(uri, title, artist, displayTrack, clip);
+            }
+        }];
+
+        UIAlertAction *saveBtn = [UIAlertAction actionWithTitle:@"💾 Сохранить и синхронизировать" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            NSString *text = alert.textFields.firstObject.text;
+            if (text && text.length > 0) {
+                if (uri && [uri hasPrefix:@"spotify:track:"]) saveLyricsForTrack(uri, text);
+                if (title && title.length > 0) saveLyricsForTrack(title, text);
+                if (artist && title) saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], text);
+                if (displayTrack && displayTrack.length > 0) saveLyricsForTrack(displayTrack, text);
+            }
+        }];
+
+        UIAlertAction *cancelBtn = [UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil];
+
+        [alert addAction:pasteBtn];
+        [alert addAction:saveBtn];
+        [alert addAction:cancelBtn];
+
+        [top presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+static void showLyricsManagerDialog(NSString *targetURI, NSString *targetTitle, NSString *targetArtist, NSString *displayTrack) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = getTopViewController();
+        if (!top) return;
+
+        NSString *title = (targetTitle.length > 0) ? targetTitle : currentActiveSpotifyTrackTitle;
+        NSString *uri = (targetURI.length > 0) ? targetURI : currentActiveSpotifyTrackURI;
+        NSString *artist = (targetArtist.length > 0) ? targetArtist : currentActiveSpotifyTrackArtist;
+        NSString *disp = (displayTrack.length > 0) ? displayTrack : ((artist.length > 0 && title.length > 0) ? [NSString stringWithFormat:@"%@ — %@", artist, title] : (title ?: @"Текущий трек"));
+
+        NSString *currentLyrics = getLyricsForTrack(uri, title, artist);
+        BOOL hasLyrics = (currentLyrics && currentLyrics.length > 0);
+
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📝 Управление текстом (AntiCensor)"
+                                                                        message:[NSString stringWithFormat:@"Трек: %@\n%@", disp, hasLyrics ? @"\n✓ Для трека сохранён персональный текст." : @"\nТекст пока не сохранён вручную. Если у трека в Spotify текст не синхронизирован, AntiCensor автоматически синхронизирует его на экране в реальном времени."]
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+
+        UIAlertAction *editAction = [UIAlertAction actionWithTitle:hasLyrics ? @"✏️ Редактировать текст" : @"➕ Добавить / Вставить текст"
+                                                             style:UIAlertActionStyleDefault
+                                                           handler:^(UIAlertAction * _Nonnull a) {
+            showLyricsEditPrompt(uri, title, artist, disp, currentLyrics);
+        }];
+
+        UIAlertAction *syncAction = [UIAlertAction actionWithTitle:@"🌐 Загрузить текст с ПК (Облако)"
+                                                             style:UIAlertActionStyleDefault
+                                                           handler:^(UIAlertAction * _Nonnull a) {
+            syncPullFromCloud(^(BOOL success, NSUInteger count) {
+                NSString *msg = success ? [NSString stringWithFormat:@"Синхронизация завершена!\nОбновлено записей: %lu", (unsigned long)count] : @"Не удалось связаться с облаком.";
+                UIAlertController *res = [UIAlertController alertControllerWithTitle:@"🌐 AntiCensor Cloud" message:msg preferredStyle:UIAlertControllerStyleAlert];
+                [res addAction:[UIAlertAction actionWithTitle:@"ОК" style:UIAlertActionStyleDefault handler:nil]];
+                [top presentViewController:res animated:YES completion:nil];
+            });
+        }];
+
+        UIAlertAction *deleteAction = nil;
+        if (hasLyrics) {
+            deleteAction = [UIAlertAction actionWithTitle:@"🗑️ Удалить этот текст" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull a) {
+                saveLyricsForTrack(uri ?: (title ?: disp), nil);
+                if (title && title.length > 0) saveLyricsForTrack(title, nil);
+                if (artist && title) saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
+            }];
+        }
+
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Закрыть" style:UIAlertActionStyleCancel handler:nil];
+
+        [alert addAction:editAction];
+        [alert addAction:syncAction];
+        if (deleteAction) [alert addAction:deleteAction];
+        [alert addAction:cancelAction];
+
+        [top presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targetTitle, NSString *targetArtist) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *topVC = getTopViewController();
         if (!topVC) return;
@@ -1181,116 +1777,106 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
 
         NSString *displayTrack = @"";
         if (title && title.length > 0) {
-            displayTrack = (artist && artist.length > 0) ? [NSString stringWithFormat:@"%@ - %@", artist, title] : title;
+            displayTrack = (artist && artist.length > 0) ? [NSString stringWithFormat:@"%@ — %@", artist, title] : title;
         } else if (uri && uri.length > 0) {
             displayTrack = uri;
+        } else {
+            displayTrack = @"Текущий трек Spotify";
         }
 
         NSString *existingUrl = getOverrideForTrack(uri, title, artist) ?: @"";
-        NSString *clip = [UIPasteboard generalPasteboard].string;
-        NSString *defaultUrl = existingUrl;
-        if (defaultUrl.length == 0 && clip && ([clip hasPrefix:@"http://"] || [clip hasPrefix:@"https://"])) {
-            defaultUrl = [clip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        }
+        NSString *existingLyrics = getLyricsForTrack(uri, title, artist) ?: @"";
 
-        NSString *dialogMsg = @"Выбери аудиофайл с устройства или вставь SoundCloud ссылку:";
+        NSString *statusDesc = @"🎵 Звук: Оригинал Spotify";
         if ([existingUrl hasPrefix:@"local://"]) {
-            dialogMsg = @"📁 Сейчас подключен локальный файл с устройства!\nМожно выбрать другой файл или вставить SoundCloud ссылку:";
+            statusDesc = @"📁 Звук: Заменено файлом с устройства";
         } else if (existingUrl.length > 0) {
-            dialogMsg = @"☁️ Сейчас подключен трек из SoundCloud!\nМожно заменить его локальным файлом или обновить ссылку:";
+            statusDesc = @"☁️ Звук: Заменено на SoundCloud";
+        }
+        if (existingLyrics.length > 0) {
+            statusDesc = [statusDesc stringByAppendingString:@"\n📝 Текст: Добавлен свой текст"];
         }
 
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AntiCensor Замена"
-                                                                        message:dialogMsg
-                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"⚡ AntiCensor"
+                                                                       message:[NSString stringWithFormat:@"%@\n\n%@", displayTrack, statusDesc]
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
 
-        [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull tfTitle) {
-            tfTitle.placeholder = @"Артист - Название трека";
-            tfTitle.text = displayTrack;
-            tfTitle.clearButtonMode = UITextFieldViewModeWhileEditing;
+        // 1. Файл с устройства
+        UIAlertAction *localFileAction = [UIAlertAction actionWithTitle:@"📁 Загрузить файл с устройства (MP3/M4A/WAV)"
+                                                                  style:UIAlertActionStyleDefault
+                                                                handler:^(UIAlertAction * _Nonnull a) {
+            openLocalAudioPicker(uri, title, artist, displayTrack);
         }];
 
-        [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull tfUrl) {
-            tfUrl.placeholder = @"https://soundcloud.com/...";
-            tfUrl.text = defaultUrl;
-            tfUrl.clearButtonMode = UITextFieldViewModeWhileEditing;
+        // 2. SoundCloud
+        UIAlertAction *scAction = [UIAlertAction actionWithTitle:@"☁️ Заменить на трек из SoundCloud"
+                                                           style:UIAlertActionStyleDefault
+                                                         handler:^(UIAlertAction * _Nonnull a) {
+            showSoundCloudInputPrompt(uri, title, artist, displayTrack, existingUrl);
         }];
 
-        UIAlertAction *saveAction = [UIAlertAction actionWithTitle:@"Сохранить замену" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-            NSString *inputTrack = [alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            NSString *inputUrl = [alert.textFields[1].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        // 3. Текст песни
+        UIAlertAction *lyricsAction = [UIAlertAction actionWithTitle:@"📝 Текст песни (Синхронизация / Добавить свой)"
+                                                               style:UIAlertActionStyleDefault
+                                                             handler:^(UIAlertAction * _Nonnull a) {
+            showLyricsManagerDialog(uri, title, artist, displayTrack);
+        }];
 
-            if (inputUrl.length > 0) {
-                resolveSoundCloudUrl(inputUrl, ^(NSURL *u) {});
+        // 4. Синхронизация с ПК
+        UIAlertAction *cloudSyncAction = [UIAlertAction actionWithTitle:@"🌐 Синхронизировать с ПК прямо сейчас"
+                                                                 style:UIAlertActionStyleDefault
+                                                               handler:^(UIAlertAction * _Nonnull a) {
+            syncPullFromCloud(^(BOOL success, NSUInteger count) {
+                NSString *resMsg = success ? [NSString stringWithFormat:@"Синхронизация успешна!\nОбновлено элементов: %lu", (unsigned long)count] : @"Не удалось подключиться к облаку.\nПроверьте интернет.";
+                UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"🌐 AntiCensor Cloud" message:resMsg preferredStyle:UIAlertControllerStyleAlert];
+                [resAlert addAction:[UIAlertAction actionWithTitle:@"Отлично" style:UIAlertActionStyleDefault handler:nil]];
+                [topVC presentViewController:resAlert animated:YES completion:nil];
+            });
+        }];
 
-                if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
-                    saveOverride(uri, inputUrl);
-                }
-                if (inputTrack.length > 1) {
-                    saveOverride(inputTrack, inputUrl);
-                }
-                if (title && title.length > 1) {
-                    saveOverride(title, inputUrl);
-                    if (artist && artist.length > 1) {
-                        saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
-                    }
-                }
-                startReplacementAudio(uri ?: (title ?: inputTrack), inputUrl, getCurrentSpotifyPreciseTime());
-            } else {
+        // 5. Удалить замену (если есть)
+        UIAlertAction *removeOverrideAction = nil;
+        if (existingUrl.length > 0) {
+            removeOverrideAction = [UIAlertAction actionWithTitle:@"🗑️ Сбросить замену звука (Оригинал Spotify)"
+                                                            style:UIAlertActionStyleDestructive
+                                                          handler:^(UIAlertAction * _Nonnull a) {
                 if (uri && uri.length > 5) saveOverride(uri, nil);
-                if (inputTrack.length > 1) saveOverride(inputTrack, nil);
+                if (displayTrack.length > 1) saveOverride(displayTrack, nil);
                 if (title && title.length > 1) saveOverride(title, nil);
+                if (artist && title) saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
                 stopReplacementAudio();
-            }
-        }];
+            }];
+        }
 
-        UIAlertAction *pickFileAction = [UIAlertAction actionWithTitle:@"📁 Выбрать MP3 / M4A с устройства" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-            NSString *inputTrack = [alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            openLocalAudioPicker(uri, title, artist, inputTrack.length > 0 ? inputTrack : displayTrack);
-        }];
-
-        UIAlertAction *manageAction = [UIAlertAction actionWithTitle:@"Список всех замен треков" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+        // 6. Список всех замен
+        UIAlertAction *manageAction = [UIAlertAction actionWithTitle:@"⚙️ Список всех замен и текстов"
+                                                               style:UIAlertActionStyleDefault
+                                                             handler:^(UIAlertAction * _Nonnull a) {
             showManageAllTracksDialog();
-        }];
-
-        BOOL isFloatHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_FLOAT_KEY];
-        NSString *floatBtnTitle = isFloatHidden ? @"Показать плавающую кнопку (⚡)" : @"Скрыть плавающую кнопку (⚡)";
-        UIAlertAction *toggleFloatAction = [UIAlertAction actionWithTitle:floatBtnTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
-            BOOL newHidden = !isFloatHidden;
-            [[NSUserDefaults standardUserDefaults] setBool:newHidden forKey:DEFAULTS_HIDE_FLOAT_KEY];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            if (floatingPillButton) {
-                floatingPillButton.hidden = newHidden;
-            }
-        }];
-
-        BOOL isBannerHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_BANNER_KEY];
-        NSString *bannerBtnTitle = isBannerHidden ? @"Показать зелёную плашку сверху" : @"Скрыть зелёную плашку сверху";
-        UIAlertAction *toggleBannerAction = [UIAlertAction actionWithTitle:bannerBtnTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
-            BOOL newHidden = !isBannerHidden;
-            [[NSUserDefaults standardUserDefaults] setBool:newHidden forKey:DEFAULTS_HIDE_BANNER_KEY];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-        }];
-
-        UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Сбросить замену этого трека" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-            if (uri && uri.length > 5) saveOverride(uri, nil);
-            if (displayTrack.length > 1) saveOverride(displayTrack, nil);
-            if (title && title.length > 1) saveOverride(title, nil);
-            stopReplacementAudio();
         }];
 
         UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil];
 
-        [alert addAction:pickFileAction];
-        [alert addAction:saveAction];
-        if (existingUrl.length > 0) [alert addAction:removeAction];
-        [alert addAction:manageAction];
-        [alert addAction:toggleFloatAction];
-        [alert addAction:toggleBannerAction];
-        [alert addAction:cancelAction];
+        [sheet addAction:localFileAction];
+        [sheet addAction:scAction];
+        [sheet addAction:lyricsAction];
+        [sheet addAction:cloudSyncAction];
+        if (removeOverrideAction) [sheet addAction:removeOverrideAction];
+        [sheet addAction:manageAction];
+        [sheet addAction:cancelAction];
 
-        [topVC presentViewController:alert animated:YES completion:nil];
+        if (sheet.popoverPresentationController) {
+            sheet.popoverPresentationController.sourceView = topVC.view;
+            sheet.popoverPresentationController.sourceRect = CGRectMake(topVC.view.bounds.size.width / 2.0, topVC.view.bounds.size.height / 2.0, 1, 1);
+            sheet.popoverPresentationController.permittedArrowDirections = 0;
+        }
+
+        [topVC presentViewController:sheet animated:YES completion:nil];
     });
+}
+
+static void showReplacementDialogWithContext(NSString *targetURI, NSString *targetTitle, NSString *targetArtist) {
+    showAntiCensorMainOptionsDialog(targetURI, targetTitle, targetArtist);
 }
 
 #pragma mark - Context Menu (3-Dots Menu) Accurate Extraction
@@ -1590,11 +2176,67 @@ static void checkAndInjectProfileDrawerButton(void) {
     }
 }
 
-static void addAntiCensorButtonToContextMenu(UIViewController *sheetVC) {
-    if (!sheetVC || !sheetVC.isViewLoaded) return;
-    BOOL isBannerHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_BANNER_KEY];
-    if (isBannerHidden) return;
+static UIView *createContextMenuActionRow(CGRect frame, NSString *uri, NSString *title, NSString *artist, UIViewController *sheetVC) {
+    UIView *row = [[UIView alloc] initWithFrame:frame];
+    row.tag = 778899;
+    row.backgroundColor = [UIColor clearColor];
+    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = row.bounds;
+    btn.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    btn.contentEdgeInsets = UIEdgeInsetsMake(0, 18, 0, 18);
+    [btn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(18, (frame.size.height - 24) / 2.0, 24, 24)];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.tintColor = [UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0];
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightMedium];
+        iconView.image = [UIImage systemImageNamed:@"bolt.fill" withConfiguration:cfg];
+    }
+
+    CGFloat textLeft = iconView.image ? 54.0 : 18.0;
+    CGFloat textWidth = frame.size.width - textLeft - 16.0;
+
+    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 8, textWidth, 22)];
+    titleLabel.text = @"⚡ AntiCensor (Замена / Текст)";
+    titleLabel.textColor = [UIColor whiteColor];
+    titleLabel.font = [UIFont systemFontOfSize:15.5f weight:UIFontWeightMedium];
+    titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UILabel *subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 30, textWidth, 16)];
+    NSString *existingUrl = getOverrideForTrack(uri, title, artist);
+    if ([existingUrl hasPrefix:@"local://"]) {
+        subtitleLabel.text = @"Заменено: файл с устройства";
+        subtitleLabel.textColor = [UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0];
+    } else if (existingUrl.length > 0) {
+        subtitleLabel.text = @"Заменено: SoundCloud";
+        subtitleLabel.textColor = [UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0];
+    } else {
+        subtitleLabel.text = @"Оригинал Spotify • Нажмите для настройки";
+        subtitleLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
+    }
+    subtitleLabel.font = [UIFont systemFontOfSize:12.0f weight:UIFontWeightRegular];
+    subtitleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    if (iconView.image) {
+        [row addSubview:iconView];
+    }
+    [row addSubview:titleLabel];
+    [row addSubview:subtitleLabel];
+    [row addSubview:btn];
+
+    if (uri) objc_setAssociatedObject(btn, &kAntiCensorUriKey, uri, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (title) objc_setAssociatedObject(btn, &kAntiCensorTitleKey, title, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (artist) objc_setAssociatedObject(btn, &kAntiCensorArtistKey, artist, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    return row;
+}
+
+static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
+    if (!sheetVC || !sheetVC.isViewLoaded) return;
     UIView *container = sheetVC.view;
     if ([container viewWithTag:778899]) return;
 
@@ -1603,55 +2245,82 @@ static void addAntiCensorButtonToContextMenu(UIViewController *sheetVC) {
     NSString *extractedArtist = nil;
     extractBestTrackInfo(sheetVC, &extractedURI, &extractedTitle, &extractedArtist);
 
-    UIView *bannerView = [[UIView alloc] init];
-    bannerView.tag = 778899;
-    bannerView.translatesAutoresizingMaskIntoConstraints = NO;
-    bannerView.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:1.0];
-    bannerView.layer.cornerRadius = 22.0f;
-    bannerView.layer.masksToBounds = YES;
+    // 1. Проверяем UITableView (в Spotify контекстное меню строится на базе UITableView)
+    UITableView *targetTableView = nil;
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:container];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UITableView class]]) {
+            targetTableView = (UITableView *)v;
+            break;
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
 
-    UIButton *mainBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    mainBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [mainBtn setTitle:@"⚡ Заменить на SoundCloud (AntiCensor)" forState:UIControlStateNormal];
-    [mainBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    mainBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13.5f];
+    if (targetTableView) {
+        CGFloat rowW = targetTableView.bounds.size.width;
+        if (rowW < 100) rowW = container.bounds.size.width;
 
-    if (extractedURI) objc_setAssociatedObject(mainBtn, &kAntiCensorUriKey, extractedURI, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (extractedTitle) objc_setAssociatedObject(mainBtn, &kAntiCensorTitleKey, extractedTitle, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (extractedArtist) objc_setAssociatedObject(mainBtn, &kAntiCensorArtistKey, extractedArtist, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIView *existingHeader = targetTableView.tableHeaderView;
+        CGFloat existH = existingHeader ? existingHeader.bounds.size.height : 0.0;
 
-    [mainBtn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-    [bannerView addSubview:mainBtn];
+        UIView *newHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, existH + 54.0)];
+        newHeader.tag = 778899;
+        newHeader.backgroundColor = [UIColor clearColor];
 
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    closeBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.8] forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15.0f];
-    [closeBtn addTarget:sheetVC action:@selector(anticensor_bannerCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [bannerView addSubview:closeBtn];
+        if (existingHeader) {
+            existingHeader.frame = CGRectMake(0, 0, rowW, existH);
+            [newHeader addSubview:existingHeader];
+        }
 
-    [container addSubview:bannerView];
+        UIView *actionRow = createContextMenuActionRow(CGRectMake(0, existH, rowW, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
+        [newHeader addSubview:actionRow];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [bannerView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
-        [bannerView.topAnchor constraintEqualToAnchor:container.safeAreaLayoutGuide.topAnchor constant:10.0],
-        [bannerView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12.0],
-        [bannerView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12.0],
-        [bannerView.heightAnchor constraintEqualToConstant:44.0],
+        targetTableView.tableHeaderView = newHeader;
+        return;
+    }
 
-        [mainBtn.leadingAnchor constraintEqualToAnchor:bannerView.leadingAnchor constant:10.0],
-        [mainBtn.trailingAnchor constraintEqualToAnchor:closeBtn.leadingAnchor constant:-5.0],
-        [mainBtn.topAnchor constraintEqualToAnchor:bannerView.topAnchor],
-        [mainBtn.bottomAnchor constraintEqualToAnchor:bannerView.bottomAnchor],
+    // 2. Ищем текстовую метку "Поделиться" / "Share" для вставки прямо над ней
+    UILabel *shareLabel = nil;
+    queue = [NSMutableArray arrayWithObject:container];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)v;
+            NSString *txt = [lbl.text lowercaseString];
+            if ([txt containsString:@"поделиться"] || [txt isEqualToString:@"share"]) {
+                shareLabel = lbl;
+                break;
+            }
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
 
-        [closeBtn.trailingAnchor constraintEqualToAnchor:bannerView.trailingAnchor constant:-10.0],
-        [closeBtn.widthAnchor constraintEqualToConstant:32.0],
-        [closeBtn.topAnchor constraintEqualToAnchor:bannerView.topAnchor],
-        [closeBtn.bottomAnchor constraintEqualToAnchor:bannerView.bottomAnchor]
-    ]];
-
-    [container bringSubviewToFront:bannerView];
+    if (shareLabel) {
+        UIView *rowView = shareLabel;
+        while (rowView.superview && rowView.superview != container && rowView.bounds.size.height < 90.0) {
+            rowView = rowView.superview;
+        }
+        UIView *parent = rowView.superview ?: container;
+        if ([parent isKindOfClass:[UIStackView class]]) {
+            UIStackView *sv = (UIStackView *)parent;
+            NSUInteger idx = [sv.arrangedSubviews indexOfObject:rowView];
+            UIView *actionRow = createContextMenuActionRow(CGRectZero, extractedURI, extractedTitle, extractedArtist, sheetVC);
+            actionRow.translatesAutoresizingMaskIntoConstraints = NO;
+            [sv insertArrangedSubview:actionRow atIndex:idx];
+            [NSLayoutConstraint activateConstraints:@[
+                [actionRow.heightAnchor constraintEqualToConstant:54.0]
+            ]];
+            return;
+        } else {
+            CGRect rowFrame = [rowView convertRect:rowView.bounds toView:parent];
+            UIView *actionRow = createContextMenuActionRow(CGRectMake(rowFrame.origin.x, MAX(0, rowFrame.origin.y - 54.0), rowFrame.size.width, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
+            [parent addSubview:actionRow];
+            return;
+        }
+    }
 }
 
 static void anticensor_onContextMenuButtonTap(UIViewController *callerVC, SEL _cmd, UIButton *sender) {
@@ -1659,7 +2328,7 @@ static void anticensor_onContextMenuButtonTap(UIViewController *callerVC, SEL _c
     NSString *title = objc_getAssociatedObject(sender, &kAntiCensorTitleKey);
     NSString *artist = objc_getAssociatedObject(sender, &kAntiCensorArtistKey);
     [callerVC dismissViewControllerAnimated:YES completion:^{
-        showReplacementDialogWithContext(uri, title, artist);
+        showAntiCensorMainOptionsDialog(uri, title, artist);
     }];
 }
 
@@ -1679,10 +2348,10 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
         }
         if (!hasAction) {
             NSString *uri = extractTrackURIFromObject(alert, 0) ?: currentActiveSpotifyTrackURI;
-            [alert addAction:[UIAlertAction actionWithTitle:@"⚡ Заменить на SoundCloud (AntiCensor)"
+            [alert addAction:[UIAlertAction actionWithTitle:@"⚡ AntiCensor (Замена / Текст)"
                                                       style:UIAlertActionStyleDefault
                                                     handler:^(UIAlertAction * _Nonnull a) {
-                showReplacementDialogWithContext(uri, nil, nil);
+                showAntiCensorMainOptionsDialog(uri, nil, nil);
             }]];
         }
     } else {
@@ -1692,14 +2361,14 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
             ![cls containsString:@"Lyrics"] &&
             ![cls containsString:@"Player"] &&
             ![cls containsString:@"Contained"] &&
-            ([cls containsString:@"ContextMenu"] || [cls containsString:@"Action"] || [cls containsString:@"Sheet"] || [cls containsString:@"Option"])) {
+            ([cls containsString:@"ContextMenu"] || [cls containsString:@"Action"] || [cls containsString:@"Sheet"] || [cls containsString:@"Option"] || [cls containsString:@"Popup"])) {
             
-            BOOL isBannerHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_BANNER_KEY];
-            if (!isBannerHidden) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    addAntiCensorButtonToContextMenu(vcToPresent);
-                });
-            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                addAntiCensorRowToContextMenu(vcToPresent);
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                addAntiCensorRowToContextMenu(vcToPresent);
+            });
         }
     }
 
@@ -1711,13 +2380,13 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
 static UIMenu * (*orig_menuWithTitle_image_identifier_options_children)(id, SEL, NSString *, UIImage *, id, NSUInteger, NSArray *);
 static UIMenu * custom_menuWithTitle_image_identifier_options_children(id target, SEL _cmd, NSString *title, UIImage *image, id identifier, NSUInteger options, NSArray *children) {
     if (children && children.count > 0) {
-        UIAction *action = [UIAction actionWithTitle:@"⚡ Заменить на SoundCloud (AntiCensor)"
-                                               image:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"]
+        UIAction *action = [UIAction actionWithTitle:@"⚡ AntiCensor (Замена / Текст)"
+                                               image:[UIImage systemImageNamed:@"bolt.fill"]
                                           identifier:@"com.anticensor.action"
                                              handler:^(UIAction *a) {
-            showReplacementDialogWithContext(nil, title, nil);
+            showAntiCensorMainOptionsDialog(nil, title, nil);
         }];
-        children = [children arrayByAddingObject:action];
+        children = [@[action] arrayByAddingObjectsFromArray:children];
     }
     if (orig_menuWithTitle_image_identifier_options_children) {
         return orig_menuWithTitle_image_identifier_options_children(target, _cmd, title, image, identifier, options, children);
@@ -1792,7 +2461,7 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.9 (Smooth Scrub / Safe Seek + Dynamic Island)...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v4.0 (Cloud Sync + Native Context Menu + Lyrics Karaoke)...");
 
     // Инициализация аудиосессии для гарантированной поддержки Dynamic Island и экрана блокировки
     AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -1800,6 +2469,32 @@ __attribute__((constructor)) static void initAntiCensor(void) {
              withOptions:AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowAirPlay
                    error:nil];
     [session setActive:YES error:nil];
+
+    // Уведомления прерывания аудио (звонки, будильники, Siri) и восстановления
+    [[NSNotificationCenter defaultCenter] addObserverForName:AVAudioSessionInterruptionNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
+        if ([type unsignedIntegerValue] == AVAudioSessionInterruptionTypeEnded) {
+            NSNumber *opt = note.userInfo[AVAudioSessionInterruptionOptionKey];
+            if ([opt unsignedIntegerValue] & AVAudioSessionInterruptionOptionShouldResume) {
+                if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
+                    [ourAudioPlayer play];
+                }
+            }
+        }
+    }];
+
+    // Восстановление после буферизации
+    [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemPlaybackStalledNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
+            [ourAudioPlayer play];
+        }
+    }];
 
     // ОДНОКРАТНАЯ ПОЛНАЯ ОЧИСТКА БАЗЫ ДАННЫХ ОТ СТАРЫХ МУСОРНЫХ КЛЮЧЕЙ (WIPE CORRUPTED CACHE)
     BOOL isCleanedV35 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY];
@@ -1810,12 +2505,12 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
-    // v3.8 / v3.9: Чистка фантомных плашек, скрытие плавающей пилюли
-    BOOL isCleanedV39 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_39];
-    if (!isCleanedV39) {
+    // v4.0: Скрытие плавающей пилюли
+    BOOL isCleanedV40 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_40];
+    if (!isCleanedV40) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_BANNER_KEY];
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_HIDE_FLOAT_KEY];
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_39];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_40];
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
@@ -1884,7 +2579,12 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         class_addMethod(winClass, @selector(anticensor_drawerButtonTapped:), (IMP)anticensor_drawerButtonTapped, "v@:@");
     }
 
-    // 5. Фоновый высокочастотный таймер синхронизации и смены треков (каждые 250 мс)
+    // 5. Первоначальный Cloud Sync с ПК при старте
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        syncPullFromCloud(nil);
+    });
+
+    // 6. Фоновый высокочастотный таймер синхронизации и смены треков (каждые 250 мс)
     dispatch_async(dispatch_get_main_queue(), ^{
         periodicSyncTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
             onPeriodicSyncCheck(timer);
