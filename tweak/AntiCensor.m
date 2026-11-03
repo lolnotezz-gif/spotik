@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <MediaPlayer/MediaPlayer.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach-o/dyld.h>
@@ -19,6 +20,7 @@
 #define DEFAULTS_VERSION_KEY       @"AntiCensor_Storage_v3_5_Clean"
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
+#define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 #define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
 
@@ -196,6 +198,19 @@ static void recordAudioUnit(void *unit) {
     }
 }
 
+static void removeAudioUnit(void *unit) {
+    if (!unit) return;
+    for (int i = 0; i < g_activeUnitCount; i++) {
+        if (g_activeUnits[i] == unit) {
+            for (int j = i; j < g_activeUnitCount - 1; j++) {
+                g_activeUnits[j] = g_activeUnits[j + 1];
+            }
+            g_activeUnitCount--;
+            return;
+        }
+    }
+}
+
 typedef OSStatus (*AudioUnitSetParameter_t)(void *inUnit, uint32_t inID, uint32_t inScope, uint32_t inElement, float inValue, uint32_t inBufferOffsetInFrames);
 static AudioUnitSetParameter_t orig_AudioUnitSetParameter = NULL;
 
@@ -209,17 +224,22 @@ static void applyMuteStateToAllUnits(void) {
     for (int i = 0; i < g_activeUnitCount; i++) {
         void *u = g_activeUnits[i];
         if (u) {
-            orig_AudioUnitSetParameter(u, 0 /* kMultiChannelMixerParam_Volume */, 1 /* Input */, 0 /* Bus 0 */, vol, 0);
-            orig_AudioUnitSetParameter(u, 0, 1 /* Input */, 1 /* Bus 1 */, vol, 0);
-            orig_AudioUnitSetParameter(u, 0, 2 /* Output */, 0, vol, 0);
+            @try {
+                orig_AudioUnitSetParameter(u, 0 /* kMultiChannelMixerParam_Volume */, 1 /* Input */, 0 /* Bus 0 */, vol, 0);
+                orig_AudioUnitSetParameter(u, 0, 1 /* Input */, 1 /* Bus 1 */, vol, 0);
+                orig_AudioUnitSetParameter(u, 0, 2 /* Output */, 0, vol, 0);
+            } @catch (id ex) {}
         }
     }
 }
 
 static OSStatus custom_AudioUnitSetParameter(void *inUnit, uint32_t inID, uint32_t inScope, uint32_t inElement, float inValue, uint32_t inBufferOffsetInFrames) {
-    recordAudioUnit(inUnit);
-    if (isMutingSpotify && (inID == 0 /* kMultiChannelMixerParam_Volume */)) {
-        inValue = 0.0f; // Принудительный мьют: Spotify не может сам вернуть себе звук!
+    // Записываем только те юниты, для которых настраивается громкость (реальные микшеры)
+    if (inID == 0 /* kMultiChannelMixerParam_Volume */) {
+        recordAudioUnit(inUnit);
+        if (isMutingSpotify) {
+            inValue = 0.0f; // Принудительный мьют: Spotify не может сам вернуть себе звук!
+        }
     }
     return orig_AudioUnitSetParameter ? orig_AudioUnitSetParameter(inUnit, inID, inScope, inElement, inValue, inBufferOffsetInFrames) : 0;
 }
@@ -238,6 +258,13 @@ static OSStatus custom_AudioUnitInitialize(void *unit) {
     recordAudioUnit(unit);
     applyMuteStateToAllUnits();
     return orig_AudioUnitInitialize ? orig_AudioUnitInitialize(unit) : 0;
+}
+
+typedef OSStatus (*AudioComponentInstanceDispose_t)(void *inInstance);
+static AudioComponentInstanceDispose_t orig_AudioComponentInstanceDispose = NULL;
+static OSStatus custom_AudioComponentInstanceDispose(void *inInstance) {
+    removeAudioUnit(inInstance);
+    return orig_AudioComponentInstanceDispose ? orig_AudioComponentInstanceDispose(inInstance) : 0;
 }
 
 #pragma mark - Persistent JSON Storage with Strict Isolation
@@ -595,7 +622,51 @@ static void findSpotifyNowPlayingTrackInfo(NSString **outTitle, NSString **outAr
     }
 }
 
-#pragma mark - KVO Helper Object
+#pragma mark - KVO & Safe Player Seeking Engine
+
+static BOOL g_isPlayerSeeking = NO;
+static double g_pendingSeekTarget = -1.0;
+static BOOL g_isUpdatingNowPlaying = NO;
+
+static void updateNowPlayingCenter(void);
+static void safeSeekPlayerToTime(double targetSeconds);
+
+static void safeSeekPlayerToTime(double targetSeconds) {
+    if (!ourAudioPlayer) return;
+    if (isnan(targetSeconds) || targetSeconds < 0) return;
+
+    // Защита от заиканий и перегрузки: если плеер уже выполняет перемотку,
+    // просто запоминаем последнюю запрошенную точку и выполним её по окончании
+    if (g_isPlayerSeeking) {
+        g_pendingSeekTarget = targetSeconds;
+        return;
+    }
+
+    g_isPlayerSeeking = YES;
+    g_pendingSeekTarget = -1.0;
+
+    CMTime seekTime = CMTimeMakeWithSeconds(targetSeconds, NSEC_PER_SEC);
+    // Допуск 0.15 сек дает мгновенную, мягкую перемотку без треска и флуда декодера
+    CMTime tolerance = CMTimeMakeWithSeconds(0.15, NSEC_PER_SEC);
+
+    [ourAudioPlayer seekToTime:seekTime toleranceBefore:tolerance toleranceAfter:tolerance completionHandler:^(BOOL finished) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_isPlayerSeeking = NO;
+            if (g_pendingSeekTarget >= 0) {
+                double nextPos = g_pendingSeekTarget;
+                g_pendingSeekTarget = -1.0;
+                safeSeekPlayerToTime(nextPos);
+            } else {
+                if (isSpotifyCurrentlyPlaying && ourAudioPlayer) {
+                    if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+                        [ourAudioPlayer play];
+                    }
+                }
+                updateNowPlayingCenter();
+            }
+        });
+    }];
+}
 
 @interface AntiCensorPlayerObserver : NSObject
 @end
@@ -612,13 +683,8 @@ static void findSpotifyNowPlayingTrackInfo(NSString **outTitle, NSString **outAr
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
                 double targetSeconds = getCurrentSpotifyPreciseTime();
-                if (targetSeconds > 0.05) {
-                    CMTime seekTime = CMTimeMakeWithSeconds(targetSeconds, NSEC_PER_SEC);
-                    [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
-                        if (isSpotifyCurrentlyPlaying && ourAudioPlayer) {
-                            [ourAudioPlayer play];
-                        }
-                    }];
+                if (targetSeconds > 0.1) {
+                    safeSeekPlayerToTime(targetSeconds);
                 } else {
                     if (isSpotifyCurrentlyPlaying && ourAudioPlayer) {
                         [ourAudioPlayer play];
@@ -636,6 +702,8 @@ static AntiCensorPlayerObserver *g_playerObserver = nil;
 static void stopReplacementAudio(void) {
     isReplacementLoading = NO;
     currentPlayingKey = nil;
+    g_isPlayerSeeking = NO;
+    g_pendingSeekTarget = -1.0;
 
     if (ourAudioPlayer) {
         if (isObservingPlayerItem) {
@@ -654,33 +722,46 @@ static void stopReplacementAudio(void) {
 
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate);
 
+static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *);
+
 static void updateNowPlayingCenter(void) {
     if (!ourAudioPlayer) return;
-    MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
-    NSDictionary *curr = center.nowPlayingInfo;
-    NSMutableDictionary *info = curr ? [curr mutableCopy] : [NSMutableDictionary dictionary];
+    if (g_isUpdatingNowPlaying) return; // СТРОГАЯ ЗАЩИТА ОТ РЕКУРСИИ!
 
-    if (currentActiveSpotifyTrackTitle && currentActiveSpotifyTrackTitle.length > 0) {
-        info[MPMediaItemPropertyTitle] = currentActiveSpotifyTrackTitle;
-    }
-    if (currentActiveSpotifyTrackArtist && currentActiveSpotifyTrackArtist.length > 0) {
-        info[MPMediaItemPropertyArtist] = currentActiveSpotifyTrackArtist;
-    }
+    g_isUpdatingNowPlaying = YES;
+    @try {
+        MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+        NSDictionary *curr = center.nowPlayingInfo;
+        NSMutableDictionary *info = curr ? [curr mutableCopy] : [NSMutableDictionary dictionary];
 
-    double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-    if (!isnan(ourPos) && ourPos >= 0) {
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(ourPos);
-    }
+        if (currentActiveSpotifyTrackTitle && currentActiveSpotifyTrackTitle.length > 0) {
+            info[MPMediaItemPropertyTitle] = currentActiveSpotifyTrackTitle;
+        }
+        if (currentActiveSpotifyTrackArtist && currentActiveSpotifyTrackArtist.length > 0) {
+            info[MPMediaItemPropertyArtist] = currentActiveSpotifyTrackArtist;
+        }
 
-    double ourDur = CMTimeGetSeconds(ourAudioPlayer.currentItem.duration);
-    if (!isnan(ourDur) && ourDur > 0) {
-        info[MPMediaItemPropertyPlaybackDuration] = @(ourDur);
-    }
+        double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+        if (!isnan(ourPos) && ourPos >= 0) {
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(ourPos);
+        }
 
-    float rate = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) ? 1.0f : 0.0f;
-    info[MPNowPlayingInfoPropertyPlaybackRate] = @(rate);
+        double ourDur = CMTimeGetSeconds(ourAudioPlayer.currentItem.duration);
+        if (!isnan(ourDur) && ourDur > 0) {
+            info[MPMediaItemPropertyPlaybackDuration] = @(ourDur);
+        }
 
-    center.nowPlayingInfo = info;
+        float rate = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) ? 1.0f : 0.0f;
+        info[MPNowPlayingInfoPropertyPlaybackRate] = @(rate);
+
+        // Напрямую вызываем оригинальный метод, чтобы не проваливаться в собственный хук!
+        if (orig_setNowPlayingInfo) {
+            orig_setNowPlayingInfo(center, @selector(setNowPlayingInfo:), info);
+        } else {
+            center.nowPlayingInfo = info;
+        }
+    } @catch (id ex) {}
+    g_isUpdatingNowPlaying = NO;
 }
 
 static void onPeriodicSyncCheck(NSTimer *timer) {
@@ -709,18 +790,22 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
     double ourTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
     double diff = fabs(ourTime - spotifyTime);
 
-    // Сглаженный порог рассинхрона (1.2 сек), чтобы не было заиканий звука и скачков громкости
-    if (diff > 1.2) {
-        CMTime seekTime = CMTimeMakeWithSeconds(spotifyTime, NSEC_PER_SEC);
-        [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    // Сглаженный порог рассинхрона (1.5 сек), чтобы не было заиканий звука и скачков громкости
+    if (diff > 1.5 && !g_isPlayerSeeking) {
+        safeSeekPlayerToTime(spotifyTime);
     }
 
-    if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) {
+    if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
         [ourAudioPlayer play];
     }
 
-    // Синхронизируем Dynamic Island и экран блокировки
-    updateNowPlayingCenter();
+    // Синхронизируем Dynamic Island и экран блокировки (раз в секунду)
+    static NSTimeInterval lastNPUpdate = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - lastNPUpdate >= 1.0) {
+        lastNPUpdate = now;
+        updateNowPlayingCenter();
+    }
 }
 
 static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPosition) {
@@ -873,20 +958,18 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             double diff = fabs(ourPos - position);
             if (diff > 1.2) {
-                CMTime newTime = CMTimeMakeWithSeconds(position, NSEC_PER_SEC);
-                [ourAudioPlayer seekToTime:newTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+                safeSeekPlayerToTime(position);
             }
         }
-        if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) {
+        if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
             [ourAudioPlayer play];
         }
-        updateNowPlayingCenter();
     }
 }
 
-static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *);
 static void custom_setNowPlayingInfo(id target, SEL _cmd, NSDictionary *info) {
     if (orig_setNowPlayingInfo) orig_setNowPlayingInfo(target, _cmd, info);
+    if (g_isUpdatingNowPlaying) return; // СТРОГАЯ ЗАЩИТА: Не обрабатываем собственные вызовы!
     if (!info || ![info isKindOfClass:[NSDictionary class]]) return;
 
     NSString *title = nil;
@@ -1709,7 +1792,7 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.8 (Dynamic Island + Clean Drawer + Smooth Playback)...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.9 (Smooth Scrub / Safe Seek + Dynamic Island)...");
 
     // Инициализация аудиосессии для гарантированной поддержки Dynamic Island и экрана блокировки
     AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -1727,17 +1810,17 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
-    // v3.8: Чистка фантомных плашек, скрытие плавающей пилюли
-    BOOL isCleanedV38 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_38];
-    if (!isCleanedV38) {
+    // v3.8 / v3.9: Чистка фантомных плашек, скрытие плавающей пилюли
+    BOOL isCleanedV39 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_39];
+    if (!isCleanedV39) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_BANNER_KEY];
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_HIDE_FLOAT_KEY];
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_38];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_39];
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
-    // 1. CoreAudio мьютер микшера Spotify с полным перехватом AudioUnitSetParameter
-    struct rebinding audioRebind[3];
+    // 1. CoreAudio мьютер микшера Spotify с полным перехватом AudioUnitSetParameter и очисткой Dispose
+    struct rebinding audioRebind[4];
     audioRebind[0].name = "AudioOutputUnitStart";
     audioRebind[0].replacement = (void *)custom_AudioOutputUnitStart;
     audioRebind[0].replaced = (void **)&orig_AudioOutputUnitStart;
@@ -1750,7 +1833,11 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     audioRebind[2].replacement = (void *)custom_AudioUnitSetParameter;
     audioRebind[2].replaced = (void **)&orig_AudioUnitSetParameter;
 
-    ac_rebind_symbols(audioRebind, 3);
+    audioRebind[3].name = "AudioComponentInstanceDispose";
+    audioRebind[3].replacement = (void *)custom_AudioComponentInstanceDispose;
+    audioRebind[3].replaced = (void **)&orig_AudioComponentInstanceDispose;
+
+    ac_rebind_symbols(audioRebind, 4);
 
     // 2. Хук контекстного меню и обработчики UI
     Class respClass = objc_getClass("UIResponder");
