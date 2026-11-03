@@ -120,7 +120,19 @@ static void startReplacementAudio(NSString *trackURI, NSString *scUrl, double st
 static void showReplacementDialog(NSString *trackURI, NSString *trackTitle, id spotifyPlayer) {
     if (!trackURI) return;
 
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    UIWindow *window = nil;
+    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
+            for (UIWindow *w in scene.windows) {
+                if (w.isKeyWindow) { window = w; break; }
+            }
+        }
+        if (window) break;
+    }
+    if (!window) {
+        window = [UIApplication sharedApplication].windows.firstObject;
+    }
+
     UIViewController *topVC = window.rootViewController;
     while (topVC.presentedViewController) {
         topVC = topVC.presentedViewController;
@@ -129,7 +141,6 @@ static void showReplacementDialog(NSString *trackURI, NSString *trackTitle, id s
     NSDictionary *overrides = getOverrides();
     NSString *existingUrl = overrides[trackURI] ?: @"";
 
-    // Pre-fill with clipboard if it looks like a URL
     NSString *clip = [UIPasteboard generalPasteboard].string;
     NSString *defaultText = existingUrl;
     if ((defaultText.length == 0) && clip && ([clip hasPrefix:@"http://"] || [clip hasPrefix:@"https://"])) {
