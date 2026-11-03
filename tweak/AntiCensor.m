@@ -1294,44 +1294,56 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
     return items;
 }
 
-static UILabel *findLyricsTextLabelInView(UIView *root) {
+static UILabel *findUnsyncedLyricsIndicatorLabel(UIView *root) {
     if (!root || root.hidden || root.alpha < 0.05) return nil;
     if (root.tag == KARAOKE_CONTAINER_TAG) return nil;
 
     if ([root isKindOfClass:[UILabel class]]) {
         UILabel *lbl = (UILabel *)root;
-        NSString *txt = lbl.text;
-        if (txt.length >= 18) {
-            NSString *low = [txt lowercaseString];
-            if (![low containsString:@"синхронизация"] &&
-                ![low containsString:@"lyrics aren't"] &&
-                ![low containsString:@"любимые треки"] &&
-                ![low containsString:@"плейлист"] &&
-                ![low containsString:@"поделиться"] &&
-                ![low containsString:@"настройки"] &&
-                ![low containsString:@"конфиденциальность"] &&
-                ![low containsString:@"статистика"]) {
-                return lbl;
-            }
+        NSString *txt = [lbl.text lowercaseString];
+        if ([txt containsString:@"синхронизация текста"] ||
+            [txt containsString:@"lyrics aren't synced"] ||
+            [txt containsString:@"lyrics are not synced"]) {
+            return lbl;
         }
     }
     for (UIView *sub in root.subviews) {
-        UILabel *found = findLyricsTextLabelInView(sub);
+        UILabel *found = findUnsyncedLyricsIndicatorLabel(sub);
         if (found) return found;
     }
     return nil;
 }
 
-static UIScrollView *findEnclosingLyricsScrollView(UIView *lyricsLabel) {
-    UIView *cur = lyricsLabel.superview;
-    while (cur) {
-        if ([cur isKindOfClass:[UIScrollView class]]) {
-            UIScrollView *sv = (UIScrollView *)cur;
-            if (sv.bounds.size.height > 200.0) {
-                return sv;
+static UIScrollView *findLyricsScrollViewInView(UIView *root) {
+    if (!root || root.hidden || root.alpha < 0.05) return nil;
+    if (root.tag == KARAOKE_CONTAINER_TAG) return nil;
+
+    // 1. По явному индикатору "Синхронизация текста с музыкой пока не настроена"
+    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(root);
+    if (indicator) {
+        UIView *cur = indicator.superview;
+        while (cur && cur != root) {
+            if ([cur isKindOfClass:[UIScrollView class]] && cur.bounds.size.height > 150.0) {
+                return (UIScrollView *)cur;
+            }
+            cur = cur.superview;
+        }
+    }
+
+    // 2. Либо проверяем, содержит ли класс "Lyrics"
+    if ([root isKindOfClass:[UIScrollView class]]) {
+        NSString *cls = [NSStringFromClass([root class]) lowercaseString];
+        NSString *pCls = root.superview ? [NSStringFromClass([root.superview class]) lowercaseString] : @"";
+        if ([cls containsString:@"lyrics"] || [pCls containsString:@"lyrics"]) {
+            if (root.bounds.size.height > 150.0) {
+                return (UIScrollView *)root;
             }
         }
-        cur = cur.superview;
+    }
+
+    for (UIView *sub in root.subviews) {
+        UIScrollView *found = findLyricsScrollViewInView(sub);
+        if (found) return found;
     }
     return nil;
 }
@@ -1343,14 +1355,12 @@ static void collectAllLyricsLines(UIView *root, NSMutableArray<NSString *> *outL
         NSString *t = [lbl.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (t.length > 0) {
             NSString *low = [t lowercaseString];
-            if (![low containsString:@"синхронизация"] &&
-                ![low containsString:@"lyrics aren't"] &&
-                ![low containsString:@"поделиться"] &&
-                ![low containsString:@"плейлист"]) {
+            if (![low containsString:@"синхронизация текста"] &&
+                ![low containsString:@"lyrics aren't"]) {
                 NSArray *lines = [t componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
                 for (NSString *ln in lines) {
                     NSString *s = [ln stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    if (s.length > 0) {
+                    if (s.length > 0 && ![outLines containsObject:s]) {
                         [outLines addObject:s];
                     }
                 }
@@ -1362,28 +1372,14 @@ static void collectAllLyricsLines(UIView *root, NSMutableArray<NSString *> *outL
     }
 }
 
-static void hideOriginalLyricsViews(UIView *root) {
-    if (!root || root.tag == KARAOKE_CONTAINER_TAG) return;
-    if ([root isKindOfClass:[UILabel class]] || [root isKindOfClass:[UITextView class]]) {
-        NSString *t = [(id)root text];
-        if (t.length > 5) {
-            NSString *low = [t lowercaseString];
-            if ([low containsString:@"синхронизация"] || [low containsString:@"lyrics aren't"]) {
-                root.hidden = YES;
-                root.alpha = 0.0f;
-                if (root.superview && root.superview.tag != KARAOKE_CONTAINER_TAG) {
-                    root.superview.hidden = YES;
-                    root.superview.alpha = 0.0f;
-                }
-            } else {
-                root.hidden = YES;
-                root.alpha = 0.0f;
-            }
-        }
-    }
-    for (UIView *sub in root.subviews) {
-        if (sub.tag != KARAOKE_CONTAINER_TAG) {
-            hideOriginalLyricsViews(sub);
+static void hideUnsyncedLyricsIndicator(UIView *scrollView) {
+    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(scrollView);
+    if (indicator) {
+        indicator.hidden = YES;
+        indicator.alpha = 0.0f;
+        if (indicator.superview && indicator.superview != scrollView) {
+            indicator.superview.hidden = YES;
+            indicator.superview.alpha = 0.0f;
         }
     }
 }
@@ -1393,12 +1389,8 @@ static void checkAndSyncLyricsOnScreen(void) {
     for (UIWindow *win in windows) {
         if (!win || win.hidden) continue;
 
-        // 1. Ищем текстовую метку слов песни и охватывающий UIScrollView
-        UILabel *lyricsLabel = findLyricsTextLabelInView(win);
-        UIScrollView *scrollView = nil;
-        if (lyricsLabel) {
-            scrollView = findEnclosingLyricsScrollView(lyricsLabel);
-        }
+        // 1. Ищем ТОЛЬКО специализированный экран слов песни (никаких главных экранов!)
+        UIScrollView *scrollView = findLyricsScrollViewInView(win);
         if (!scrollView) {
             UIView *existing = [win viewWithTag:KARAOKE_CONTAINER_TAG];
             if (existing && [existing.superview isKindOfClass:[UIScrollView class]]) {
@@ -1455,8 +1447,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                 }
             }
 
-            // Прячем стандартный статический блок ТОЛЬКО ПОСЛЕ сбора текста!
-            hideOriginalLyricsViews(scrollView);
+            // Прячем серую плашку "Синхронизация текста..."
+            hideUnsyncedLyricsIndicator(scrollView);
 
             if (lyricsStr && lyricsStr.length > 0) {
                 g_currentKaraokeTrackKey = trackKey;
