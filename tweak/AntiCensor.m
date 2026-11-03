@@ -13,6 +13,7 @@
 #define DEFAULTS_OVERRIDES_KEY     @"AntiCensor_Overrides"
 #define DEFAULTS_SERVER_KEY        @"AntiCensor_ServerURL"
 #define DEFAULTS_HIDE_FLOAT_KEY    @"AntiCensor_HideFloatingButton"
+#define DEFAULTS_HIDE_BANNER_KEY   @"AntiCensor_HideBanner"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 
 #pragma mark - Fishhook (Mach-O Symbol Rebinding)
@@ -457,6 +458,15 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
             }
         }];
 
+        // Toggle Top Banner in Context Menu (Скрыть плашку сверху)
+        BOOL isBannerHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_BANNER_KEY];
+        NSString *bannerBtnTitle = isBannerHidden ? @"Показать плашку в меню" : @"Скрыть плашку в меню";
+        UIAlertAction *toggleBannerAction = [UIAlertAction actionWithTitle:bannerBtnTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            BOOL newHidden = !isBannerHidden;
+            [[NSUserDefaults standardUserDefaults] setBool:newHidden forKey:DEFAULTS_HIDE_BANNER_KEY];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+        }];
+
         UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Сбросить замену трека" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
             if (uri && uri.length > 0) saveOverride(uri, nil);
             if (title && title.length > 0) {
@@ -473,6 +483,7 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
         [alert addAction:saveAction];
         if (existingUrl.length > 0) [alert addAction:removeAction];
         [alert addAction:toggleFloatAction];
+        [alert addAction:toggleBannerAction];
         [alert addAction:cancelAction];
 
         [topVC presentViewController:alert animated:YES completion:nil];
@@ -558,9 +569,21 @@ static void custom_presentViewController(UIViewController *self, SEL _cmd, UIVie
             }]];
         }
     } else {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            addAntiCensorButtonToContextMenu(vcToPresent);
-        });
+        NSString *cls = NSStringFromClass([vcToPresent class]);
+        // NEVER add button to player / now-playing screen!
+        if (![cls containsString:@"NowPlaying"] &&
+            ![cls containsString:@"Playback"] &&
+            ![cls containsString:@"Lyrics"] &&
+            ![cls containsString:@"Player"] &&
+            ([cls containsString:@"ContextMenu"] || [cls containsString:@"Action"] || [cls containsString:@"Sheet"] || [cls containsString:@"Option"])) {
+            
+            BOOL isBannerHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_BANNER_KEY];
+            if (!isBannerHidden) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    addAntiCensorButtonToContextMenu(vcToPresent);
+                });
+            }
+        }
     }
 
     if (orig_presentViewController) {
@@ -709,7 +732,7 @@ static void anticensor_handleBadgePan(id self, SEL _cmd, UIPanGestureRecognizer 
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v2.3...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v2.4...");
 
     // 1. Hook AudioOutputUnitStart and AudioUnitInitialize to register units and set hardware volume to 0
     struct rebinding audioRebind[2];
