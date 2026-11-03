@@ -1318,84 +1318,79 @@ static UIScrollView *findLyricsScrollViewInView(UIView *win) {
     if (!win || win.hidden || win.alpha < 0.05) return nil;
     if (win.tag == KARAOKE_CONTAINER_TAG) return nil;
 
-    // 1. Быстрый возврат, если контейнер караоке уже смонтирован в активном видимом скролле
+    // 1. Быстрый возврат, если контейнер караоке уже смонтирован в активном видимом скролле.
+    // НО только если этот scroll view действительно виден на экране прямо сейчас!
     UIView *existing = [win viewWithTag:KARAOKE_CONTAINER_TAG];
     if (existing && [existing.superview isKindOfClass:[UIScrollView class]]) {
         UIScrollView *p = (UIScrollView *)existing.superview;
         if (!p.hidden && p.alpha > 0.05 && p.window != nil) {
-            return p;
+            // Дополнительная проверка: убеждаемся, что scroll view виден на экране (не скрыт за другим VC)
+            CGRect svRectInWindow = [p convertRect:p.bounds toView:nil];
+            CGRect screenBounds = [UIScreen mainScreen].bounds;
+            if (CGRectIntersectsRect(svRectInWindow, screenBounds) && svRectInWindow.size.height > 100) {
+                return p;
+            }
         }
+        // Если scroll view уже не виден — удаляем контейнер, чтобы не было phantom overlay
+        [existing removeFromSuperview];
     }
 
-    // 2. Ищем по тексту-индикатору "Синхронизация текста..."
+    // 2. СТРОГИЙ ГЕЙТ: возвращаем nil, если индикатора "Синхронизация текста" нет на экране.
+    // Это означает, что полноэкранный экран текста НЕ открыт → никакой инъекции.
     UILabel *indicator = findUnsyncedLyricsIndicatorLabel(win);
-    if (indicator && !indicator.hidden && indicator.window != nil) {
-        // Поднимаемся по цепочке родителей индикатора и проверяем subviews на наличие UIScrollView экрана текста
-        UIView *cur = indicator.superview;
-        while (cur && cur != win) {
-            for (UIView *sub in cur.subviews) {
-                if ([sub isKindOfClass:[UIScrollView class]] && sub.tag != KARAOKE_CONTAINER_TAG) {
-                    UIScrollView *sv = (UIScrollView *)sub;
-                    if (sv.bounds.size.height > 250.0 && sv.bounds.size.width > 250.0) {
-                        return sv;
-                    }
-                }
-            }
-            cur = cur.superview;
-        }
-
-        // Поиск в окне индикатора среди скроллов БЕЗ большой обложки альбома (чтобы исключить экран плеера)
-        UIWindow *w = indicator.window ?: (UIWindow *)win;
-        NSMutableArray *queue = [NSMutableArray arrayWithObject:w];
-        UIScrollView *bestSV = nil;
-        CGFloat maxH = 0;
-        while (queue.count > 0) {
-            UIView *v = queue.firstObject;
-            [queue removeObjectAtIndex:0];
-            if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
-                UIScrollView *sv = (UIScrollView *)v;
-                BOOL hasLargeArt = NO;
-                for (UIView *s in sv.subviews) {
-                    if ([s isKindOfClass:[UIImageView class]] && s.bounds.size.width > 200.0) {
-                        hasLargeArt = YES; break;
-                    }
-                }
-                if (!hasLargeArt && sv.bounds.size.height > 250.0 && sv.bounds.size.width > 250.0) {
-                    if (sv.bounds.size.height > maxH) {
-                        maxH = sv.bounds.size.height;
-                        bestSV = sv;
-                    }
-                }
-            }
-            [queue addObjectsFromArray:v.subviews];
-        }
-        if (bestSV) return bestSV;
+    if (!indicator || indicator.hidden || indicator.alpha < 0.05 || indicator.window == nil) {
+        return nil;
     }
 
-    // 3. Если у трека есть сохранённый пользователем текст — ищем открытый полноэкранный экран текста
-    NSString *userLyrics = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
-    if (userLyrics && userLyrics.length > 0) {
-        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
-        while (queue.count > 0) {
-            UIView *v = queue.firstObject;
-            [queue removeObjectAtIndex:0];
-            if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
-                UIScrollView *sv = (UIScrollView *)v;
-                BOOL hasLargeArt = NO;
-                for (UIView *s in sv.subviews) {
-                    if ([s isKindOfClass:[UIImageView class]] && s.bounds.size.width > 200.0) {
-                        hasLargeArt = YES; break;
-                    }
-                }
-                if (!hasLargeArt && sv.bounds.size.height > 400.0 && sv.bounds.size.width > [UIScreen mainScreen].bounds.size.width * 0.8) {
+    // Убеждаемся что индикатор реально виден (не обрезан / за краем экрана)
+    CGRect indicatorRect = [indicator convertRect:indicator.bounds toView:nil];
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    if (!CGRectIntersectsRect(indicatorRect, screenBounds)) {
+        return nil;
+    }
+
+    // 3. Индикатор виден — ищем UIScrollView в том же view-controller что и индикатор.
+    // Поднимаемся по цепочке родителей индикатора, ища UIScrollView-сиблинг
+    UIView *cur = indicator.superview;
+    while (cur && cur != win) {
+        for (UIView *sub in cur.subviews) {
+            if ([sub isKindOfClass:[UIScrollView class]] && sub.tag != KARAOKE_CONTAINER_TAG) {
+                UIScrollView *sv = (UIScrollView *)sub;
+                if (sv.bounds.size.height > 200.0 && sv.bounds.size.width > 150.0) {
                     return sv;
                 }
             }
-            [queue addObjectsFromArray:v.subviews];
         }
+        cur = cur.superview;
     }
 
-    return nil;
+    // 4. Если не нашли сиблинга — BFS по всему окну, но ТОЛЬКО среди scroll views
+    // без большой квадратной обложки (чтобы не поймать экран плеера)
+    UIWindow *w = indicator.window ?: (UIWindow *)win;
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:w];
+    UIScrollView *bestSV = nil;
+    CGFloat maxH = 0;
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
+            UIScrollView *sv = (UIScrollView *)v;
+            BOOL hasLargeArt = NO;
+            for (UIView *s in sv.subviews) {
+                if ([s isKindOfClass:[UIImageView class]] && s.bounds.size.width > 200.0) {
+                    hasLargeArt = YES; break;
+                }
+            }
+            if (!hasLargeArt && sv.bounds.size.height > 200.0 && sv.bounds.size.width > 150.0) {
+                if (sv.bounds.size.height > maxH) {
+                    maxH = sv.bounds.size.height;
+                    bestSV = sv;
+                }
+            }
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
+    return bestSV;
 }
 
 static void collectAllLyricsLines(UIView *root, NSMutableArray<NSString *> *outLines) {
@@ -1468,14 +1463,9 @@ static void checkAndSyncLyricsOnScreen(void) {
     for (UIWindow *win in windows) {
         if (!win || win.hidden) continue;
 
-        // 1. Ищем ТОЛЬКО специализированный экран слов песни (никаких главных экранов!)
+        // 1. Ищем ТОЛЬКО специализированный экран слов песни (никаких главных экранов!).
+        // findLyricsScrollViewInView уже содержит всю логику включая удаление orphan-контейнеров.
         UIScrollView *scrollView = findLyricsScrollViewInView(win);
-        if (!scrollView) {
-            UIView *existing = [win viewWithTag:KARAOKE_CONTAINER_TAG];
-            if (existing && [existing.superview isKindOfClass:[UIScrollView class]]) {
-                scrollView = (UIScrollView *)existing.superview;
-            }
-        }
 
         if (!scrollView) continue;
 
@@ -2904,22 +2894,7 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
     }
 }
 
-static UIMenu * (*orig_menuWithTitle_image_identifier_options_children)(id, SEL, NSString *, UIImage *, id, NSUInteger, NSArray *);
-static UIMenu * custom_menuWithTitle_image_identifier_options_children(id target, SEL _cmd, NSString *title, UIImage *image, id identifier, NSUInteger options, NSArray *children) {
-    if (children && children.count > 0) {
-        UIAction *action = [UIAction actionWithTitle:@"⚡ AntiCensor (Замена / Текст)"
-                                               image:[UIImage systemImageNamed:@"bolt.fill"]
-                                          identifier:@"com.anticensor.action"
-                                             handler:^(UIAction *a) {
-            showAntiCensorMainOptionsDialog(nil, title, nil);
-        }];
-        children = [@[action] arrayByAddingObjectsFromArray:children];
-    }
-    if (orig_menuWithTitle_image_identifier_options_children) {
-        return orig_menuWithTitle_image_identifier_options_children(target, _cmd, title, image, identifier, options, children);
-    }
-    return nil;
-}
+// UIMenu hook убран в v4.9 — кнопка AntiCensor добавляется нативной строкой через addAntiCensorRowToContextMenu
 
 #pragma mark - Floating Badge
 
@@ -3102,15 +3077,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         }
     }
 
-    // 3. Хук UIMenu (iOS 14+)
-    Class menuClass = objc_getClass("UIMenu");
-    if (menuClass) {
-        Method mMenu = class_getClassMethod(menuClass, @selector(menuWithTitle:image:identifier:options:children:));
-        if (mMenu) {
-            orig_menuWithTitle_image_identifier_options_children = (UIMenu * (*)(id, SEL, NSString *, UIImage *, id, NSUInteger, NSArray *))method_getImplementation(mMenu);
-            method_setImplementation(mMenu, (IMP)custom_menuWithTitle_image_identifier_options_children);
-        }
-    }
+    // 3. UIMenu hook убран в v4.9 — кнопка AntiCensor добавляется нативной строкой
 
     // 4. Хук MPNowPlayingInfoCenter для точного определения треков и синхронизации
     Class npCenterClass = objc_getClass("MPNowPlayingInfoCenter");
