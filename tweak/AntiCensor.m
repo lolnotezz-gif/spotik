@@ -256,6 +256,14 @@ static NSString *getStorageFilePath(void) {
     return [docDir stringByAppendingPathComponent:@"AntiCensor_Overrides.json"];
 }
 
+static NSString *getLocalAudioDirectoryPath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    NSString *audioDir = [docDir stringByAppendingPathComponent:@"AntiCensor_AudioFiles"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:audioDir withIntermediateDirectories:YES attributes:nil error:nil];
+    return audioDir;
+}
+
 static NSMutableDictionary *loadAllOverrides(void) {
     NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
     NSString *path = getStorageFilePath();
@@ -278,7 +286,7 @@ static NSMutableDictionary *loadAllOverrides(void) {
                 ![normK isEqualToString:@"spotify:track:"] &&
                 ![normK isEqualToString:@"spotify:"]) {
                 NSString *val = [rawDict[k] description];
-                if (val && val.length > 5 && ([val containsString:@"soundcloud"] || [val containsString:@"http"])) {
+                if (val && val.length > 5 && ([val containsString:@"soundcloud"] || [val containsString:@"http"] || [val containsString:@"local://"] || [val containsString:@"file://"])) {
                     cleaned[normK] = val;
                 }
             }
@@ -384,6 +392,26 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
     if (cached) {
         completion(cached);
         return;
+    }
+
+    if ([rawUrl hasPrefix:@"local://"]) {
+        NSString *filename = [rawUrl substringFromIndex:@"local://".length];
+        NSString *fullPath = [getLocalAudioDirectoryPath() stringByAppendingPathComponent:filename];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:fullPath]) {
+            NSURL *u = [NSURL fileURLWithPath:fullPath];
+            g_streamCache[rawUrl] = u;
+            completion(u);
+            return;
+        }
+    }
+
+    if ([rawUrl hasPrefix:@"file://"] || [rawUrl hasPrefix:@"/"]) {
+        NSURL *u = [rawUrl hasPrefix:@"file://"] ? [NSURL URLWithString:rawUrl] : [NSURL fileURLWithPath:rawUrl];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:u.path]) {
+            g_streamCache[rawUrl] = u;
+            completion(u);
+            return;
+        }
     }
 
     if ([rawUrl hasSuffix:@".mp3"] || [rawUrl hasSuffix:@".m3u8"] || [rawUrl containsString:@"media-streaming.soundcloud.cloud"]) {
@@ -879,7 +907,9 @@ static void showManageAllTracksDialog(void) {
                                                                       preferredStyle:UIAlertControllerStyleActionSheet];
 
         for (NSString *key in all) {
-            NSString *rowTitle = [NSString stringWithFormat:@"Удалить: %@", key];
+            NSString *val = all[key];
+            NSString *icon = [val hasPrefix:@"local://"] ? @"📁" : @"☁️";
+            NSString *rowTitle = [NSString stringWithFormat:@"%@ Удалить: %@", icon, key];
             [manageAlert addAction:[UIAlertAction actionWithTitle:rowTitle style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
                 saveOverride(key, nil);
                 if ([normalizeKey(currentActiveSpotifyTrackTitle) isEqualToString:key] ||
@@ -898,6 +928,130 @@ static void showManageAllTracksDialog(void) {
         [manageAlert addAction:[UIAlertAction actionWithTitle:@"Закрыть" style:UIAlertActionStyleCancel handler:nil]];
         [topVC presentViewController:manageAlert animated:YES completion:nil];
     });
+}
+
+#pragma mark - Local Audio Document Picker
+
+@interface AntiCensorDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@property (nonatomic, copy) NSString *targetURI;
+@property (nonatomic, copy) NSString *targetTitle;
+@property (nonatomic, copy) NSString *targetArtist;
+@property (nonatomic, copy) NSString *displayTrack;
+@end
+
+@implementation AntiCensorDocumentPickerDelegate
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (!urls || urls.count == 0) return;
+    NSURL *pickedUrl = urls.firstObject;
+
+    BOOL didAccess = NO;
+    if ([pickedUrl respondsToSelector:@selector(startAccessingSecurityScopedResource)]) {
+        didAccess = [pickedUrl startAccessingSecurityScopedResource];
+    }
+
+    NSString *ext = [pickedUrl pathExtension];
+    if (!ext || ext.length == 0) ext = @"mp3";
+
+    NSString *audioDir = getLocalAudioDirectoryPath();
+    NSString *safeId = [[NSUUID UUID] UUIDString];
+    NSString *filename = [NSString stringWithFormat:@"audio_%@.%@", safeId, ext];
+    NSString *destPath = [audioDir stringByAppendingPathComponent:filename];
+
+    NSError *copyErr = nil;
+    [[NSFileManager defaultManager] removeItemAtPath:destPath error:nil];
+    BOOL success = [[NSFileManager defaultManager] copyItemAtURL:pickedUrl toURL:[NSURL fileURLWithPath:destPath] error:&copyErr];
+
+    if (didAccess) {
+        [pickedUrl stopAccessingSecurityScopedResource];
+    }
+
+    if (!success || copyErr) {
+        NSLog(@"[AntiCensor] Failed to copy local audio: %@", copyErr);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *top = getTopViewController();
+            if (top) {
+                UIAlertController *err = [UIAlertController alertControllerWithTitle:@"Ошибка"
+                                                                             message:@"Не удалось скопировать файл с устройства."
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+                [err addAction:[UIAlertAction actionWithTitle:@"ОК" style:UIAlertActionStyleCancel handler:nil]];
+                [top presentViewController:err animated:YES completion:nil];
+            }
+        });
+        return;
+    }
+
+    NSString *storedUrl = [NSString stringWithFormat:@"local://%@", filename];
+
+    if (self.targetURI && [self.targetURI hasPrefix:@"spotify:track:"] && self.targetURI.length > 15) {
+        saveOverride(self.targetURI, storedUrl);
+    }
+    if (self.displayTrack.length > 1) {
+        saveOverride(self.displayTrack, storedUrl);
+    }
+    if (self.targetTitle && self.targetTitle.length > 1) {
+        saveOverride(self.targetTitle, storedUrl);
+        if (self.targetArtist && self.targetArtist.length > 1) {
+            saveOverride([NSString stringWithFormat:@"%@ - %@", self.targetArtist, self.targetTitle], storedUrl);
+        }
+    }
+
+    // Мгновенный запуск локального аудиофайла без задержек
+    startReplacementAudio(self.targetURI ?: (self.targetTitle ?: self.displayTrack), storedUrl, getCurrentSpotifyPreciseTime());
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = getTopViewController();
+        if (top) {
+            UIAlertController *succ = [UIAlertController alertControllerWithTitle:@"⚡ AntiCensor"
+                                                                          message:@"Аудиофайл успешно сохранён с устройства и подключен к треку!"
+                                                                   preferredStyle:UIAlertControllerStyleAlert];
+            [succ addAction:[UIAlertAction actionWithTitle:@"Отлично!" style:UIAlertActionStyleDefault handler:nil]];
+            [top presentViewController:succ animated:YES completion:nil];
+        }
+    });
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    NSLog(@"[AntiCensor] Document picker was cancelled.");
+}
+
+@end
+
+static AntiCensorDocumentPickerDelegate *g_docPickerDelegate = nil;
+
+static void openLocalAudioPicker(NSString *targetURI, NSString *targetTitle, NSString *targetArtist, NSString *displayTrack) {
+    UIViewController *topVC = getTopViewController();
+    if (!topVC) return;
+
+    g_docPickerDelegate = [[AntiCensorDocumentPickerDelegate alloc] init];
+    g_docPickerDelegate.targetURI = targetURI;
+    g_docPickerDelegate.targetTitle = targetTitle;
+    g_docPickerDelegate.targetArtist = targetArtist;
+    g_docPickerDelegate.displayTrack = displayTrack;
+
+    NSArray *types = @[
+        @"public.audio",
+        @"public.mp3",
+        @"com.apple.m4a-audio",
+        @"public.wav",
+        @"public.flac",
+        @"org.videolan.flac",
+        @"public.data",
+        @"public.content"
+    ];
+
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:types inMode:UIDocumentPickerModeImport];
+    #pragma clang diagnostic pop
+
+    picker.delegate = g_docPickerDelegate;
+    picker.allowsMultipleSelection = NO;
+    if (@available(iOS 13.0, *)) {
+        picker.modalPresentationStyle = UIModalPresentationFormSheet;
+    }
+
+    [topVC presentViewController:picker animated:YES completion:nil];
 }
 
 static void showReplacementDialogWithContext(NSString *targetURI, NSString *targetTitle, NSString *targetArtist) {
@@ -923,8 +1077,15 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
             defaultUrl = [clip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         }
 
+        NSString *dialogMsg = @"Выбери аудиофайл с устройства или вставь SoundCloud ссылку:";
+        if ([existingUrl hasPrefix:@"local://"]) {
+            dialogMsg = @"📁 Сейчас подключен локальный файл с устройства!\nМожно выбрать другой файл или вставить SoundCloud ссылку:";
+        } else if (existingUrl.length > 0) {
+            dialogMsg = @"☁️ Сейчас подключен трек из SoundCloud!\nМожно заменить его локальным файлом или обновить ссылку:";
+        }
+
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AntiCensor Замена"
-                                                                        message:@"Проверь название трека и вставь SoundCloud ссылку:"
+                                                                        message:dialogMsg
                                                                  preferredStyle:UIAlertControllerStyleAlert];
 
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull tfTitle) {
@@ -967,6 +1128,11 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
             }
         }];
 
+        UIAlertAction *pickFileAction = [UIAlertAction actionWithTitle:@"📁 Выбрать MP3 / M4A с устройства" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            NSString *inputTrack = [alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            openLocalAudioPicker(uri, title, artist, inputTrack.length > 0 ? inputTrack : displayTrack);
+        }];
+
         UIAlertAction *manageAction = [UIAlertAction actionWithTitle:@"Список всех замен треков" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
             showManageAllTracksDialog();
         }];
@@ -999,6 +1165,7 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
 
         UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil];
 
+        [alert addAction:pickFileAction];
         [alert addAction:saveAction];
         if (existingUrl.length > 0) [alert addAction:removeAction];
         [alert addAction:manageAction];
@@ -1472,7 +1639,7 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.6...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.7 (Local Files + SoundCloud)...");
 
     // ОДНОКРАТНАЯ ПОЛНАЯ ОЧИСТКА БАЗЫ ДАННЫХ ОТ СТАРЫХ МУСОРНЫХ КЛЮЧЕЙ (WIPE CORRUPTED CACHE)
     BOOL isCleanedV35 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY];
