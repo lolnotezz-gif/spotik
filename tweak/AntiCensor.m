@@ -17,8 +17,12 @@
 #define DEFAULTS_HIDE_FLOAT_KEY    @"AntiCensor_HideFloatingButton"
 #define DEFAULTS_HIDE_BANNER_KEY   @"AntiCensor_HideBanner"
 #define DEFAULTS_VERSION_KEY       @"AntiCensor_Storage_v3_5_Clean"
+#define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 #define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
+
+static void setupFloatingBadge(void);
+static void checkAndInjectProfileDrawerButton(void);
 
 #pragma mark - Fishhook (Mach-O Symbol Rebinding)
 
@@ -240,6 +244,7 @@ static OSStatus custom_AudioUnitInitialize(void *unit) {
 static NSString *normalizeKey(NSString *str) {
     if (!str || ![str isKindOfClass:[NSString class]]) return @"";
     NSString *clean = [[str lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // Убираем точки, дефисы и лишние пробелы для точного совпадения
     clean = [clean stringByReplacingOccurrencesOfString:@"…" withString:@""];
     clean = [clean stringByReplacingOccurrencesOfString:@"..." withString:@""];
     return clean;
@@ -325,14 +330,14 @@ static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *a
     NSDictionary *dict = loadAllOverrides();
     if (!dict || dict.count == 0) return nil;
 
-    // 1. Полноценный Spotify URI
+    // 1. Поиск по точному Spotify URI (например spotify:track:6wLq5...)
     if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
         NSString *normUri = normalizeKey(uri);
         NSString *val = dict[normUri];
         if (val && val.length > 5) return val;
     }
 
-    // 2. Артист - Название (уникально для каждого трека в альбоме!)
+    // 2. Поиск по «Артист - Название» (гарантирует уникальность трека в альбоме!)
     if (title && title.length > 1 && artist && artist.length > 1) {
         NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
         NSString *val = dict[normalizeKey(combined)];
@@ -621,6 +626,9 @@ static void stopReplacementAudio(void) {
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate);
 
 static void onPeriodicSyncCheck(NSTimer *timer) {
+    // 0. Проверяем и инжектим кнопку в боковое меню профиля (Profile Drawer)
+    checkAndInjectProfileDrawerButton();
+
     // 1. Проверяем смену трека на экране Spotify прямо сейчас
     NSString *uiTitle = nil;
     NSString *uiArtist = nil;
@@ -1102,6 +1110,173 @@ static void anticensor_bannerCloseTapped(UIViewController *callerVC, SEL _cmd, U
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
+#pragma mark - Profile Drawer / Side Menu Integration
+
+static UIButton *createDrawerButton(CGRect frame) {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.tag = 889911;
+    if (!CGRectIsEmpty(frame)) {
+        btn.frame = frame;
+        btn.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    }
+    btn.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.16];
+    btn.layer.cornerRadius = 14.0f;
+    btn.layer.borderWidth = 1.2f;
+    btn.layer.borderColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.65].CGColor;
+    btn.layer.masksToBounds = YES;
+    btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+
+    [btn setTitle:@"   ⚡ AntiCensor (Настройки / Плашка)" forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:14.5f];
+
+    [btn addTarget:nil action:@selector(anticensor_drawerButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    return btn;
+}
+
+static void anticensor_drawerButtonTapped(id target, SEL _cmd, UIButton *sender) {
+    if (@available(iOS 10.0, *)) {
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [gen prepare];
+        [gen impactOccurred];
+    }
+
+    // 1. Восстанавливаем зеленую плашку и плавающую кнопку
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_BANNER_KEY];
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_FLOAT_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    // 2. Активируем плавающую кнопку на экране
+    setupFloatingBadge();
+
+    // 3. Открываем меню настроек и замен треков
+    NSString *uiTitle = nil;
+    NSString *uiArtist = nil;
+    findSpotifyNowPlayingTrackInfo(&uiTitle, &uiArtist);
+
+    NSString *title = uiTitle ?: currentActiveSpotifyTrackTitle;
+    NSString *artist = uiArtist ?: currentActiveSpotifyTrackArtist;
+    NSString *uri = currentActiveSpotifyTrackURI;
+
+    showReplacementDialogWithContext(uri, title, artist);
+}
+
+static UILabel *findDrawerLabel(UIView *root) {
+    if (!root || root.hidden || root.alpha < 0.05) return nil;
+    if ([root isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)root;
+        NSString *txt = [lbl.text lowercaseString];
+        if (txt.length > 0) {
+            if ([txt containsString:@"настройки и конфиденциальность"] ||
+                [txt containsString:@"settings and privacy"] ||
+                [txt containsString:@"статистика прослушивания"] ||
+                [txt containsString:@"listening history"] ||
+                [txt containsString:@"добавить аккаунт"] ||
+                [txt containsString:@"add account"] ||
+                [txt containsString:@"недавние"] ||
+                [txt containsString:@"обновления"]) {
+                return lbl;
+            }
+        }
+    }
+    for (UIView *sub in root.subviews) {
+        UILabel *found = findDrawerLabel(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void checkAndInjectProfileDrawerButton(void) {
+    NSArray *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *win in windows) {
+        if (!win || win.hidden) continue;
+        if ([win viewWithTag:889911]) continue; // Уже добавлено в этом окне
+
+        UILabel *targetLabel = findDrawerLabel(win);
+        if (!targetLabel) continue;
+
+        // Нашли элемент бокового меню! Определяем его контейнер
+        UIView *current = targetLabel;
+        UITableView *parentTableView = nil;
+        UIStackView *parentStackView = nil;
+        UIScrollView *parentScrollView = nil;
+
+        while (current && current != win) {
+            if ([current isKindOfClass:[UITableView class]]) { parentTableView = (UITableView *)current; break; }
+            if ([current isKindOfClass:[UIStackView class]]) { parentStackView = (UIStackView *)current; break; }
+            if ([current isKindOfClass:[UIScrollView class]]) { parentScrollView = (UIScrollView *)current; break; }
+            current = current.superview;
+        }
+
+        if (parentTableView) {
+            if (![parentTableView viewWithTag:889911]) {
+                CGFloat width = parentTableView.bounds.size.width;
+                if (width < 100) width = win.bounds.size.width * 0.75;
+                UIView *existingFooter = parentTableView.tableFooterView;
+                CGFloat existH = existingFooter ? existingFooter.bounds.size.height : 0;
+
+                UIView *footerContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, existH + 65.0)];
+                footerContainer.tag = 889910;
+                if (existingFooter) {
+                    existingFooter.frame = CGRectMake(0, 0, width, existH);
+                    [footerContainer addSubview:existingFooter];
+                }
+                UIButton *btn = createDrawerButton(CGRectMake(16.0, existH + 8.0, width - 32.0, 48.0));
+                [footerContainer addSubview:btn];
+                parentTableView.tableFooterView = footerContainer;
+            }
+            continue;
+        }
+
+        if (parentStackView) {
+            if (![parentStackView viewWithTag:889911]) {
+                UIButton *btn = createDrawerButton(CGRectZero);
+                btn.translatesAutoresizingMaskIntoConstraints = NO;
+                [parentStackView addArrangedSubview:btn];
+                [NSLayoutConstraint activateConstraints:@[
+                    [btn.heightAnchor constraintEqualToConstant:48.0]
+                ]];
+            }
+            continue;
+        }
+
+        if (parentScrollView) {
+            if (![parentScrollView viewWithTag:889911]) {
+                UIView *row = targetLabel;
+                while (row.superview && row.superview != parentScrollView) {
+                    row = row.superview;
+                }
+                CGFloat width = parentScrollView.bounds.size.width;
+                if (width < 100) width = win.bounds.size.width * 0.75;
+                CGFloat rowBottom = CGRectGetMaxY(row.frame);
+                UIButton *btn = createDrawerButton(CGRectMake(16.0, rowBottom + 12.0, width - 32.0, 48.0));
+                [parentScrollView addSubview:btn];
+                CGFloat neededH = rowBottom + 12.0 + 48.0 + 30.0;
+                if (parentScrollView.contentSize.height < neededH) {
+                    parentScrollView.contentSize = CGSizeMake(parentScrollView.contentSize.width, neededH);
+                }
+            }
+            continue;
+        }
+
+        // Обычный контейнер View
+        UIView *row = targetLabel;
+        while (row.superview && row.superview != win && row.superview.bounds.size.height < 150) {
+            row = row.superview;
+        }
+        UIView *container = row.superview ?: win;
+        if (![container viewWithTag:889911]) {
+            CGRect rowInContainer = [row.superview convertRect:row.frame toView:container];
+            CGFloat width = container.bounds.size.width;
+            if (width < 100) width = win.bounds.size.width * 0.75;
+            CGFloat btnY = CGRectGetMaxY(rowInContainer) + 12.0;
+            UIButton *btn = createDrawerButton(CGRectMake(16.0, btnY, width - 32.0, 48.0));
+            [container addSubview:btn];
+            [container bringSubviewToFront:btn];
+        }
+    }
+}
+
 static void addAntiCensorButtonToContextMenu(UIViewController *sheetVC) {
     if (!sheetVC || !sheetVC.isViewLoaded) return;
     BOOL isBannerHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_BANNER_KEY];
@@ -1138,6 +1313,7 @@ static void addAntiCensorButtonToContextMenu(UIViewController *sheetVC) {
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     closeBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.8] forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15.0f];
     [closeBtn addTarget:sheetVC action:@selector(anticensor_bannerCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
     [bannerView addSubview:closeBtn];
@@ -1178,6 +1354,10 @@ static void anticensor_onContextMenuButtonTap(UIViewController *callerVC, SEL _c
 
 static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void));
 static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, UIViewController *vcToPresent, BOOL animated, void (^completion)(void)) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        checkAndInjectProfileDrawerButton();
+    });
+
     if ([vcToPresent isKindOfClass:[UIAlertController class]]) {
         UIAlertController *alert = (UIAlertController *)vcToPresent;
         BOOL hasAction = NO;
@@ -1241,10 +1421,15 @@ static void setupFloatingBadge(void) {
     BOOL isHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_FLOAT_KEY];
     if (isHidden) return;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (floatingPillButton) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = getKeyAppWindow();
         if (!window) return;
+
+        if (floatingPillButton) {
+            floatingPillButton.hidden = NO;
+            [window bringSubviewToFront:floatingPillButton];
+            return;
+        }
 
         floatingPillButton = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingPillButton.frame = CGRectMake(window.bounds.size.width - 105, 120, 95, 32);
@@ -1287,7 +1472,7 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.5...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.6...");
 
     // ОДНОКРАТНАЯ ПОЛНАЯ ОЧИСТКА БАЗЫ ДАННЫХ ОТ СТАРЫХ МУСОРНЫХ КЛЮЧЕЙ (WIPE CORRUPTED CACHE)
     BOOL isCleanedV35 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY];
@@ -1295,6 +1480,15 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         [[NSFileManager defaultManager] removeItemAtPath:getStorageFilePath() error:nil];
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:DEFAULTS_OVERRIDES_KEY];
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    }
+
+    // v3.6: Автоматическое восстановление скрытой плашки и кнопки при обновлении
+    BOOL isRestoredV36 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_36];
+    if (!isRestoredV36) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_BANNER_KEY];
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_FLOAT_KEY];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_36];
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
@@ -1314,11 +1508,17 @@ __attribute__((constructor)) static void initAntiCensor(void) {
 
     ac_rebind_symbols(audioRebind, 3);
 
-    // 2. Хук контекстного меню
+    // 2. Хук контекстного меню и обработчики UI
+    Class respClass = objc_getClass("UIResponder");
+    if (respClass) {
+        class_addMethod(respClass, @selector(anticensor_drawerButtonTapped:), (IMP)anticensor_drawerButtonTapped, "v@:@");
+    }
+
     Class vcClass = objc_getClass("UIViewController");
     if (vcClass) {
         class_addMethod(vcClass, @selector(anticensor_onContextMenuButtonTap:), (IMP)anticensor_onContextMenuButtonTap, "v@:@");
         class_addMethod(vcClass, @selector(anticensor_bannerCloseTapped:), (IMP)anticensor_bannerCloseTapped, "v@:@");
+        class_addMethod(vcClass, @selector(anticensor_drawerButtonTapped:), (IMP)anticensor_drawerButtonTapped, "v@:@");
         Method mPresent = class_getInstanceMethod(vcClass, @selector(presentViewController:animated:completion:));
         if (mPresent) {
             orig_presentViewController = (void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))method_getImplementation(mPresent);
@@ -1350,6 +1550,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     if (winClass) {
         class_addMethod(winClass, @selector(anticensor_floatingBadgeTapped), (IMP)anticensor_floatingBadgeTapped, "v@:");
         class_addMethod(winClass, @selector(anticensor_handleBadgePan:), (IMP)anticensor_handleBadgePan, "v@:@");
+        class_addMethod(winClass, @selector(anticensor_drawerButtonTapped:), (IMP)anticensor_drawerButtonTapped, "v@:@");
     }
 
     // 5. Запуск плавающей кнопки ⚡
