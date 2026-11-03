@@ -974,6 +974,35 @@ static void safeSeekPlayerToTime(double targetSeconds) {
 
 static AntiCensorPlayerObserver *g_playerObserver = nil;
 
+static void fadeOutPlayer(AVPlayer *playerToFade, NSTimeInterval duration) {
+    if (!playerToFade) return;
+    int steps = 15;
+    NSTimeInterval interval = duration / (NSTimeInterval)steps;
+    for (int i = 1; i <= steps; i++) {
+        float vol = 1.0f - ((float)i / (float)steps);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * interval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            playerToFade.volume = vol;
+            if (i == steps) {
+                [playerToFade pause];
+            }
+        });
+    }
+}
+
+static void fadeInPlayer(AVPlayer *playerToFade, NSTimeInterval duration) {
+    if (!playerToFade) return;
+    playerToFade.volume = 0.0f;
+    [playerToFade play];
+    int steps = 15;
+    NSTimeInterval interval = duration / (NSTimeInterval)steps;
+    for (int i = 1; i <= steps; i++) {
+        float vol = (float)i / (float)steps;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * interval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            playerToFade.volume = vol;
+        });
+    }
+}
+
 static void stopReplacementAudio(void) {
     isReplacementLoading = NO;
     currentPlayingKey = nil;
@@ -989,16 +1018,8 @@ static void stopReplacementAudio(void) {
         }
         AVPlayer *p = ourAudioPlayer;
         ourAudioPlayer = nil;
-        // Мягкое угасание предыдущего плеера
-        for (int i = 1; i <= 5; i++) {
-            float v = 1.0f - ((float)i / 5.0f);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                p.volume = v;
-                if (v <= 0.05f) {
-                    [p pause];
-                }
-            });
-        }
+        // Плавное затухание заменяющего плеера при переходе на нативный трек
+        fadeOutPlayer(p, 1.2);
     }
 
     isMutingSpotify = NO;
@@ -1059,9 +1080,11 @@ static void updateNowPlayingCenter(void) {
 @implementation AntiCensorLyricItem
 @end
 
-@interface AntiCensorTapHandler : NSObject
+@interface AntiCensorTapHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedHandler;
 - (void)onKaraokeLineTapped:(UITapGestureRecognizer *)gesture;
+- (void)onKaraokeContainerTapped:(UITapGestureRecognizer *)gesture;
+- (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view;
 @end
 
 static NSArray<AntiCensorLyricItem *> *g_currentKaraokeItems = nil;
@@ -1115,53 +1138,77 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     });
     return s_inst;
 }
-- (void)onKaraokeLineTapped:(UITapGestureRecognizer *)gesture {
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    return YES;
+}
+
+- (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view {
     if (@available(iOS 10.0, *)) {
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [gen prepare];
         [gen impactOccurred];
     }
+    if (!g_currentKaraokeItems || idx < 0 || idx >= (NSInteger)g_currentKaraokeItems.count) return;
+
+    double seekTarget = g_currentKaraokeItems[idx].time;
+    if (seekTarget < 0) return;
+
+    // 1. Перематываем наш аудиоплеер (если играет кастомный трек / файл с устройства)
+    safeSeekPlayerToTime(seekTarget);
+
+    // 2. Синхронно перематываем системный ползунок таймлайна и движок Spotify
+    seekSpotifyPlayback(seekTarget, g_currentTrackDuration);
+
+    // 3. Мгновенная визуальная подсветка нажатой строки белым цветом
+    g_lastActiveKaraokeIdx = idx;
+    [UIView animateWithDuration:0.15 animations:^{
+        for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
+            UILabel *lbl = g_currentKaraokeLabels[i];
+            if ((NSInteger)i == idx) {
+                lbl.textColor = [UIColor whiteColor];
+                lbl.alpha = 1.0f;
+                lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
+            } else {
+                lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.65];
+                lbl.alpha = 0.85f;
+                lbl.transform = CGAffineTransformIdentity;
+            }
+        }
+    }];
+
+    // 4. Плавное центрирование нажатой строки на экране (~35% от верха)
+    UIScrollView *sv = (UIScrollView *)view.superview.superview;
+    if (![sv isKindOfClass:[UIScrollView class]]) {
+        sv = (UIScrollView *)view.superview;
+    }
+    if ([sv isKindOfClass:[UIScrollView class]]) {
+        CGFloat targetY = view.frame.origin.y - (sv.bounds.size.height * 0.35);
+        if (targetY < 0) targetY = 0;
+        CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
+        if (maxY < 0) maxY = 0;
+        if (targetY > maxY) targetY = maxY;
+        [sv setContentOffset:CGPointMake(0, targetY) animated:YES];
+    }
+}
+
+- (void)onKaraokeLineTapped:(UITapGestureRecognizer *)gesture {
     UIView *view = gesture.view;
     NSInteger idx = view.tag;
-    if (g_currentKaraokeItems && idx >= 0 && idx < (NSInteger)g_currentKaraokeItems.count) {
-        double seekTarget = g_currentKaraokeItems[idx].time;
-        if (seekTarget >= 0) {
-            // 1. Перематываем наш аудиоплеер (если активен кастомный трек)
-            safeSeekPlayerToTime(seekTarget);
+    [self handleSeekToLyricIndex:idx inView:view];
+}
 
-            // 2. Синхронно перематываем ползунок таймлайна и движок Spotify
-            seekSpotifyPlayback(seekTarget, g_currentTrackDuration);
-
-            // 3. Мгновенная визуальная подсветка нажатой строки белым цветом
-            g_lastActiveKaraokeIdx = idx;
-            [UIView animateWithDuration:0.15 animations:^{
-                for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
-                    UILabel *lbl = g_currentKaraokeLabels[i];
-                    if ((NSInteger)i == idx) {
-                        lbl.textColor = [UIColor whiteColor];
-                        lbl.alpha = 1.0f;
-                        lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
-                    } else {
-                        lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.65];
-                        lbl.alpha = 0.85f;
-                        lbl.transform = CGAffineTransformIdentity;
-                    }
-                }
-            }];
-
-            // 4. Плавное центрирование нажатой строки на экране (~35% от верха)
-            UIView *container = view.superview;
-            if (container) {
-                UIScrollView *sv = (UIScrollView *)container.superview;
-                if ([sv isKindOfClass:[UIScrollView class]]) {
-                    CGFloat targetY = view.frame.origin.y - (sv.bounds.size.height * 0.35);
-                    if (targetY < 0) targetY = 0;
-                    CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
-                    if (maxY < 0) maxY = 0;
-                    if (targetY > maxY) targetY = maxY;
-                    [sv setContentOffset:CGPointMake(0, targetY) animated:YES];
-                }
-            }
+- (void)onKaraokeContainerTapped:(UITapGestureRecognizer *)gesture {
+    CGPoint pt = [gesture locationInView:gesture.view];
+    for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
+        UILabel *lbl = g_currentKaraokeLabels[i];
+        if (pt.y >= lbl.frame.origin.y - 14.0 && pt.y <= CGRectGetMaxY(lbl.frame) + 14.0) {
+            [self handleSeekToLyricIndex:i inView:lbl];
+            return;
         }
     }
 }
@@ -1353,10 +1400,14 @@ static void checkAndSyncLyricsOnScreen(void) {
         // 3. Текущее время и трек
         double currentTime = 0.0;
         double duration = 0.0;
-        if (ourAudioPlayer) {
+        if (ourAudioPlayer && ourAudioPlayer.currentItem) {
             currentTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-            duration = CMTimeGetSeconds(ourAudioPlayer.currentItem.duration);
-        } else {
+            CMTime d = ourAudioPlayer.currentItem.duration;
+            if (CMTIME_IS_VALID(d) && !CMTIME_IS_INDEFINITE(d)) {
+                duration = CMTimeGetSeconds(d);
+            }
+        }
+        if (duration <= 1.0) {
             currentTime = getCurrentSpotifyPreciseTime();
             MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
             NSNumber *durNum = center.nowPlayingInfo[MPMediaItemPropertyPlaybackDuration];
@@ -1372,6 +1423,16 @@ static void checkAndSyncLyricsOnScreen(void) {
 
         // 4. Полноэкранный караоке вид (в точности как нативный Spotify "двашки")
         UIView *existingContainer = [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
+        if (existingContainer) {
+            [scrollView bringSubviewToFront:existingContainer];
+            for (UIView *sub in scrollView.subviews) {
+                if (sub != existingContainer && sub.tag != KARAOKE_CONTAINER_TAG) {
+                    sub.hidden = YES;
+                    sub.userInteractionEnabled = NO;
+                }
+            }
+        }
+
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
             NSString *lyricsStr = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
             if (!lyricsStr || lyricsStr.length == 0) {
@@ -1400,6 +1461,13 @@ static void checkAndSyncLyricsOnScreen(void) {
 
                 UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, viewW, 1000)];
                 container.tag = KARAOKE_CONTAINER_TAG;
+                container.userInteractionEnabled = YES;
+
+                UITapGestureRecognizer *contTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeContainerTapped:)];
+                contTap.delegate = [AntiCensorTapHandler sharedHandler];
+                contTap.cancelsTouchesInView = NO;
+                [container addGestureRecognizer:contTap];
+
                 g_currentKaraokeLabels = [NSMutableArray array];
 
                 for (NSUInteger i = 0; i < g_currentKaraokeItems.count; i++) {
@@ -1416,6 +1484,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                     lbl.tag = i;
 
                     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeLineTapped:)];
+                    tap.delegate = [AntiCensorTapHandler sharedHandler];
+                    tap.cancelsTouchesInView = NO;
                     [lbl addGestureRecognizer:tap];
 
                     CGSize maxS = CGSizeMake(contentW, CGFLOAT_MAX);
@@ -1434,7 +1504,18 @@ static void checkAndSyncLyricsOnScreen(void) {
                 curY += 280.0; // отступ снизу для комфортного скролла последних строк
                 container.frame = CGRectMake(0, 0, viewW, curY);
                 [scrollView addSubview:container];
+                [scrollView bringSubviewToFront:container];
+                scrollView.delaysContentTouches = NO;
+                scrollView.canCancelContentTouches = YES;
                 scrollView.contentSize = CGSizeMake(viewW, curY);
+
+                // Отключаем клики на устаревших элементах Spotify под нашим контейнером
+                for (UIView *sub in scrollView.subviews) {
+                    if (sub != container && sub.tag != KARAOKE_CONTAINER_TAG) {
+                        sub.hidden = YES;
+                        sub.userInteractionEnabled = NO;
+                    }
+                }
             }
         }
 
@@ -1565,16 +1646,11 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
 
     if (ourAudioPlayer.currentItem.status != AVPlayerItemStatusReadyToPlay) return;
 
-    double spotifyTime = getCurrentSpotifyPreciseTime();
+    // Синхронизируем системную позицию с нашим плеером, чтобы таймлайн Spotify следовал за звуком
     double ourTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-    double diff = fabs(ourTime - spotifyTime);
-
-    // Только при действительно сильном рассинхроне (> 3.0 сек) и не чаще 1 раза в 2.5 сек:
-    static NSTimeInterval s_lastPeriodicSeek = 0;
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (diff > 3.0 && (now - s_lastPeriodicSeek > 2.5) && !g_isPlayerSeeking) {
-        s_lastPeriodicSeek = now;
-        safeSeekPlayerToTime(spotifyTime);
+    if (!isnan(ourTime) && ourTime >= 0) {
+        g_spotifyLastReportedPosition = ourTime;
+        g_spotifyLastReportedTimestamp = CACurrentMediaTime();
     }
 
     // Гарантируем, что громкость нашего плеера всегда 1.0, когда трек должен играть
@@ -1588,6 +1664,7 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
 
     // Синхронизируем Dynamic Island и экран блокировки (раз в секунду)
     static NSTimeInterval lastNPUpdate = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (now - lastNPUpdate >= 1.0) {
         lastNPUpdate = now;
         updateNowPlayingCenter();
@@ -1616,27 +1693,30 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
     }
 
+    // Плавный переход (Crossfade): если уже играл трек, мягко затухаем его, а не обрываем звук
     if (ourAudioPlayer) {
         if (isObservingPlayerItem) {
             @try { [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:kStatusObserverContext]; } @catch (id ex) {}
             isObservingPlayerItem = NO;
         }
-        [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
-        isObservingPlayerItem = YES;
-        [ourAudioPlayer replaceCurrentItemWithPlayerItem:item];
-        ourAudioPlayer.volume = 1.0f;
-    } else {
-        [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
-        isObservingPlayerItem = YES;
-        ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
-        if (@available(iOS 10.0, *)) {
-            ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
-        }
-        ourAudioPlayer.volume = 1.0f;
+        AVPlayer *oldP = ourAudioPlayer;
+        fadeOutPlayer(oldP, 1.5);
+        ourAudioPlayer = nil;
+    }
+
+    [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
+    isObservingPlayerItem = YES;
+    ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
+    if (@available(iOS 10.0, *)) {
+        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
+    }
+
+    if (initialPosition > 0.5) {
+        [ourAudioPlayer seekToTime:CMTimeMakeWithSeconds(initialPosition, NSEC_PER_SEC)];
     }
 
     if (isSpotifyCurrentlyPlaying) {
-        [ourAudioPlayer play];
+        fadeInPlayer(ourAudioPlayer, 1.2);
         updateNowPlayingCenter();
     }
 }
@@ -1673,22 +1753,6 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
         } else {
             [g_streamCache removeObjectForKey:scUrl];
             [g_streamCacheTimestamps removeObjectForKey:scUrl];
-        }
-    }
-
-    // Отвязываем старый плеер и мягко гасим его в отдельной переменной,
-    // чтобы таймеры затухания ни в коем случае не заглушили новый трек!
-    if (ourAudioPlayer) {
-        AVPlayer *oldFadingPlayer = ourAudioPlayer;
-        ourAudioPlayer = nil;
-        for (int i = 1; i <= 5; i++) {
-            float v = 1.0f - ((float)i / 5.0f);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                oldFadingPlayer.volume = v;
-                if (v <= 0.02f) {
-                    [oldFadingPlayer pause];
-                }
-            });
         }
     }
 
@@ -1942,21 +2006,46 @@ static void showManageAllTracksDialog(void) {
 
     NSString *storedUrl = [NSString stringWithFormat:@"local://%@", filename];
 
-    if (self.targetURI && [self.targetURI hasPrefix:@"spotify:track:"] && self.targetURI.length > 15) {
-        saveOverride(self.targetURI, storedUrl);
+    NSString *effectiveUri = self.targetURI;
+    NSString *effectiveTitle = self.targetTitle ?: self.displayTrack;
+    NSString *effectiveArtist = self.targetArtist ?: @"";
+
+    if (effectiveUri && [effectiveUri hasPrefix:@"spotify:track:"] && effectiveUri.length > 15) {
+        saveOverride(effectiveUri, storedUrl);
     }
     if (self.displayTrack.length > 1) {
         saveOverride(self.displayTrack, storedUrl);
     }
-    if (self.targetTitle && self.targetTitle.length > 1) {
-        saveOverride(self.targetTitle, storedUrl);
-        if (self.targetArtist && self.targetArtist.length > 1) {
-            saveOverride([NSString stringWithFormat:@"%@ - %@", self.targetArtist, self.targetTitle], storedUrl);
+    if (effectiveTitle && effectiveTitle.length > 1) {
+        saveOverride(effectiveTitle, storedUrl);
+        if (effectiveArtist.length > 1) {
+            saveOverride([NSString stringWithFormat:@"%@ - %@", effectiveArtist, effectiveTitle], storedUrl);
         }
     }
 
-    // Мгновенный запуск локального аудиофайла без задержек
-    startReplacementAudio(self.targetURI ?: (self.targetTitle ?: self.displayTrack), storedUrl, getCurrentSpotifyPreciseTime());
+    // Привязываем переменные текущего воспроизведения, чтобы караоке и таймер были связаны с этим треком
+    if (effectiveTitle.length > 0) currentActiveSpotifyTrackTitle = effectiveTitle;
+    if (effectiveArtist.length > 0) currentActiveSpotifyTrackArtist = effectiveArtist;
+    if (effectiveUri.length > 0) currentActiveSpotifyTrackURI = effectiveUri;
+    currentPlayingKey = effectiveUri ?: effectiveTitle;
+
+    // Сбрасываем кэш караоке, чтобы текст мгновенно обновился и связался с аудио
+    g_currentKaraokeTrackKey = nil;
+    g_lastActiveKaraokeIdx = -1;
+
+    // Пытаемся извлечь встроенный текст из локального аудиофайла (ID3 / USLT)
+    NSString *existingLyrics = getLyricsForTrack(effectiveUri, effectiveTitle, effectiveArtist);
+    if (!existingLyrics || existingLyrics.length == 0) {
+        AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:destPath]];
+        NSString *embedded = [asset lyrics];
+        if (embedded && embedded.length > 10) {
+            saveLyricsForTrack(effectiveUri ?: effectiveTitle, embedded);
+            if (effectiveTitle) saveLyricsForTrack(effectiveTitle, embedded);
+        }
+    }
+
+    // Мгновенный плавный запуск локального аудиофайла
+    startReplacementAudio(currentPlayingKey, storedUrl, 0.0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = getTopViewController();
