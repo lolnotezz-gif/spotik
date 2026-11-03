@@ -1,6 +1,8 @@
 name: Build AntiCensor iOS
 
 on:
+  push:
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -26,6 +28,7 @@ jobs:
             -framework UIKit \
             -framework AVFoundation \
             -framework CoreMedia \
+            -framework MediaPlayer \
             -dynamiclib \
             -o AntiCensor.dylib \
             tweak/AntiCensor.m
