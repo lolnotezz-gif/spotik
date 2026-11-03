@@ -1,0 +1,32 @@
+name: Build AntiCensor iOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Compile AntiCensor.dylib
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=14.0 \
+            -fobjc-arc \
+            -framework Foundation \
+            -framework UIKit \
+            -framework AVFoundation \
+            -dynamiclib \
+            -o AntiCensor.dylib \
+            tweak/AntiCensor.m
+
+      - name: Upload AntiCensor.dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntiCensor.dylib
+          path: AntiCensor.dylib
