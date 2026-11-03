@@ -1188,8 +1188,8 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
             } else {
-                lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.65];
-                lbl.alpha = 0.85f;
+                lbl.textColor = [UIColor colorWithWhite:0.3 alpha:0.7];
+                lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformIdentity;
             }
         }
@@ -1232,7 +1232,34 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
     if (!rawLrcOrText || rawLrcOrText.length == 0) return nil;
     NSMutableArray<AntiCensorLyricItem *> *items = [NSMutableArray array];
 
-    NSArray *rawLines = [rawLrcOrText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    // Поддержка inline LRC: "[00:14.02]текст[00:17.23]текст" в одной строке
+    // Сначала проверяем, содержит ли строка теги — если да, сплитируем по ним
+    NSRegularExpression *tagSplitRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[\\d{1,2}:\\d{2}(?:\\.\\d{1,3})?\\]" options:0 error:nil];
+    NSString *joinedText = [rawLrcOrText stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
+    joinedText = [joinedText stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+
+    // Если LRC теги встречаются внутри строки (не только в начале) — разобьём по тегам
+    NSArray<NSTextCheckingResult *> *allTagMatches = [tagSplitRegex matchesInString:joinedText options:0 range:NSMakeRange(0, joinedText.length)];
+    NSMutableString *preprocessed = [NSMutableString string];
+    if (allTagMatches.count > 1) {
+        // Расставляем перенос строки перед каждым тегом
+        NSUInteger lastEnd = 0;
+        for (NSTextCheckingResult *m in allTagMatches) {
+            if (m.range.location > lastEnd) {
+                NSString *between = [joinedText substringWithRange:NSMakeRange(lastEnd, m.range.location - lastEnd)];
+                [preprocessed appendString:between];
+            }
+            if (preprocessed.length > 0 && [preprocessed characterAtIndex:preprocessed.length - 1] != '\n') {
+                [preprocessed appendString:@"\n"];
+            }
+            lastEnd = m.range.location;
+        }
+        [preprocessed appendString:[joinedText substringFromIndex:lastEnd]];
+    } else {
+        [preprocessed appendString:joinedText];
+    }
+
+    NSArray *rawLines = [preprocessed componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\[(\\d{1,2}):(\\d{2})(?:\\.(\\d{1,3}))?\\](.*)" options:0 error:nil];
 
     BOOL anyTimestamp = NO;
@@ -1260,6 +1287,7 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
                 anyTimestamp = YES;
             }
         } else {
+            // Текст без таймкода
             AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
             it.time = -1.0;
             it.text = trimmed;
@@ -1270,6 +1298,7 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
     if (items.count == 0) return nil;
 
     if (!anyTimestamp) {
+        // Нет таймкодов — равномерно распределяем по длительности трека
         double dur = duration > 10.0 ? duration : 180.0;
         double intro = MIN(8.0, dur * 0.05);
         double outro = MAX(dur - 10.0, dur * 0.92);
@@ -1497,12 +1526,7 @@ static void checkAndSyncLyricsOnScreen(void) {
         UIView *existingContainer = [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
         if (existingContainer) {
             [scrollView bringSubviewToFront:existingContainer];
-            for (UIView *sub in scrollView.subviews) {
-                if (sub != existingContainer && sub.tag != KARAOKE_CONTAINER_TAG) {
-                    sub.hidden = YES;
-                    sub.userInteractionEnabled = NO;
-                }
-            }
+            // НЕ скрываем другие subviews — иначе кнопка закрытия экрана пропадает
         }
 
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
@@ -1512,7 +1536,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 collectAllLyricsLines(scrollView, lines);
                 if (lines.count > 0) {
                     lyricsStr = [lines componentsJoinedByString:@"\n"];
-                    // НЕ сохраняем автоматически в постоянную базу saveLyricsForTrack, чтобы не портить другие треки
+                    // НЕ сохраняем автоматически в постоянную базу saveLyricsForTrack
                 }
             }
 
@@ -1532,10 +1556,11 @@ static void checkAndSyncLyricsOnScreen(void) {
                 if (viewW < 200) viewW = [UIScreen mainScreen].bounds.size.width;
                 CGFloat padX = 24.0;
                 CGFloat contentW = viewW - (padX * 2);
-                CGFloat curY = 40.0;
+                CGFloat curY = 32.0;
 
                 UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, viewW, 1000)];
                 container.tag = KARAOKE_CONTAINER_TAG;
+                container.backgroundColor = [UIColor clearColor];
                 container.userInteractionEnabled = YES;
 
                 UITapGestureRecognizer *contTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeContainerTapped:)];
@@ -1549,11 +1574,11 @@ static void checkAndSyncLyricsOnScreen(void) {
                     AntiCensorLyricItem *it = g_currentKaraokeItems[i];
                     UILabel *lbl = [[UILabel alloc] init];
                     lbl.numberOfLines = 0;
-                    // Жирный крупный шрифт 25pt, в точности как на скрине нативного караоке Spotify
+                    // Шрифт 25pt Heavy — как нативное Spotify
                     lbl.font = [UIFont systemFontOfSize:25.0 weight:UIFontWeightHeavy];
-                    // Неактивные строки — тёмные/полупрозрачные черные (как на примере "двашки")
-                    lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.65];
-                    lbl.alpha = 0.85f;
+                    // Неактивные строки — тёмно-серые (хорошо видны на любом фоне)
+                    lbl.textColor = [UIColor colorWithWhite:0.3 alpha:0.7];
+                    lbl.alpha = 1.0f;
                     lbl.text = it.text;
                     lbl.userInteractionEnabled = YES;
                     lbl.tag = i;
@@ -1583,40 +1608,36 @@ static void checkAndSyncLyricsOnScreen(void) {
                 scrollView.delaysContentTouches = NO;
                 scrollView.canCancelContentTouches = YES;
                 scrollView.contentSize = CGSizeMake(viewW, curY);
-
-                // Отключаем клики на устаревших элементах Spotify под нашим контейнером
-                for (UIView *sub in scrollView.subviews) {
-                    if (sub != container && sub.tag != KARAOKE_CONTAINER_TAG) {
-                        sub.hidden = YES;
-                        sub.userInteractionEnabled = NO;
-                    }
-                }
             }
         }
 
-        // 5. Актуализация активной строки караоке в реальном времени
+        // 5. Актуализация активной строки в реальном времени
         if (g_currentKaraokeItems && g_currentKaraokeLabels.count == g_currentKaraokeItems.count) {
-            NSInteger activeIdx = 0;
+            // Ищем активную строку: последняя строка чей time <= currentTime
+            // -1 означает "ещё не началось" (до первой строки)
+            NSInteger activeIdx = -1;
             for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
-                if (currentTime >= g_currentKaraokeItems[i].time) {
+                if (g_currentKaraokeItems[i].time >= 0 && currentTime >= g_currentKaraokeItems[i].time) {
                     activeIdx = i;
-                } else {
+                } else if (g_currentKaraokeItems[i].time >= 0) {
                     break;
                 }
             }
 
             if (activeIdx != g_lastActiveKaraokeIdx) {
                 g_lastActiveKaraokeIdx = activeIdx;
-                [UIView animateWithDuration:0.2 animations:^{
+                [UIView animateWithDuration:0.25 animations:^{
                     for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
                         UILabel *lbl = g_currentKaraokeLabels[i];
                         if ((NSInteger)i == activeIdx) {
-                            lbl.textColor = [UIColor whiteColor]; // Активная поющаяся строка — чистый белый!
+                            // Активная строка — чисто белая, яркая
+                            lbl.textColor = [UIColor whiteColor];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
                         } else {
-                            lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.65]; // Неактивные — темные
-                            lbl.alpha = 0.85f;
+                            // Неактивные — тёмно-серые (хорошо видны на голубом фоне Spotify)
+                            lbl.textColor = [UIColor colorWithWhite:0.3 alpha:0.7];
+                            lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
                         }
                     }
