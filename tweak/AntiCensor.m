@@ -892,6 +892,7 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         if (item.status == AVPlayerItemStatusReadyToPlay) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
+                ourAudioPlayer.volume = 1.0f;
                 double targetSeconds = getCurrentSpotifyPreciseTime();
                 if (targetSeconds > 0.1) {
                     safeSeekPlayerToTime(targetSeconds);
@@ -900,23 +901,22 @@ static void safeSeekPlayerToTime(double targetSeconds) {
                         [ourAudioPlayer play];
                     }
                 }
-                // Плавное нарастание громкости при старте трека (0.0 -> 1.0 за 0.25 сек)
-                ourAudioPlayer.volume = 0.0f;
-                const int steps = 8;
-                for (int i = 1; i <= steps; i++) {
-                    float v = (float)i / (float)steps;
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        if (ourAudioPlayer) {
-                            ourAudioPlayer.volume = v;
-                        }
-                    });
-                }
             });
         } else if (item.status == AVPlayerItemStatusFailed) {
-            NSLog(@"[AntiCensor] AVPlayerItem failed: %@. Reverting to Spotify audio!", item.error);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                // Гарантированно возвращаем звук Spotify при сбое потока
-                stopReplacementAudio();
+            NSLog(@"[AntiCensor] AVPlayerItem failed: %@. Spotify STAYS MUTED to prevent censorship leak!", item.error);
+            // СТРОГО: Ни в коем случае НЕ размьючиваем Spotify! Цензурный оригинал НИКОГДА не должен прорываться в эфир!
+            isMutingSpotify = YES;
+            applyMuteStateToAllUnits();
+
+            // Перезагружаем заменяющий поток в тишине через 1.0 сек
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (currentPlayingKey && isSpotifyCurrentlyPlaying) {
+                    NSString *currRep = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+                    if (currRep) {
+                        [g_streamCache removeObjectForKey:currRep];
+                        startReplacementAudio(currentPlayingKey, currRep, getCurrentSpotifyPreciseTime());
+                    }
+                }
             });
         }
     }
@@ -1201,6 +1201,11 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
         safeSeekPlayerToTime(spotifyTime);
     }
 
+    // Гарантируем, что громкость нашего плеера всегда 1.0, когда трек должен играть
+    if (ourAudioPlayer && ourAudioPlayer.volume < 0.95f) {
+        ourAudioPlayer.volume = 1.0f;
+    }
+
     if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
         [ourAudioPlayer play];
     }
@@ -1243,6 +1248,7 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
         isObservingPlayerItem = YES;
         [ourAudioPlayer replaceCurrentItemWithPlayerItem:item];
+        ourAudioPlayer.volume = 1.0f;
     } else {
         [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
         isObservingPlayerItem = YES;
@@ -1269,7 +1275,7 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     currentPlayingKey = trackKey;
     isReplacementLoading = YES;
 
-    // Spotify глушим для заменяющего трека
+    // Spotify глушим для заменяющего трека: Цензурный трек НИКОГДА не звучит!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
 
@@ -1284,15 +1290,17 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
         return;
     }
 
-    // Мягкое угасание старого плеера, пока новый разрешается в сети (без резких щелчков!)
+    // Отвязываем старый плеер и мягко гасим его в отдельной переменной,
+    // чтобы таймеры затухания ни в коем случае не заглушили новый трек!
     if (ourAudioPlayer) {
-        AVPlayer *oldP = ourAudioPlayer;
+        AVPlayer *oldFadingPlayer = ourAudioPlayer;
+        ourAudioPlayer = nil;
         for (int i = 1; i <= 5; i++) {
             float v = 1.0f - ((float)i / 5.0f);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                oldP.volume = v;
-                if (v <= 0.01f) {
-                    [oldP pause];
+                oldFadingPlayer.volume = v;
+                if (v <= 0.02f) {
+                    [oldFadingPlayer pause];
                 }
             });
         }
@@ -1306,7 +1314,9 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
             }
             isReplacementLoading = NO;
             if (!streamUrl) {
-                stopReplacementAudio();
+                NSLog(@"[AntiCensor] Stream URL not resolved for %@. Spotify stays 100%% MUTED!", trackKey);
+                isMutingSpotify = YES;
+                applyMuteStateToAllUnits();
                 return;
             }
             playStreamUrl(streamUrl, trackKey, initialPosition);
