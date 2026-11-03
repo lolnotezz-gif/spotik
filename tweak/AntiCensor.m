@@ -1314,70 +1314,130 @@ static UILabel *findUnsyncedLyricsIndicatorLabel(UIView *root) {
     return nil;
 }
 
-static UIScrollView *findLyricsScrollViewInView(UIView *root) {
-    if (!root || root.hidden || root.alpha < 0.05) return nil;
-    if (root.tag == KARAOKE_CONTAINER_TAG) return nil;
+static UIScrollView *findLyricsScrollViewInView(UIView *win) {
+    if (!win || win.hidden || win.alpha < 0.05) return nil;
+    if (win.tag == KARAOKE_CONTAINER_TAG) return nil;
 
-    // 1. По явному индикатору "Синхронизация текста с музыкой пока не настроена"
-    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(root);
+    // 1. Быстрый возврат, если контейнер караоке уже смонтирован
+    UIView *existing = [win viewWithTag:KARAOKE_CONTAINER_TAG];
+    if (existing && [existing.superview isKindOfClass:[UIScrollView class]]) {
+        return (UIScrollView *)existing.superview;
+    }
+
+    // 2. Ищем по тексту-индикатору "Синхронизация текста..."
+    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(win);
     if (indicator) {
-        UIView *cur = indicator.superview;
-        while (cur && cur != root) {
-            if ([cur isKindOfClass:[UIScrollView class]] && cur.bounds.size.height > 150.0) {
-                return (UIScrollView *)cur;
+        // Поднимаемся до верхнего полноэкранного контейнера (экрана слов)
+        UIView *container = indicator.superview;
+        while (container && container.superview && container.superview != win) {
+            if (container.bounds.size.height > [UIScreen mainScreen].bounds.size.height * 0.5) {
+                break;
             }
-            cur = cur.superview;
+            container = container.superview;
         }
+        if (!container) container = win;
+
+        // В этом контейнере ищем главный UIScrollView (высота > 200, ширина > 200)
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:container];
+        UIScrollView *bestSV = nil;
+        CGFloat maxArea = 0;
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
+                UIScrollView *sv = (UIScrollView *)v;
+                CGFloat area = sv.bounds.size.width * sv.bounds.size.height;
+                if (sv.bounds.size.height > 200.0 && area > maxArea) {
+                    maxArea = area;
+                    bestSV = sv;
+                }
+            }
+            [queue addObjectsFromArray:v.subviews];
+        }
+        if (bestSV) return bestSV;
     }
 
-    // 2. Либо проверяем, содержит ли класс "Lyrics"
-    if ([root isKindOfClass:[UIScrollView class]]) {
-        NSString *cls = [NSStringFromClass([root class]) lowercaseString];
-        NSString *pCls = root.superview ? [NSStringFromClass([root.superview class]) lowercaseString] : @"";
-        if ([cls containsString:@"lyrics"] || [pCls containsString:@"lyrics"]) {
-            if (root.bounds.size.height > 150.0) {
-                return (UIScrollView *)root;
+    // 3. Ищем контейнер с классом, содержащим "Lyrics"
+    NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        NSString *cls = [NSStringFromClass([v class]) lowercaseString];
+        if ([cls containsString:@"lyrics"]) {
+            if ([v isKindOfClass:[UIScrollView class]] && v.bounds.size.height > 200.0) {
+                return (UIScrollView *)v;
+            }
+            for (UIView *sub in v.subviews) {
+                if ([sub isKindOfClass:[UIScrollView class]] && sub.bounds.size.height > 200.0) {
+                    return (UIScrollView *)sub;
+                }
             }
         }
+        [q addObjectsFromArray:v.subviews];
     }
 
-    for (UIView *sub in root.subviews) {
-        UIScrollView *found = findLyricsScrollViewInView(sub);
-        if (found) return found;
-    }
     return nil;
 }
 
 static void collectAllLyricsLines(UIView *root, NSMutableArray<NSString *> *outLines) {
     if (!root || root.tag == KARAOKE_CONTAINER_TAG) return;
-    if ([root isKindOfClass:[UILabel class]]) {
-        UILabel *lbl = (UILabel *)root;
-        NSString *t = [lbl.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (t.length > 0) {
-            NSString *low = [t lowercaseString];
-            if (![low containsString:@"синхронизация текста"] &&
-                ![low containsString:@"lyrics aren't"]) {
-                NSArray *lines = [t componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-                for (NSString *ln in lines) {
-                    NSString *s = [ln stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    if (s.length > 0 && ![outLines containsObject:s]) {
-                        [outLines addObject:s];
-                    }
+
+    NSMutableArray<NSDictionary *> *labelEntries = [NSMutableArray array];
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+        if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
+            NSString *t = nil;
+            if ([v isKindOfClass:[UILabel class]]) {
+                t = [((UILabel *)v).text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            } else if ([v isKindOfClass:[UITextView class]]) {
+                t = [((UITextView *)v).text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            }
+            if (t.length > 0) {
+                NSString *low = [t lowercaseString];
+                if (![low containsString:@"синхронизация"] &&
+                    ![low containsString:@"lyrics aren't"] &&
+                    ![low containsString:@"поделиться"] &&
+                    ![low containsString:@"плейлист"] &&
+                    ![low containsString:@"любимые"]) {
+                    CGRect rect = [v convertRect:v.bounds toView:root];
+                    [labelEntries addObject:@{
+                        @"y": @(rect.origin.y),
+                        @"text": t
+                    }];
                 }
             }
         }
+        [q addObjectsFromArray:v.subviews];
     }
-    for (UIView *sub in root.subviews) {
-        collectAllLyricsLines(sub, outLines);
+
+    // Сортируем строго сверху вниз по оси Y!
+    [labelEntries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"y"] compare:b[@"y"]];
+    }];
+
+    for (NSDictionary *d in labelEntries) {
+        NSString *t = d[@"text"];
+        NSArray *lines = [t componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        for (NSString *ln in lines) {
+            NSString *s = [ln stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (s.length > 0 && ![outLines containsObject:s]) {
+                [outLines addObject:s];
+            }
+        }
     }
 }
 
-static void hideUnsyncedLyricsIndicator(UIView *scrollView) {
-    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(scrollView);
+static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
+    UIWindow *win = [viewOrWin isKindOfClass:[UIWindow class]] ? (UIWindow *)viewOrWin : viewOrWin.window;
+    if (!win) win = getKeyAppWindow();
+    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(win ?: viewOrWin);
     if (indicator) {
         indicator.hidden = YES;
         indicator.alpha = 0.0f;
-        if (indicator.superview && indicator.superview != scrollView) {
+        if (indicator.superview && indicator.superview != win) {
             indicator.superview.hidden = YES;
             indicator.superview.alpha = 0.0f;
         }
@@ -1448,7 +1508,7 @@ static void checkAndSyncLyricsOnScreen(void) {
             }
 
             // Прячем серую плашку "Синхронизация текста..."
-            hideUnsyncedLyricsIndicator(scrollView);
+            hideUnsyncedLyricsIndicator(win);
 
             if (lyricsStr && lyricsStr.length > 0) {
                 g_currentKaraokeTrackKey = trackKey;
@@ -1565,48 +1625,6 @@ static void checkAndSyncLyricsOnScreen(void) {
                 if (fabs(scrollView.contentOffset.y - targetY) > 10.0) {
                     [scrollView setContentOffset:CGPointMake(0, targetY) animated:YES];
                 }
-            }
-        }
-
-        // 6. Обновление карточки "Текст" на экране плеера (в точности как в примере "Котики")
-        if (g_currentKaraokeItems && g_currentKaraokeItems.count > 0) {
-            NSInteger cardIdx = 0;
-            for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
-                if (currentTime >= g_currentKaraokeItems[i].time) {
-                    cardIdx = i;
-                } else {
-                    break;
-                }
-            }
-
-            NSMutableArray *cQueue = [NSMutableArray arrayWithObject:win];
-            while (cQueue.count > 0) {
-                UIView *v = cQueue.firstObject;
-                [cQueue removeObjectAtIndex:0];
-                if ([v isKindOfClass:[UILabel class]]) {
-                    UILabel *l = (UILabel *)v;
-                    if ([l.text isEqualToString:@"Текст"] || [l.text isEqualToString:@"Lyrics"]) {
-                        UIView *card = l.superview;
-                        while (card && card != win && card.bounds.size.height < 100) {
-                            card = card.superview;
-                        }
-                        if (card && card != win) {
-                            for (UIView *sub in card.subviews) {
-                                if ([sub isKindOfClass:[UILabel class]] && sub != l) {
-                                    UILabel *previewLbl = (UILabel *)sub;
-                                    if (previewLbl.bounds.size.height > 25 || previewLbl.numberOfLines != 1) {
-                                        previewLbl.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightBold];
-                                        previewLbl.textColor = [UIColor whiteColor];
-                                        previewLbl.alpha = 1.0f;
-                                        previewLbl.text = g_currentKaraokeItems[cardIdx].text;
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-                [cQueue addObjectsFromArray:v.subviews];
             }
         }
 
@@ -1790,6 +1808,8 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
             currentActiveSpotifyTrackURI = trackURI;
             lastKnownSpotifyPosition = 0.0;
             lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+            g_currentKaraokeItems = nil;
+            g_currentKaraokeLabels = nil;
             g_lastActiveKaraokeIdx = -1;
             g_currentKaraokeTrackKey = nil;
         }
@@ -2607,6 +2627,10 @@ static void checkAndInjectProfileDrawerButton(void) {
         CGFloat width = drawerView.bounds.size.width;
         if (width < 100 || width > win.bounds.size.width) width = win.bounds.size.width * 0.78;
 
+        if (btnY + 48.0 > drawerView.bounds.size.height && drawerView.bounds.size.height > 100) {
+            btnY = MAX(10.0, CGRectGetMinY(lblInDrawer) - 56.0);
+        }
+
         UIButton *btn = [drawerView viewWithTag:889911];
         if (!btn) {
             btn = createDrawerButton(CGRectMake(16.0, btnY, width - 32.0, 48.0));
@@ -2619,6 +2643,56 @@ static void checkAndInjectProfileDrawerButton(void) {
     }
 }
 
+static UIView *createContextMenuActionRow(CGRect frame, NSString *uri, NSString *title, NSString *artist, UIViewController *sheetVC) {
+    CGFloat rowH = (frame.size.height > 0) ? frame.size.height : 54.0;
+    CGFloat rowW = (frame.size.width > 0) ? frame.size.width : [UIScreen mainScreen].bounds.size.width;
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(frame.origin.x, frame.origin.y, rowW, rowH)];
+    row.tag = 778899;
+    row.backgroundColor = [UIColor clearColor];
+    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = row.bounds;
+    btn.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    btn.contentEdgeInsets = UIEdgeInsetsMake(0, 18, 0, 18);
+    [btn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(18, (rowH - 24) / 2.0, 24, 24)];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.tintColor = [UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0];
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightMedium];
+        iconView.image = [UIImage systemImageNamed:@"bolt.fill" withConfiguration:cfg];
+    }
+
+    CGFloat textLeft = iconView.image ? 54.0 : 18.0;
+    CGFloat textWidth = rowW - textLeft - 16.0;
+
+    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 8, textWidth, 22)];
+    titleLabel.text = @"⚡ AntiCensor (Замена / Текст)";
+    titleLabel.textColor = [UIColor whiteColor];
+    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UILabel *subLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 28, textWidth, 18)];
+    subLabel.text = @"Выбрать версию или текст песни";
+    subLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+    subLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    subLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    [row addSubview:iconView];
+    [row addSubview:titleLabel];
+    [row addSubview:subLabel];
+    [row addSubview:btn];
+
+    if (uri) objc_setAssociatedObject(btn, &kAntiCensorUriKey, uri, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (title) objc_setAssociatedObject(btn, &kAntiCensorTitleKey, title, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (artist) objc_setAssociatedObject(btn, &kAntiCensorArtistKey, artist, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    return row;
+}
+
 static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
     if (!sheetVC || !sheetVC.isViewLoaded) return;
     // СТРОЖАЙШАЯ ЗАЩИТА: контекстное меню ВСЕГДА модально представлено поверх другого экрана!
@@ -2628,12 +2702,7 @@ static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
     UIView *container = sheetVC.view;
     if (!container || !container.window) return;
 
-    UIView *existing = [container viewWithTag:778899];
-    if (existing) {
-        existing.hidden = NO;
-        [container bringSubviewToFront:existing];
-        return;
-    }
+    if ([container viewWithTag:778899]) return;
 
     // Проверяем, является ли это меню контекстным меню трека Spotify
     BOOL isContextMenu = NO;
@@ -2660,57 +2729,100 @@ static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
     NSString *extractedArtist = nil;
     extractBestTrackInfo(sheetVC, &extractedURI, &extractedTitle, &extractedArtist);
 
-    // Добавляем красивую зеленую плашку-капсулу в верхнюю часть контекстного меню (как на скриншоте 5!)
-    UIView *bannerView = [[UIView alloc] init];
-    bannerView.tag = 778899;
-    bannerView.translatesAutoresizingMaskIntoConstraints = NO;
-    bannerView.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:1.0];
-    bannerView.layer.cornerRadius = 22.0f;
-    bannerView.layer.masksToBounds = YES;
+    // 1. Ищем текстовую метку "Поделиться" / "Share" для вставки прямо над ней
+    UILabel *shareLabel = nil;
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:container];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)v;
+            NSString *txt = [lbl.text lowercaseString];
+            if ([txt containsString:@"поделиться"] || [txt isEqualToString:@"share"]) {
+                shareLabel = lbl;
+                break;
+            }
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
 
-    UIButton *mainBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    mainBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [mainBtn setTitle:@"⚡ AntiCensor (Замена / Текст)" forState:UIControlStateNormal];
-    [mainBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    mainBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14.5f];
-    mainBtn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    mainBtn.contentEdgeInsets = UIEdgeInsetsMake(0, 16, 0, 8);
-    [mainBtn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+    if (shareLabel) {
+        UIView *rowView = shareLabel;
+        while (rowView.superview && rowView.superview != container &&
+               ![rowView.superview isKindOfClass:[UIStackView class]] &&
+               ![rowView.superview isKindOfClass:[UITableView class]] &&
+               ![rowView.superview isKindOfClass:[UICollectionView class]]) {
+            rowView = rowView.superview;
+        }
+        UIView *parent = rowView.superview ?: container;
+        if ([parent isKindOfClass:[UIStackView class]]) {
+            UIStackView *sv = (UIStackView *)parent;
+            NSUInteger idx = [sv.arrangedSubviews indexOfObject:rowView];
+            UIView *actionRow = createContextMenuActionRow(CGRectZero, extractedURI, extractedTitle, extractedArtist, sheetVC);
+            actionRow.tag = 778899;
+            actionRow.translatesAutoresizingMaskIntoConstraints = NO;
+            [sv insertArrangedSubview:actionRow atIndex:idx];
+            [NSLayoutConstraint activateConstraints:@[
+                [actionRow.heightAnchor constraintEqualToConstant:54.0],
+                [actionRow.widthAnchor constraintEqualToAnchor:sv.widthAnchor]
+            ]];
+            return;
+        } else {
+            CGRect rowFrame = [rowView convertRect:rowView.bounds toView:parent];
+            CGFloat targetY = MAX(0, rowFrame.origin.y - 54.0);
+            UIView *actionRow = createContextMenuActionRow(CGRectMake(rowFrame.origin.x, targetY, rowFrame.size.width > 50 ? rowFrame.size.width : container.bounds.size.width, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
+            actionRow.tag = 778899;
+            [parent addSubview:actionRow];
+            return;
+        }
+    }
 
-    if (extractedURI) objc_setAssociatedObject(mainBtn, &kAntiCensorUriKey, extractedURI, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (extractedTitle) objc_setAssociatedObject(mainBtn, &kAntiCensorTitleKey, extractedTitle, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (extractedArtist) objc_setAssociatedObject(mainBtn, &kAntiCensorArtistKey, extractedArtist, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // 2. Если "Поделиться" не найден, проверяем UITableView
+    UITableView *targetTableView = nil;
+    queue = [NSMutableArray arrayWithObject:container];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UITableView class]]) {
+            targetTableView = (UITableView *)v;
+            break;
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
 
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    closeBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont systemFontOfSize:16.0f weight:UIFontWeightMedium];
-    [closeBtn addTarget:sheetVC action:@selector(anticensor_bannerCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
+    if (targetTableView) {
+        CGFloat rowW = targetTableView.bounds.size.width;
+        if (rowW < 100) rowW = container.bounds.size.width;
 
-    [bannerView addSubview:mainBtn];
-    [bannerView addSubview:closeBtn];
-    [container addSubview:bannerView];
+        UIView *existingHeader = targetTableView.tableHeaderView;
+        if (existingHeader) {
+            if ([existingHeader viewWithTag:778899]) return;
+            existingHeader.clipsToBounds = NO;
+            CGFloat existH = existingHeader.bounds.size.height;
+            if (existH < 50.0) existH = 70.0;
 
-    [NSLayoutConstraint activateConstraints:@[
-        [bannerView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
-        [bannerView.topAnchor constraintEqualToAnchor:container.safeAreaLayoutGuide.topAnchor constant:8.0],
-        [bannerView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:14.0],
-        [bannerView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-14.0],
-        [bannerView.heightAnchor constraintEqualToConstant:44.0],
+            CGRect hFrame = existingHeader.frame;
+            hFrame.size.height = existH + 54.0;
+            existingHeader.frame = hFrame;
 
-        [mainBtn.leadingAnchor constraintEqualToAnchor:bannerView.leadingAnchor],
-        [mainBtn.trailingAnchor constraintEqualToAnchor:closeBtn.leadingAnchor],
-        [mainBtn.topAnchor constraintEqualToAnchor:bannerView.topAnchor],
-        [mainBtn.bottomAnchor constraintEqualToAnchor:bannerView.bottomAnchor],
+            UIView *actionRow = createContextMenuActionRow(CGRectMake(0, existH, rowW, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
+            actionRow.tag = 778899;
+            actionRow.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+            [existingHeader addSubview:actionRow];
 
-        [closeBtn.trailingAnchor constraintEqualToAnchor:bannerView.trailingAnchor constant:-12.0],
-        [closeBtn.widthAnchor constraintEqualToConstant:32.0],
-        [closeBtn.topAnchor constraintEqualToAnchor:bannerView.topAnchor],
-        [closeBtn.bottomAnchor constraintEqualToAnchor:bannerView.bottomAnchor]
-    ]];
-
-    [container bringSubviewToFront:bannerView];
+            targetTableView.tableHeaderView = existingHeader;
+            return;
+        } else {
+            UIView *newHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 54.0)];
+            newHeader.tag = 778899;
+            newHeader.backgroundColor = [UIColor clearColor];
+            UIView *actionRow = createContextMenuActionRow(CGRectMake(0, 0, rowW, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
+            actionRow.tag = 778899;
+            [newHeader addSubview:actionRow];
+            targetTableView.tableHeaderView = newHeader;
+            return;
+        }
+    }
 }
 
 static void anticensor_onContextMenuButtonTap(UIViewController *callerVC, SEL _cmd, UIButton *sender) {
