@@ -1318,38 +1318,53 @@ static UIScrollView *findLyricsScrollViewInView(UIView *win) {
     if (!win || win.hidden || win.alpha < 0.05) return nil;
     if (win.tag == KARAOKE_CONTAINER_TAG) return nil;
 
-    // 1. Быстрый возврат, если контейнер караоке уже смонтирован
+    // 1. Быстрый возврат, если контейнер караоке уже смонтирован в активном видимом скролле
     UIView *existing = [win viewWithTag:KARAOKE_CONTAINER_TAG];
     if (existing && [existing.superview isKindOfClass:[UIScrollView class]]) {
-        return (UIScrollView *)existing.superview;
+        UIScrollView *p = (UIScrollView *)existing.superview;
+        if (!p.hidden && p.alpha > 0.05 && p.window != nil) {
+            return p;
+        }
     }
 
     // 2. Ищем по тексту-индикатору "Синхронизация текста..."
     UILabel *indicator = findUnsyncedLyricsIndicatorLabel(win);
-    if (indicator) {
-        // Поднимаемся до верхнего полноэкранного контейнера (экрана слов)
-        UIView *container = indicator.superview;
-        while (container && container.superview && container.superview != win) {
-            if (container.bounds.size.height > [UIScreen mainScreen].bounds.size.height * 0.5) {
-                break;
+    if (indicator && !indicator.hidden && indicator.window != nil) {
+        // Поднимаемся по цепочке родителей индикатора и проверяем subviews на наличие UIScrollView экрана текста
+        UIView *cur = indicator.superview;
+        while (cur && cur != win) {
+            for (UIView *sub in cur.subviews) {
+                if ([sub isKindOfClass:[UIScrollView class]] && sub.tag != KARAOKE_CONTAINER_TAG) {
+                    UIScrollView *sv = (UIScrollView *)sub;
+                    if (sv.bounds.size.height > 250.0 && sv.bounds.size.width > 250.0) {
+                        return sv;
+                    }
+                }
             }
-            container = container.superview;
+            cur = cur.superview;
         }
-        if (!container) container = win;
 
-        // В этом контейнере ищем главный UIScrollView (высота > 200, ширина > 200)
-        NSMutableArray *queue = [NSMutableArray arrayWithObject:container];
+        // Поиск в окне индикатора среди скроллов БЕЗ большой обложки альбома (чтобы исключить экран плеера)
+        UIWindow *w = indicator.window ?: (UIWindow *)win;
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:w];
         UIScrollView *bestSV = nil;
-        CGFloat maxArea = 0;
+        CGFloat maxH = 0;
         while (queue.count > 0) {
             UIView *v = queue.firstObject;
             [queue removeObjectAtIndex:0];
             if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
                 UIScrollView *sv = (UIScrollView *)v;
-                CGFloat area = sv.bounds.size.width * sv.bounds.size.height;
-                if (sv.bounds.size.height > 200.0 && area > maxArea) {
-                    maxArea = area;
-                    bestSV = sv;
+                BOOL hasLargeArt = NO;
+                for (UIView *s in sv.subviews) {
+                    if ([s isKindOfClass:[UIImageView class]] && s.bounds.size.width > 200.0) {
+                        hasLargeArt = YES; break;
+                    }
+                }
+                if (!hasLargeArt && sv.bounds.size.height > 250.0 && sv.bounds.size.width > 250.0) {
+                    if (sv.bounds.size.height > maxH) {
+                        maxH = sv.bounds.size.height;
+                        bestSV = sv;
+                    }
                 }
             }
             [queue addObjectsFromArray:v.subviews];
@@ -1357,23 +1372,27 @@ static UIScrollView *findLyricsScrollViewInView(UIView *win) {
         if (bestSV) return bestSV;
     }
 
-    // 3. Ищем контейнер с классом, содержащим "Lyrics"
-    NSMutableArray *q = [NSMutableArray arrayWithObject:win];
-    while (q.count > 0) {
-        UIView *v = q.firstObject;
-        [q removeObjectAtIndex:0];
-        NSString *cls = [NSStringFromClass([v class]) lowercaseString];
-        if ([cls containsString:@"lyrics"]) {
-            if ([v isKindOfClass:[UIScrollView class]] && v.bounds.size.height > 200.0) {
-                return (UIScrollView *)v;
-            }
-            for (UIView *sub in v.subviews) {
-                if ([sub isKindOfClass:[UIScrollView class]] && sub.bounds.size.height > 200.0) {
-                    return (UIScrollView *)sub;
+    // 3. Если у трека есть сохранённый пользователем текст — ищем открытый полноэкранный экран текста
+    NSString *userLyrics = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+    if (userLyrics && userLyrics.length > 0) {
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
+                UIScrollView *sv = (UIScrollView *)v;
+                BOOL hasLargeArt = NO;
+                for (UIView *s in sv.subviews) {
+                    if ([s isKindOfClass:[UIImageView class]] && s.bounds.size.width > 200.0) {
+                        hasLargeArt = YES; break;
+                    }
+                }
+                if (!hasLargeArt && sv.bounds.size.height > 400.0 && sv.bounds.size.width > [UIScreen mainScreen].bounds.size.width * 0.8) {
+                    return sv;
                 }
             }
+            [queue addObjectsFromArray:v.subviews];
         }
-        [q addObjectsFromArray:v.subviews];
     }
 
     return nil;
@@ -1423,7 +1442,7 @@ static void collectAllLyricsLines(UIView *root, NSMutableArray<NSString *> *outL
         NSArray *lines = [t componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
         for (NSString *ln in lines) {
             NSString *s = [ln stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (s.length > 0 && ![outLines containsObject:s]) {
+            if (s.length > 0) {
                 [outLines addObject:s];
             }
         }
@@ -1503,7 +1522,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 collectAllLyricsLines(scrollView, lines);
                 if (lines.count > 0) {
                     lyricsStr = [lines componentsJoinedByString:@"\n"];
-                    saveLyricsForTrack(trackKey, lyricsStr);
+                    // НЕ сохраняем автоматически в постоянную базу saveLyricsForTrack, чтобы не портить другие треки
                 }
             }
 
@@ -2644,18 +2663,17 @@ static void checkAndInjectProfileDrawerButton(void) {
 }
 
 static UIView *createContextMenuActionRow(CGRect frame, NSString *uri, NSString *title, NSString *artist, UIViewController *sheetVC) {
-    CGFloat rowH = (frame.size.height > 0) ? frame.size.height : 54.0;
-    CGFloat rowW = (frame.size.width > 0) ? frame.size.width : [UIScreen mainScreen].bounds.size.width;
+    CGFloat rowH = 54.0;
+    CGFloat rowW = (frame.size.width > 50) ? frame.size.width : [UIScreen mainScreen].bounds.size.width;
     UIView *row = [[UIView alloc] initWithFrame:CGRectMake(frame.origin.x, frame.origin.y, rowW, rowH)];
     row.tag = 778899;
-    row.backgroundColor = [UIColor clearColor];
-    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    row.backgroundColor = [UIColor colorWithRed:0.11 green:0.11 blue:0.11 alpha:1.0];
+    row.clipsToBounds = YES;
+    row.userInteractionEnabled = YES;
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = row.bounds;
     btn.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    btn.contentEdgeInsets = UIEdgeInsetsMake(0, 18, 0, 18);
     [btn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
 
     UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(18, (rowH - 24) / 2.0, 24, 24)];
@@ -2666,20 +2684,18 @@ static UIView *createContextMenuActionRow(CGRect frame, NSString *uri, NSString 
         iconView.image = [UIImage systemImageNamed:@"bolt.fill" withConfiguration:cfg];
     }
 
-    CGFloat textLeft = iconView.image ? 54.0 : 18.0;
+    CGFloat textLeft = 56.0;
     CGFloat textWidth = rowW - textLeft - 16.0;
 
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 8, textWidth, 22)];
     titleLabel.text = @"⚡ AntiCensor (Замена / Текст)";
     titleLabel.textColor = [UIColor whiteColor];
     titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
-    UILabel *subLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 28, textWidth, 18)];
+    UILabel *subLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 30, textWidth, 16)];
     subLabel.text = @"Выбрать версию или текст песни";
     subLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
     subLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    subLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
     [row addSubview:iconView];
     [row addSubview:titleLabel];
@@ -2748,10 +2764,7 @@ static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
 
     if (shareLabel) {
         UIView *rowView = shareLabel;
-        while (rowView.superview && rowView.superview != container &&
-               ![rowView.superview isKindOfClass:[UIStackView class]] &&
-               ![rowView.superview isKindOfClass:[UITableView class]] &&
-               ![rowView.superview isKindOfClass:[UICollectionView class]]) {
+        while (rowView.superview && rowView.superview != container && rowView.frame.size.height < 40.0) {
             rowView = rowView.superview;
         }
         UIView *parent = rowView.superview ?: container;
@@ -2769,10 +2782,28 @@ static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
             return;
         } else {
             CGRect rowFrame = [rowView convertRect:rowView.bounds toView:parent];
-            CGFloat targetY = MAX(0, rowFrame.origin.y - 54.0);
-            UIView *actionRow = createContextMenuActionRow(CGRectMake(rowFrame.origin.x, targetY, rowFrame.size.width > 50 ? rowFrame.size.width : container.bounds.size.width, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
+            CGFloat targetY = rowFrame.origin.y;
+            CGFloat targetW = parent.bounds.size.width > 50 ? parent.bounds.size.width : container.bounds.size.width;
+            UIView *actionRow = createContextMenuActionRow(CGRectMake(0, targetY, targetW, 54.0), extractedURI, extractedTitle, extractedArtist, sheetVC);
             actionRow.tag = 778899;
+
+            // Сдвигаем rowView ("Поделиться") и все следующие элементы вниз ровно на 54 пункта, чтобы избежать наложения!
+            for (UIView *sub in parent.subviews) {
+                if (sub != actionRow && sub.frame.origin.y >= targetY - 2.0) {
+                    sub.frame = CGRectOffset(sub.frame, 0, 54.0);
+                }
+            }
+
             [parent addSubview:actionRow];
+
+            if ([parent isKindOfClass:[UIScrollView class]]) {
+                UIScrollView *sv = (UIScrollView *)parent;
+                sv.contentSize = CGSizeMake(sv.contentSize.width, sv.contentSize.height + 54.0);
+            }
+            if ([parent.superview isKindOfClass:[UIScrollView class]]) {
+                UIScrollView *sv = (UIScrollView *)parent.superview;
+                sv.contentSize = CGSizeMake(sv.contentSize.width, sv.contentSize.height + 54.0);
+            }
             return;
         }
     }
@@ -2956,7 +2987,30 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 
 #pragma mark - Dynamic Injection Constructor
 
+static void cleanupPoisonedLyricsDatabase(void) {
+    NSMutableDictionary *lyricsDict = loadAllLyrics();
+    if (!lyricsDict || lyricsDict.count == 0) return;
+    NSMutableArray *toRemove = [NSMutableArray array];
+    for (NSString *key in lyricsDict) {
+        NSString *val = [lyricsDict[key] description];
+        // Если текст ошибочно сохранён от другой песни (например, "эстетику" под "сборник хуйни")
+        if ([key containsString:@"сборник"] && [val containsString:@"эстетику"]) {
+            [toRemove addObject:key];
+        }
+        if ([key containsString:@"кишлак"] && [val containsString:@"эстетику"] && ![key containsString:@"эстетик"]) {
+            [toRemove addObject:key];
+        }
+    }
+    if (toRemove.count > 0) {
+        for (NSString *k in toRemove) {
+            [lyricsDict removeObjectForKey:k];
+        }
+        persistLyrics(lyricsDict);
+    }
+}
+
 __attribute__((constructor)) static void initAntiCensor(void) {
+    cleanupPoisonedLyricsDatabase();
     NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v4.0 (Cloud Sync + Native Context Menu + Lyrics Karaoke)...");
 
     // Инициализация аудиосессии для гарантированной поддержки Dynamic Island и экрана блокировки
