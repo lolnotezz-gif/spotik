@@ -16,6 +16,7 @@
 #define DEFAULTS_HIDE_FLOAT_KEY    @"AntiCensor_HideFloatingButton"
 #define DEFAULTS_HIDE_BANNER_KEY   @"AntiCensor_HideBanner"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
+#define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
 
 #pragma mark - Fishhook (Mach-O Symbol Rebinding)
 
@@ -228,6 +229,11 @@ static OSStatus custom_AudioUnitInitialize(void *unit) {
 
 #pragma mark - Persistent JSON & UserDefaults Storage
 
+static NSString *normalizeKey(NSString *str) {
+    if (!str) return @"";
+    return [[str lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
 static NSString *getStorageFilePath(void) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docDir = paths.firstObject;
@@ -235,17 +241,38 @@ static NSString *getStorageFilePath(void) {
 }
 
 static NSMutableDictionary *loadAllOverrides(void) {
+    NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
     NSString *path = getStorageFilePath();
     NSData *data = [NSData dataWithContentsOfFile:path];
     if (data) {
         NSError *err = nil;
         NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
         if (dict && [dict isKindOfClass:[NSDictionary class]]) {
-            return [dict mutableCopy];
+            for (NSString *k in dict) {
+                NSString *normK = normalizeKey(k);
+                if (normK.length > 2 &&
+                    ![normK isEqualToString:@"текущий трек spotify"] &&
+                    ![normK isEqualToString:@"выбранный трек"] &&
+                    ![normK isEqualToString:@"текущий трек"]) {
+                    cleaned[normK] = dict[k];
+                }
+            }
+            return cleaned;
         }
     }
     NSDictionary *defaultsDict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_OVERRIDES_KEY];
-    return defaultsDict ? [defaultsDict mutableCopy] : [NSMutableDictionary dictionary];
+    if (defaultsDict) {
+        for (NSString *k in defaultsDict) {
+            NSString *normK = normalizeKey(k);
+            if (normK.length > 2 &&
+                ![normK isEqualToString:@"текущий трек spotify"] &&
+                ![normK isEqualToString:@"выбранный трек"] &&
+                ![normK isEqualToString:@"текущий трек"]) {
+                cleaned[normK] = defaultsDict[k];
+            }
+        }
+    }
+    return cleaned;
 }
 
 static void persistOverrides(NSDictionary *dict) {
@@ -259,20 +286,21 @@ static void persistOverrides(NSDictionary *dict) {
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
-static NSString *normalizeKey(NSString *str) {
-    if (!str) return @"";
-    return [[str lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-}
-
 static NSString *cleanTrackID(NSString *rawUri) {
     if (!rawUri) return nil;
     return [rawUri componentsSeparatedByString:@"?"].firstObject;
 }
 
 static void saveOverride(NSString *trackKey, NSString *scUrl) {
-    if (!trackKey || trackKey.length == 0) return;
-    NSMutableDictionary *dict = loadAllOverrides();
+    if (!trackKey) return;
     NSString *normKey = normalizeKey(trackKey);
+    if (normKey.length < 3 ||
+        [normKey isEqualToString:@"текущий трек spotify"] ||
+        [normKey isEqualToString:@"выбранный трек"]) {
+        return;
+    }
+
+    NSMutableDictionary *dict = loadAllOverrides();
     if (scUrl && scUrl.length > 0) {
         dict[normKey] = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     } else {
@@ -283,17 +311,26 @@ static void saveOverride(NSString *trackKey, NSString *scUrl) {
 
 static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *artist) {
     NSDictionary *dict = loadAllOverrides();
-    if (uri && uri.length > 0) {
+    if (!dict || dict.count == 0) return nil;
+
+    // 1. Поиск по точному Spotify URI
+    if (uri && uri.length > 5) {
         NSString *val = dict[normalizeKey(uri)];
-        if (val) return val;
+        if (val && val.length > 5) return val;
     }
-    if (title && title.length > 0) {
-        if (artist && artist.length > 0) {
-            NSString *val = dict[normalizeKey([NSString stringWithFormat:@"%@ - %@", artist, title])];
-            if (val) return val;
+    // 2. Поиск по «Артист - Название»
+    if (title && title.length > 0 && artist && artist.length > 0) {
+        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
+        NSString *val = dict[normalizeKey(combined)];
+        if (val && val.length > 5) return val;
+    }
+    // 3. Поиск по Названию трека (только если название длиннее 2 символов и не дефолтное)
+    if (title && title.length > 2) {
+        NSString *normTitle = normalizeKey(title);
+        if (![normTitle containsString:@"текущий трек"] && ![normTitle containsString:@"выбранный трек"]) {
+            NSString *val = dict[normTitle];
+            if (val && val.length > 5) return val;
         }
-        NSString *val = dict[normalizeKey(title)];
-        if (val) return val;
     }
     return nil;
 }
@@ -304,6 +341,90 @@ static NSString *getServerURL(void) {
         return DEFAULT_SERVER_URL;
     }
     return [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
+}
+
+#pragma mark - Direct Lightning-Fast SoundCloud Stream Resolver
+
+static void resolveSoundCloudDirectStream(NSString *scUrl, void (^completion)(NSURL *directAudioUrl)) {
+    if (!scUrl || scUrl.length == 0) {
+        completion(nil);
+        return;
+    }
+
+    // Если ссылка уже прямая на аудио
+    if ([scUrl hasSuffix:@".mp3"] || [scUrl hasSuffix:@".m3u8"] || [scUrl containsString:@"media-streaming.soundcloud.cloud"]) {
+        completion([NSURL URLWithString:scUrl]);
+        return;
+    }
+
+    NSString *cleanUrl = [scUrl componentsSeparatedByString:@"?"].firstObject;
+    NSString *resolveEndpoint = [NSString stringWithFormat:@"https://api-v2.soundcloud.com/resolve?url=%@&client_id=%@",
+                                 [cleanUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                                 SC_CLIENT_ID];
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:resolveEndpoint]];
+    [req setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
+    [req setTimeoutInterval:3.5];
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (!data || error) {
+            // Резервный мост Render
+            NSString *server = getServerURL();
+            NSString *encoded = [scUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+            completion([NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]]);
+            return;
+        }
+
+        @try {
+            NSDictionary *trackJson = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSArray *trans = trackJson[@"media"][@"transcodings"];
+            if (trans && [trans isKindOfClass:[NSArray class]] && trans.count > 0) {
+                NSDictionary *chosen = nil;
+                for (NSDictionary *t in trans) {
+                    if ([t[@"format"][@"protocol"] isEqualToString:@"progressive"]) {
+                        chosen = t;
+                        break;
+                    }
+                }
+                if (!chosen) chosen = trans.firstObject;
+
+                NSString *streamApi = chosen[@"url"];
+                if (streamApi) {
+                    NSString *sep = [streamApi containsString:@"?"] ? @"&" : @"?";
+                    NSString *finalStreamApi = [NSString stringWithFormat:@"%@%@client_id=%@", streamApi, sep, SC_CLIENT_ID];
+                    if (trackJson[@"track_authorization"]) {
+                        finalStreamApi = [finalStreamApi stringByAppendingFormat:@"&track_authorization=%@", trackJson[@"track_authorization"]];
+                    }
+
+                    NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:finalStreamApi]];
+                    [req2 setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
+                    [req2 setTimeoutInterval:3.5];
+
+                    [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *data2, NSURLResponse *resp2, NSError *err2) {
+                        if (data2 && !err2) {
+                            NSDictionary *streamJson = [NSJSONSerialization JSONObjectWithData:data2 options:0 error:nil];
+                            NSString *mediaUrl = streamJson[@"url"];
+                            if (mediaUrl && mediaUrl.length > 0) {
+                                completion([NSURL URLWithString:mediaUrl]);
+                                return;
+                            }
+                        }
+                        // Резервный мост
+                        NSString *server = getServerURL();
+                        NSString *encoded = [scUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+                        completion([NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]]);
+                    }] resume];
+                    return;
+                }
+            }
+        } @catch (id ex) {}
+
+        // Резервный мост
+        NSString *server = getServerURL();
+        NSString *encoded = [scUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+        completion([NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]]);
+    }];
+    [task resume];
 }
 
 #pragma mark - AntiCensor State & Sync Engine
@@ -403,6 +524,14 @@ static void stopReplacementAudio(void) {
 
 static void onPeriodicSyncCheck(NSTimer *timer) {
     if (!ourAudioPlayer || !isSpotifyCurrentlyPlaying) return;
+
+    // СТРОГАЯ ПРОВЕРКА: если текущий трек Spotify не имеет замены, моментально глушим плеер!
+    NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+    if (!repUrl || repUrl.length == 0) {
+        stopReplacementAudio();
+        return;
+    }
+
     if (ourAudioPlayer.currentItem.status != AVPlayerItemStatusReadyToPlay) return;
 
     double spotifyTime = getCurrentSpotifyPreciseTime();
@@ -423,12 +552,6 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
     if (!scUrl || scUrl.length == 0) return;
 
-    NSString *server = getServerURL();
-    NSString *encodedUrl = [scUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *streamEndpoint = [NSString stringWithFormat:@"%@/sc?url=%@", server, encodedUrl];
-    NSURL *audioUrl = [NSURL URLWithString:streamEndpoint];
-    if (!audioUrl) return;
-
     stopReplacementAudio();
 
     currentPlayingURI = trackKey;
@@ -439,21 +562,33 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
     [session setActive:YES error:nil];
 
-    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:audioUrl];
-    if (!g_playerObserver) {
-        g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
-    }
-    [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
-    isObservingPlayerItem = YES;
+    // Мгновенное прямое разрешение через SoundCloud API (0.3 сек вместо 25 сек!)
+    resolveSoundCloudDirectStream(scUrl, ^(NSURL *directAudioUrl) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!isMutingSpotify || ![trackKey isEqualToString:currentPlayingURI]) {
+                return;
+            }
+            if (!directAudioUrl) {
+                stopReplacementAudio();
+                return;
+            }
 
-    ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
-    ourAudioPlayer.volume = 1.0f;
+            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:directAudioUrl];
+            if (!g_playerObserver) {
+                g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
+            }
+            [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
+            isObservingPlayerItem = YES;
 
-    // Таймер точной синхронизации каждые 250 мс
-    periodicSyncTimer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
-        onPeriodicSyncCheck(timer);
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:periodicSyncTimer forMode:NSRunLoopCommonModes];
+            ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
+            ourAudioPlayer.volume = 1.0f;
+
+            periodicSyncTimer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                onPeriodicSyncCheck(timer);
+            }];
+            [[NSRunLoop mainRunLoop] addTimer:periodicSyncTimer forMode:NSRunLoopCommonModes];
+        });
+    });
 }
 
 #pragma mark - Window & Controller Helpers
@@ -533,13 +668,13 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
         UIViewController *topVC = getTopViewController();
         if (!topVC) return;
 
-        NSString *title = targetTitle ?: currentActiveSpotifyTrackTitle;
-        NSString *uri = targetURI ?: currentActiveSpotifyTrackURI;
-        NSString *artist = targetArtist ?: currentActiveSpotifyTrackArtist;
+        NSString *title = (targetTitle && targetTitle.length > 0) ? targetTitle : currentActiveSpotifyTrackTitle;
+        NSString *uri = (targetURI && targetURI.length > 0) ? targetURI : currentActiveSpotifyTrackURI;
+        NSString *artist = (targetArtist && targetArtist.length > 0) ? targetArtist : currentActiveSpotifyTrackArtist;
 
         NSString *displayTrack = @"Текущий трек Spotify";
         if (title && title.length > 0) {
-            displayTrack = artist ? [NSString stringWithFormat:@"%@ — %@", artist, title] : title;
+            displayTrack = (artist && artist.length > 0) ? [NSString stringWithFormat:@"%@ — %@", artist, title] : title;
         } else if (uri && uri.length > 0) {
             displayTrack = uri;
         }
@@ -566,19 +701,19 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
             UITextField *tf = alert.textFields.firstObject;
             NSString *inputUrl = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             if (inputUrl.length > 0) {
-                if (uri && uri.length > 0) saveOverride(uri, inputUrl);
-                if (title && title.length > 0) {
+                if (uri && uri.length > 5) saveOverride(uri, inputUrl);
+                if (title && title.length > 1) {
                     saveOverride(title, inputUrl);
-                    if (artist && artist.length > 0) {
+                    if (artist && artist.length > 1) {
                         saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
                     }
                 }
                 startReplacementAudio(uri ?: title, inputUrl, getCurrentSpotifyPreciseTime());
             } else {
-                if (uri && uri.length > 0) saveOverride(uri, nil);
-                if (title && title.length > 0) {
+                if (uri && uri.length > 5) saveOverride(uri, nil);
+                if (title && title.length > 1) {
                     saveOverride(title, nil);
-                    if (artist && artist.length > 0) {
+                    if (artist && artist.length > 1) {
                         saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
                     }
                 }
@@ -612,10 +747,10 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
         }];
 
         UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Сбросить замену этого трека" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-            if (uri && uri.length > 0) saveOverride(uri, nil);
-            if (title && title.length > 0) {
+            if (uri && uri.length > 5) saveOverride(uri, nil);
+            if (title && title.length > 1) {
                 saveOverride(title, nil);
-                if (artist && artist.length > 0) {
+                if (artist && artist.length > 1) {
                     saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
                 }
             }
@@ -782,9 +917,19 @@ static UIMenu * custom_menuWithTitle_image_identifier_options_children(id target
 
 #pragma mark - Universal Playback & Accurate Sync
 
-static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate) {
-    if (title && title.length > 0) currentActiveSpotifyTrackTitle = title;
-    if (artist && artist.length > 0) currentActiveSpotifyTrackArtist = artist;
+static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate) {
+    BOOL trackChanged = NO;
+    if (trackURI && trackURI.length > 0 && ![trackURI isEqualToString:currentActiveSpotifyTrackURI]) {
+        currentActiveSpotifyTrackURI = trackURI;
+        trackChanged = YES;
+    }
+    if (title && title.length > 0 && ![title isEqualToString:currentActiveSpotifyTrackTitle]) {
+        currentActiveSpotifyTrackTitle = title;
+        trackChanged = YES;
+    }
+    if (artist && artist.length > 0) {
+        currentActiveSpotifyTrackArtist = artist;
+    }
 
     if (hasElapsed) {
         lastKnownSpotifyPosition = position;
@@ -797,15 +942,15 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double 
 
     NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
 
+    // СТРОГАЯ ИЗОЛЯЦИЯ: Если у трека нет замены — НЕМЕДЛЕННО размьючиваем Spotify и выключаем плеер!
     if (!repUrl || repUrl.length == 0) {
-        // Обычный незаменённый трек: размьючиваем Spotify и глушим наш плеер
-        if (ourAudioPlayer) {
+        if (ourAudioPlayer || isMutingSpotify) {
             stopReplacementAudio();
         }
         return;
     }
 
-    // Заменённый трек на паузе
+    // Если Spotify стоит на паузе
     if (!isSpotifyCurrentlyPlaying) {
         if (ourAudioPlayer) {
             [ourAudioPlayer pause];
@@ -815,12 +960,15 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double 
         return;
     }
 
-    // Заменённый трек играет
+    // Заменённый трек должен играть!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
 
-    if (!ourAudioPlayer) {
-        startReplacementAudio(currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle, repUrl, position);
+    NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
+
+    // Если трек сменился на другой заменённый трек или плеер ещё не запущен
+    if (!ourAudioPlayer || trackChanged || ![trackKey isEqualToString:currentPlayingURI]) {
+        startReplacementAudio(trackKey, repUrl, position);
     } else {
         if (hasElapsed) {
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
@@ -843,27 +991,30 @@ static void custom_setNowPlayingInfo(id target, SEL _cmd, NSDictionary *info) {
 
     NSString *title = nil;
     NSString *artist = nil;
+    NSString *trackURI = nil;
     double pos = 0.0;
     BOOL hasElapsed = NO;
     BOOL hasRate = NO;
-    BOOL isPlaying = isSpotifyCurrentlyPlaying; // Сохраняем текущее состояние, если rate не передан!
+    BOOL isPlaying = isSpotifyCurrentlyPlaying;
 
     for (id k in info) {
         NSString *kStr = [k description];
-        if ([kStr localizedCaseInsensitiveContainsString:@"title"]) {
+        if ([kStr isEqualToString:@"MPMediaItemPropertyTitle"] || [kStr.lowercaseString isEqualToString:@"title"]) {
             title = [info[k] description];
-        } else if ([kStr localizedCaseInsensitiveContainsString:@"artist"]) {
+        } else if ([kStr isEqualToString:@"MPMediaItemPropertyArtist"] || [kStr.lowercaseString isEqualToString:@"artist"]) {
             artist = [info[k] description];
-        } else if ([kStr localizedCaseInsensitiveContainsString:@"elapsed"]) {
+        } else if ([kStr isEqualToString:@"MPNowPlayingInfoPropertyExternalContentIdentifier"] || [kStr.lowercaseString containsString:@"externalcontentidentifier"]) {
+            trackURI = [info[k] description];
+        } else if ([kStr isEqualToString:@"MPNowPlayingInfoPropertyElapsedPlaybackTime"] || [kStr.lowercaseString isEqualToString:@"elapsedplaybacktime"]) {
             pos = [info[k] doubleValue];
             hasElapsed = YES;
-        } else if ([kStr localizedCaseInsensitiveContainsString:@"rate"]) {
+        } else if ([kStr isEqualToString:@"MPNowPlayingInfoPropertyPlaybackRate"] || [kStr.lowercaseString isEqualToString:@"playbackrate"]) {
             isPlaying = ([info[k] floatValue] > 0.01f);
             hasRate = YES;
         }
     }
 
-    handleTrackPlaybackUpdate(title, artist, pos, isPlaying, hasElapsed, hasRate);
+    handleTrackPlaybackUpdate(title, artist, trackURI, pos, isPlaying, hasElapsed, hasRate);
 }
 
 #pragma mark - Floating Badge
@@ -915,7 +1066,7 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.0...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.1...");
 
     // 1. CoreAudio мьютер микшера Spotify
     struct rebinding audioRebind[2];
@@ -949,7 +1100,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         }
     }
 
-    // 4. Хук MPNowPlayingInfoCenter для синхронизации и перемотки по тексту
+    // 4. Хук MPNowPlayingInfoCenter для точного определения треков и синхронизации
     Class npCenterClass = objc_getClass("MPNowPlayingInfoCenter");
     if (npCenterClass) {
         Method mInfo = class_getInstanceMethod(npCenterClass, @selector(setNowPlayingInfo:));
