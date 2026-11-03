@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: anticensor-bridge
+    env: docker
+    dockerfilePath: backend/Dockerfile
+    plan: free
+    region: frankfurt
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8080
