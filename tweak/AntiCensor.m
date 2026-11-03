@@ -18,6 +18,7 @@
 #define DEFAULTS_HIDE_BANNER_KEY   @"AntiCensor_HideBanner"
 #define DEFAULTS_VERSION_KEY       @"AntiCensor_Storage_v3_5_Clean"
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
+#define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 #define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
 
@@ -653,18 +654,38 @@ static void stopReplacementAudio(void) {
 
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate);
 
-static void onPeriodicSyncCheck(NSTimer *timer) {
-    // 0. Проверяем и инжектим кнопку в боковое меню профиля (Profile Drawer)
-    checkAndInjectProfileDrawerButton();
+static void updateNowPlayingCenter(void) {
+    if (!ourAudioPlayer) return;
+    MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+    NSDictionary *curr = center.nowPlayingInfo;
+    NSMutableDictionary *info = curr ? [curr mutableCopy] : [NSMutableDictionary dictionary];
 
-    // 1. Проверяем смену трека на экране Spotify прямо сейчас
-    NSString *uiTitle = nil;
-    NSString *uiArtist = nil;
-    findSpotifyNowPlayingTrackInfo(&uiTitle, &uiArtist);
-    if (uiTitle && uiTitle.length > 1 && ![uiTitle isEqualToString:currentActiveSpotifyTrackTitle]) {
-        handleTrackPlaybackUpdate(uiTitle, uiArtist, nil, 0.0, isSpotifyCurrentlyPlaying, NO, NO);
-        return;
+    if (currentActiveSpotifyTrackTitle && currentActiveSpotifyTrackTitle.length > 0) {
+        info[MPMediaItemPropertyTitle] = currentActiveSpotifyTrackTitle;
     }
+    if (currentActiveSpotifyTrackArtist && currentActiveSpotifyTrackArtist.length > 0) {
+        info[MPMediaItemPropertyArtist] = currentActiveSpotifyTrackArtist;
+    }
+
+    double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+    if (!isnan(ourPos) && ourPos >= 0) {
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(ourPos);
+    }
+
+    double ourDur = CMTimeGetSeconds(ourAudioPlayer.currentItem.duration);
+    if (!isnan(ourDur) && ourDur > 0) {
+        info[MPMediaItemPropertyPlaybackDuration] = @(ourDur);
+    }
+
+    float rate = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) ? 1.0f : 0.0f;
+    info[MPNowPlayingInfoPropertyPlaybackRate] = @(rate);
+
+    center.nowPlayingInfo = info;
+}
+
+static void onPeriodicSyncCheck(NSTimer *timer) {
+    // 0. Инжектим кнопку в боковое меню профиля только при его открытии, и вычищаем любые фантомные элементы
+    checkAndInjectProfileDrawerButton();
 
     if (!ourAudioPlayer) return;
 
@@ -677,6 +698,7 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
     if (!isSpotifyCurrentlyPlaying) {
         if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
             [ourAudioPlayer pause];
+            updateNowPlayingCenter();
         }
         return;
     }
@@ -687,7 +709,8 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
     double ourTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
     double diff = fabs(ourTime - spotifyTime);
 
-    if (diff > 0.35) {
+    // Сглаженный порог рассинхрона (1.2 сек), чтобы не было заиканий звука и скачков громкости
+    if (diff > 1.2) {
         CMTime seekTime = CMTimeMakeWithSeconds(spotifyTime, NSEC_PER_SEC);
         [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
     }
@@ -695,6 +718,9 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
     if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) {
         [ourAudioPlayer play];
     }
+
+    // Синхронизируем Dynamic Island и экран блокировки
+    updateNowPlayingCenter();
 }
 
 static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPosition) {
@@ -705,8 +731,12 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     isMutingSpotify = YES;
     applyMuteStateToAllUnits(); // Spotify в полном мьюте
 
+    // КРИТИЧНО ДЛЯ DYNAMIC ISLAND И LOCK SCREEN:
+    // Ни в коем случае НЕ используем MixWithOthers! MixWithOthers отключает Dynamic Island и Now Playing!
     AVAudioSession *session = [AVAudioSession sharedInstance];
-    [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+    [session setCategory:AVAudioSessionCategoryPlayback
+             withOptions:AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowAirPlay
+                   error:nil];
     [session setActive:YES error:nil];
 
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:streamUrl];
@@ -732,6 +762,7 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
 
     if (isSpotifyCurrentlyPlaying) {
         [ourAudioPlayer play];
+        updateNowPlayingCenter();
     }
 }
 
@@ -821,9 +852,10 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     if (!isSpotifyCurrentlyPlaying) {
         if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
             [ourAudioPlayer pause];
+            updateNowPlayingCenter();
         }
-        isMutingSpotify = NO;
-        applyMuteStateToAllUnits();
+        // Spotify остаётся заглушенным, пока трек на паузе,
+        // чтобы при снятии с паузы не вырывался звук цензурного оригинала!
         return;
     }
 
@@ -840,7 +872,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         if (hasElapsed) {
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             double diff = fabs(ourPos - position);
-            if (diff > 0.3) {
+            if (diff > 1.2) {
                 CMTime newTime = CMTimeMakeWithSeconds(position, NSEC_PER_SEC);
                 [ourAudioPlayer seekToTime:newTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
             }
@@ -848,6 +880,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying) {
             [ourAudioPlayer play];
         }
+        updateNowPlayingCenter();
     }
 }
 
@@ -1286,16 +1319,17 @@ static UIButton *createDrawerButton(CGRect frame) {
         btn.frame = frame;
         btn.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     }
-    btn.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.16];
-    btn.layer.cornerRadius = 14.0f;
-    btn.layer.borderWidth = 1.2f;
-    btn.layer.borderColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.65].CGColor;
+    btn.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.18];
+    btn.layer.cornerRadius = 12.0f;
+    btn.layer.borderWidth = 1.0f;
+    btn.layer.borderColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.6].CGColor;
     btn.layer.masksToBounds = YES;
     btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    btn.contentEdgeInsets = UIEdgeInsetsMake(0, 16, 0, 16);
 
-    [btn setTitle:@"   ⚡ AntiCensor (Настройки / Плашка)" forState:UIControlStateNormal];
+    [btn setTitle:@"⚡  AntiCensor" forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:14.5f];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:15.0f];
 
     [btn addTarget:nil action:@selector(anticensor_drawerButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     return btn;
@@ -1308,21 +1342,13 @@ static void anticensor_drawerButtonTapped(id target, SEL _cmd, UIButton *sender)
         [gen impactOccurred];
     }
 
-    // 1. Восстанавливаем зеленую плашку и плавающую кнопку
+    // 1. Восстанавливаем показ баннера в меню "..."
     [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_BANNER_KEY];
-    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_FLOAT_KEY];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    // 2. Активируем плавающую кнопку на экране
-    setupFloatingBadge();
-
-    // 3. Открываем меню настроек и замен треков
-    NSString *uiTitle = nil;
-    NSString *uiArtist = nil;
-    findSpotifyNowPlayingTrackInfo(&uiTitle, &uiArtist);
-
-    NSString *title = uiTitle ?: currentActiveSpotifyTrackTitle;
-    NSString *artist = uiArtist ?: currentActiveSpotifyTrackArtist;
+    // 2. Открываем меню настроек замен треков прямо сейчас
+    NSString *title = currentActiveSpotifyTrackTitle;
+    NSString *artist = currentActiveSpotifyTrackArtist;
     NSString *uri = currentActiveSpotifyTrackURI;
 
     showReplacementDialogWithContext(uri, title, artist);
@@ -1334,14 +1360,11 @@ static UILabel *findDrawerLabel(UIView *root) {
         UILabel *lbl = (UILabel *)root;
         NSString *txt = [lbl.text lowercaseString];
         if (txt.length > 0) {
+            // ТОЛЬКО уникальная строка настроек бокового меню профиля!
+            // Никаких "недавние" или "обновления", чтобы не засорять медиатеку!
             if ([txt containsString:@"настройки и конфиденциальность"] ||
                 [txt containsString:@"settings and privacy"] ||
-                [txt containsString:@"статистика прослушивания"] ||
-                [txt containsString:@"listening history"] ||
-                [txt containsString:@"добавить аккаунт"] ||
-                [txt containsString:@"add account"] ||
-                [txt containsString:@"недавние"] ||
-                [txt containsString:@"обновления"]) {
+                [txt containsString:@"settings & privacy"]) {
                 return lbl;
             }
         }
@@ -1353,16 +1376,56 @@ static UILabel *findDrawerLabel(UIView *root) {
     return nil;
 }
 
+static void cleanupPhantomButtons(void) {
+    // 1. Полностью убираем плавающую пилюлю с экрана
+    if (floatingPillButton) {
+        [floatingPillButton removeFromSuperview];
+        floatingPillButton = nil;
+    }
+
+    // 2. Ищем и удаляем любые случайные кнопки (889911) и футеры (889910),
+    // если они оказались вне настоящего бокового меню (например, в UIScrollView медиатеки)
+    NSArray *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *win in windows) {
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if (v.tag == 889911 || v.tag == 889910) {
+                // Проверяем: есть ли в этой же ветке иерархии строка "настройки и конфиденциальность"?
+                BOOL inRealDrawer = NO;
+                UIView *p = v.superview;
+                while (p && p != win) {
+                    if (findDrawerLabel(p)) {
+                        inRealDrawer = YES;
+                        break;
+                    }
+                    p = p.superview;
+                }
+                if (!inRealDrawer) {
+                    [v removeFromSuperview];
+                }
+            } else {
+                [queue addObjectsFromArray:v.subviews];
+            }
+        }
+    }
+}
+
 static void checkAndInjectProfileDrawerButton(void) {
+    cleanupPhantomButtons();
+
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *win in windows) {
         if (!win || win.hidden) continue;
-        if ([win viewWithTag:889911]) continue; // Уже добавлено в этом окне
 
         UILabel *targetLabel = findDrawerLabel(win);
         if (!targetLabel) continue;
 
-        // Нашли элемент бокового меню! Определяем его контейнер
+        // Если метка скрыта или прозрачна — меню закрыто
+        if (targetLabel.hidden || targetLabel.alpha < 0.2) continue;
+
+        // Нашли "настройки и конфиденциальность"! Определяем родительский контейнер
         UIView *current = targetLabel;
         UITableView *parentTableView = nil;
         UIStackView *parentStackView = nil;
@@ -1378,17 +1441,17 @@ static void checkAndInjectProfileDrawerButton(void) {
         if (parentTableView) {
             if (![parentTableView viewWithTag:889911]) {
                 CGFloat width = parentTableView.bounds.size.width;
-                if (width < 100) width = win.bounds.size.width * 0.75;
+                if (width < 100 || width > win.bounds.size.width) width = win.bounds.size.width * 0.78;
                 UIView *existingFooter = parentTableView.tableFooterView;
                 CGFloat existH = existingFooter ? existingFooter.bounds.size.height : 0;
 
-                UIView *footerContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, existH + 65.0)];
+                UIView *footerContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, existH + 58.0)];
                 footerContainer.tag = 889910;
                 if (existingFooter) {
                     existingFooter.frame = CGRectMake(0, 0, width, existH);
                     [footerContainer addSubview:existingFooter];
                 }
-                UIButton *btn = createDrawerButton(CGRectMake(16.0, existH + 8.0, width - 32.0, 48.0));
+                UIButton *btn = createDrawerButton(CGRectMake(16.0, existH + 6.0, width - 32.0, 46.0));
                 [footerContainer addSubview:btn];
                 parentTableView.tableFooterView = footerContainer;
             }
@@ -1401,7 +1464,7 @@ static void checkAndInjectProfileDrawerButton(void) {
                 btn.translatesAutoresizingMaskIntoConstraints = NO;
                 [parentStackView addArrangedSubview:btn];
                 [NSLayoutConstraint activateConstraints:@[
-                    [btn.heightAnchor constraintEqualToConstant:48.0]
+                    [btn.heightAnchor constraintEqualToConstant:46.0]
                 ]];
             }
             continue;
@@ -1414,11 +1477,11 @@ static void checkAndInjectProfileDrawerButton(void) {
                     row = row.superview;
                 }
                 CGFloat width = parentScrollView.bounds.size.width;
-                if (width < 100) width = win.bounds.size.width * 0.75;
+                if (width < 100 || width > win.bounds.size.width) width = win.bounds.size.width * 0.78;
                 CGFloat rowBottom = CGRectGetMaxY(row.frame);
-                UIButton *btn = createDrawerButton(CGRectMake(16.0, rowBottom + 12.0, width - 32.0, 48.0));
+                UIButton *btn = createDrawerButton(CGRectMake(16.0, rowBottom + 10.0, width - 32.0, 46.0));
                 [parentScrollView addSubview:btn];
-                CGFloat neededH = rowBottom + 12.0 + 48.0 + 30.0;
+                CGFloat neededH = rowBottom + 10.0 + 46.0 + 20.0;
                 if (parentScrollView.contentSize.height < neededH) {
                     parentScrollView.contentSize = CGSizeMake(parentScrollView.contentSize.width, neededH);
                 }
@@ -1435,9 +1498,9 @@ static void checkAndInjectProfileDrawerButton(void) {
         if (![container viewWithTag:889911]) {
             CGRect rowInContainer = [row.superview convertRect:row.frame toView:container];
             CGFloat width = container.bounds.size.width;
-            if (width < 100) width = win.bounds.size.width * 0.75;
-            CGFloat btnY = CGRectGetMaxY(rowInContainer) + 12.0;
-            UIButton *btn = createDrawerButton(CGRectMake(16.0, btnY, width - 32.0, 48.0));
+            if (width < 100 || width > win.bounds.size.width) width = win.bounds.size.width * 0.78;
+            CGFloat btnY = CGRectGetMaxY(rowInContainer) + 10.0;
+            UIButton *btn = createDrawerButton(CGRectMake(16.0, btnY, width - 32.0, 46.0));
             [container addSubview:btn];
             [container bringSubviewToFront:btn];
         }
@@ -1585,8 +1648,15 @@ static void anticensor_floatingBadgeTapped(id target, SEL _cmd);
 static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognizer *pan);
 
 static void setupFloatingBadge(void) {
+    // В v3.8 плавающая кнопка скрыта по умолчанию, так как есть кнопка в боковом меню профиля
     BOOL isHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_FLOAT_KEY];
-    if (isHidden) return;
+    if (isHidden) {
+        if (floatingPillButton) {
+            [floatingPillButton removeFromSuperview];
+            floatingPillButton = nil;
+        }
+        return;
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = getKeyAppWindow();
@@ -1639,7 +1709,14 @@ static void anticensor_handleBadgePan(id target, SEL _cmd, UIPanGestureRecognize
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.7 (Local Files + SoundCloud)...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v3.8 (Dynamic Island + Clean Drawer + Smooth Playback)...");
+
+    // Инициализация аудиосессии для гарантированной поддержки Dynamic Island и экрана блокировки
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    [session setCategory:AVAudioSessionCategoryPlayback
+             withOptions:AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowAirPlay
+                   error:nil];
+    [session setActive:YES error:nil];
 
     // ОДНОКРАТНАЯ ПОЛНАЯ ОЧИСТКА БАЗЫ ДАННЫХ ОТ СТАРЫХ МУСОРНЫХ КЛЮЧЕЙ (WIPE CORRUPTED CACHE)
     BOOL isCleanedV35 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY];
@@ -1650,12 +1727,12 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
-    // v3.6: Автоматическое восстановление скрытой плашки и кнопки при обновлении
-    BOOL isRestoredV36 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_36];
-    if (!isRestoredV36) {
+    // v3.8: Чистка фантомных плашек, скрытие плавающей пилюли
+    BOOL isCleanedV38 = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_VERSION_KEY_38];
+    if (!isCleanedV38) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_BANNER_KEY];
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:DEFAULTS_HIDE_FLOAT_KEY];
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_36];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_HIDE_FLOAT_KEY];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:DEFAULTS_VERSION_KEY_38];
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
 
@@ -1720,10 +1797,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         class_addMethod(winClass, @selector(anticensor_drawerButtonTapped:), (IMP)anticensor_drawerButtonTapped, "v@:@");
     }
 
-    // 5. Запуск плавающей кнопки ⚡
-    setupFloatingBadge();
-
-    // 6. Фоновый высокочастотный таймер синхронизации и смены треков (каждые 250 мс)
+    // 5. Фоновый высокочастотный таймер синхронизации и смены треков (каждые 250 мс)
     dispatch_async(dispatch_get_main_queue(), ^{
         periodicSyncTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
             onPeriodicSyncCheck(timer);
