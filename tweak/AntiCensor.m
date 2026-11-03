@@ -15,7 +15,7 @@
 #define DEFAULTS_HIDE_FLOAT_KEY    @"AntiCensor_HideFloatingButton"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 
-#pragma mark - Fishhook (Embedded C Dynamic Symbol Rebinding)
+#pragma mark - Fishhook (Mach-O Symbol Rebinding)
 
 struct rebinding {
     const char *name;
@@ -170,45 +170,103 @@ static int ac_rebind_symbols(struct rebinding rebindings[], size_t nel) {
     return retval;
 }
 
-#pragma mark - CoreAudio Muting Engine (Silence Spotify Audio)
+#pragma mark - CoreAudio Hook (Intercept AudioUnitSetProperty kAudioUnitProperty_SetRenderCallback)
 
 static BOOL isMutingSpotify = NO;
 
-typedef OSStatus (*AudioUnitRender_t)(void *inUnit,
-                                     void *ioActionFlags,
-                                     const void *inTimeStamp,
-                                     uint32_t inOutputBusNumber,
-                                     uint32_t inNumberFrames,
-                                     void *ioData);
+typedef OSStatus (*AURenderCallback_t)(void *inRefCon,
+                                      void *ioActionFlags,
+                                      const void *inTimeStamp,
+                                      uint32_t inBusNumber,
+                                      uint32_t inNumberFrames,
+                                      void *ioData);
 
-static AudioUnitRender_t orig_AudioUnitRender = NULL;
+struct HookedRenderCallback {
+    void *unit;
+    AURenderCallback_t origProc;
+    void *origRefCon;
+};
 
-static OSStatus custom_AudioUnitRender(void *inUnit,
-                                       void *ioActionFlags,
-                                       const void *inTimeStamp,
-                                       uint32_t inOutputBusNumber,
-                                       uint32_t inNumberFrames,
-                                       void *ioData) {
-    if (!orig_AudioUnitRender) return 0;
-    OSStatus err = orig_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
-    
-    // Fill Spotify's audio buffer with zeroes (silence)
-    if (isMutingSpotify && ioData && err == 0) {
-        uint32_t *pNumBuffers = (uint32_t *)ioData;
-        uint32_t numBuffers = *pNumBuffers;
+static struct HookedRenderCallback g_callbacks[8];
+static int g_callbackCount = 0;
+
+static OSStatus anticensor_RenderCallback(void *inRefCon,
+                                         void *ioActionFlags,
+                                         const void *inTimeStamp,
+                                         uint32_t inBusNumber,
+                                         uint32_t inNumberFrames,
+                                         void *ioData) {
+    AURenderCallback_t origProc = NULL;
+    void *origRefCon = inRefCon;
+
+    for (int i = 0; i < g_callbackCount; i++) {
+        if (g_callbacks[i].origProc) {
+            origProc = g_callbacks[i].origProc;
+            origRefCon = g_callbacks[i].origRefCon;
+            break;
+        }
+    }
+
+    OSStatus res = 0;
+    if (origProc) {
+        res = origProc(origRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
+    }
+
+    // When playing replacement track, silence Spotify's CoreAudio buffer
+    if (isMutingSpotify && ioData) {
+        uint32_t *pNum = (uint32_t *)ioData;
+        uint32_t numBuffers = *pNum;
         struct MiniAudioBuffer {
             uint32_t mNumberChannels;
             uint32_t mDataByteSize;
             void *mData;
         };
         struct MiniAudioBuffer *buffers = (struct MiniAudioBuffer *)((char *)ioData + sizeof(uint32_t));
-        for (uint32_t i = 0; i < numBuffers; i++) {
-            if (buffers[i].mData && buffers[i].mDataByteSize > 0) {
-                memset(buffers[i].mData, 0, buffers[i].mDataByteSize);
+        for (uint32_t b = 0; b < numBuffers; b++) {
+            if (buffers[b].mData && buffers[b].mDataByteSize > 0) {
+                memset(buffers[b].mData, 0, buffers[b].mDataByteSize);
             }
         }
     }
-    return err;
+
+    return res;
+}
+
+typedef OSStatus (*AudioUnitSetProperty_t)(void *inUnit,
+                                           uint32_t inID,
+                                           uint32_t inScope,
+                                           uint32_t inElement,
+                                           const void *inData,
+                                           uint32_t inDataSize);
+
+static AudioUnitSetProperty_t orig_AudioUnitSetProperty = NULL;
+
+static OSStatus custom_AudioUnitSetProperty(void *inUnit,
+                                            uint32_t inID,
+                                            uint32_t inScope,
+                                            uint32_t inElement,
+                                            const void *inData,
+                                            uint32_t inDataSize) {
+    // 23 = kAudioUnitProperty_SetRenderCallback
+    if (inID == 23 && inData && inDataSize >= (sizeof(void *) * 2)) {
+        AURenderCallback_t *pProc = (AURenderCallback_t *)inData;
+        void **pRefCon = (void **)((char *)inData + sizeof(void *));
+
+        if (*pProc && *pProc != (AURenderCallback_t)anticensor_RenderCallback) {
+            if (g_callbackCount < 8) {
+                g_callbacks[g_callbackCount].unit = inUnit;
+                g_callbacks[g_callbackCount].origProc = *pProc;
+                g_callbacks[g_callbackCount].origRefCon = *pRefCon;
+                g_callbackCount++;
+            }
+            *pProc = (AURenderCallback_t)anticensor_RenderCallback;
+        }
+    }
+
+    if (orig_AudioUnitSetProperty) {
+        return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+    }
+    return 0;
 }
 
 #pragma mark - AntiCensor State
@@ -219,8 +277,11 @@ static NSString *currentPlayingURI = nil;
 static NSString *currentActiveSpotifyTrackURI = nil;
 static NSString *currentActiveSpotifyTrackTitle = nil;
 static NSString *currentActiveSpotifyTrackArtist = nil;
+
 static double lastKnownSpotifyPosition = 0.0;
+static NSTimeInterval lastSpotifyPositionTimestamp = 0.0;
 static BOOL isSpotifyCurrentlyPlaying = NO;
+static NSTimer *driftCheckTimer = nil;
 
 static UIButton *floatingPillButton = nil;
 
@@ -279,6 +340,18 @@ static NSString *cleanTrackID(NSString *rawUri) {
     return [rawUri componentsSeparatedByString:@"?"].firstObject;
 }
 
+static double getCurrentSpotifyPreciseTime(void) {
+    if (!isSpotifyCurrentlyPlaying) {
+        return lastKnownSpotifyPosition;
+    }
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval delta = now - lastSpotifyPositionTimestamp;
+    if (delta > 0 && delta < 600) {
+        return lastKnownSpotifyPosition + delta;
+    }
+    return lastKnownSpotifyPosition;
+}
+
 #pragma mark - AntiCensor Sync Observer
 
 @interface AntiCensorSyncObserver : NSObject
@@ -291,8 +364,9 @@ static AntiCensorSyncObserver *syncObserverInstance = nil;
     if ([keyPath isEqualToString:@"status"] && [object isKindOfClass:[AVPlayerItem class]]) {
         AVPlayerItem *item = (AVPlayerItem *)object;
         if (item.status == AVPlayerItemStatusReadyToPlay) {
-            if (lastKnownSpotifyPosition > 0.05) {
-                CMTime target = CMTimeMakeWithSeconds(lastKnownSpotifyPosition, NSEC_PER_SEC);
+            double currentPos = getCurrentSpotifyPreciseTime();
+            if (currentPos > 0.05) {
+                CMTime target = CMTimeMakeWithSeconds(currentPos, NSEC_PER_SEC);
                 [ourAudioPlayer seekToTime:target toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
                     if (isSpotifyCurrentlyPlaying) {
                         [ourAudioPlayer play];
@@ -308,11 +382,29 @@ static AntiCensorSyncObserver *syncObserverInstance = nil;
 
 static void stopReplacementAudio(void) {
     isMutingSpotify = NO;
+    if (driftCheckTimer) {
+        [driftCheckTimer invalidate];
+        driftCheckTimer = nil;
+    }
     if (ourAudioPlayer) {
         [ourAudioPlayer pause];
         ourAudioPlayer = nil;
     }
     currentPlayingURI = nil;
+}
+
+static void checkDriftAndSync(void) {
+    if (!ourAudioPlayer || !isMutingSpotify || !isSpotifyCurrentlyPlaying) return;
+    if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) return;
+
+    double expected = getCurrentSpotifyPreciseTime();
+    double actual = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+    double diff = actual - expected;
+
+    if (fabs(diff) > 0.20) {
+        CMTime target = CMTimeMakeWithSeconds(expected, NSEC_PER_SEC);
+        [ourAudioPlayer seekToTime:target toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    }
 }
 
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
@@ -325,7 +417,7 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     if (!audioUrl) return;
 
     currentPlayingURI = trackKey;
-    isMutingSpotify = YES; // Immediately mute Spotify's CoreAudio buffer!
+    isMutingSpotify = YES; // Silence Spotify's AudioUnit output immediately!
 
     NSError *error = nil;
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:&error];
@@ -346,6 +438,12 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     [item addObserver:syncObserverInstance forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:NULL];
 
     [ourAudioPlayer play];
+
+    if (!driftCheckTimer) {
+        driftCheckTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 target:[NSBlockOperation blockOperationWithBlock:^{
+            checkDriftAndSync();
+        }] selector:@selector(main) userInfo:nil repeats:YES];
+    }
 }
 
 #pragma mark - Window & Controller Helpers
@@ -425,7 +523,7 @@ static void showReplacementDialogWithContext(NSString *targetURI, NSString *targ
                         saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
                     }
                 }
-                startReplacementAudio(uri ?: title, inputUrl, lastKnownSpotifyPosition);
+                startReplacementAudio(uri ?: title, inputUrl, getCurrentSpotifyPreciseTime());
             } else {
                 if (uri && uri.length > 0) saveOverride(uri, nil);
                 if (title && title.length > 0) {
@@ -578,12 +676,14 @@ static UIMenu * custom_menuWithTitle_image_identifier_options_children(id self, 
     return nil;
 }
 
-#pragma mark - Universal Playback & Drift Synchronization
+#pragma mark - Universal Playback & Accurate Sync
 
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double position, BOOL isPlaying) {
     if (title && title.length > 0) currentActiveSpotifyTrackTitle = title;
     if (artist && artist.length > 0) currentActiveSpotifyTrackArtist = artist;
+
     lastKnownSpotifyPosition = position;
+    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
     isSpotifyCurrentlyPlaying = isPlaying;
 
     NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
@@ -592,7 +692,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double 
         if (!ourAudioPlayer) {
             startReplacementAudio(currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle, repUrl, position);
         } else {
-            isMutingSpotify = YES; // Ensure silence
+            isMutingSpotify = YES;
 
             if (!isPlaying && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
                 [ourAudioPlayer pause];
@@ -600,10 +700,9 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double 
                 [ourAudioPlayer play];
             }
 
-            // High-precision sync: correct any drift greater than 250 milliseconds
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-            double drift = fabs(ourPos - position);
-            if (drift > 0.25) {
+            double diff = fabs(ourPos - position);
+            if (diff > 0.25) {
                 CMTime newTime = CMTimeMakeWithSeconds(position, NSEC_PER_SEC);
                 [ourAudioPlayer seekToTime:newTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
             }
@@ -645,7 +744,7 @@ static void custom_setNowPlayingInfo(id self, SEL _cmd, NSDictionary *info) {
 
 static void setupFloatingBadge(void) {
     BOOL isHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_FLOAT_KEY];
-    if (isHidden) return; // Respect user preference
+    if (isHidden) return;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (floatingPillButton) return;
@@ -687,13 +786,13 @@ static void anticensor_handleBadgePan(id self, SEL _cmd, UIPanGestureRecognizer 
 #pragma mark - Dynamic Injection Constructor
 
 __attribute__((constructor)) static void initAntiCensor(void) {
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v2.1...");
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v2.2...");
 
-    // 1. Hook CoreAudio AudioUnitRender to completely silence Spotify audio during replacement
+    // 1. Hook CoreAudio AudioUnitSetProperty to intercept Spotify's AudioUnitDriver2 render callback
     struct rebinding audioRebind[1];
-    audioRebind[0].name = "AudioUnitRender";
-    audioRebind[0].replacement = (void *)custom_AudioUnitRender;
-    audioRebind[0].replaced = (void **)&orig_AudioUnitRender;
+    audioRebind[0].name = "AudioUnitSetProperty";
+    audioRebind[0].replacement = (void *)custom_AudioUnitSetProperty;
+    audioRebind[0].replaced = (void **)&orig_AudioUnitSetProperty;
     ac_rebind_symbols(audioRebind, 1);
 
     // 2. Swizzle UIViewController presentViewController:animated:completion: for 3-dots menu
