@@ -1622,15 +1622,14 @@ static void checkAndSyncLyricsOnScreen(void) {
     }
 }
 
+static void cleanupRogueBanners(void);
+
 static void onPeriodicSyncCheck(NSTimer *timer) {
     // 0. Инжектим кнопку в боковое меню профиля только при его открытии
     checkAndInjectProfileDrawerButton();
 
-    // 0.1 Инжектим кнопку в контекстное меню трека, если оно открыто
-    UIViewController *topVC = getTopViewController();
-    if (topVC) {
-        addAntiCensorRowToContextMenu(topVC);
-    }
+    // 0.1 Очищаем любые случайные баннеры с основных вкладок (Главная, Медиатека, Поиск)
+    cleanupRogueBanners();
 
     // 1. Проверяем и синхронизируем текст песни в реальном времени (караоке)
     checkAndSyncLyricsOnScreen();
@@ -2553,6 +2552,36 @@ static UILabel *findDrawerLabel(UIView *root) {
     return nil;
 }
 
+static void cleanupRogueBanners(void) {
+    NSArray *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *win in windows) {
+        if (!win) continue;
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if (v.tag == 778899) {
+                // Если этот баннер не внутри модально представленного контекстного контроллера — немедленно удаляем!
+                UIResponder *resp = v.nextResponder;
+                while (resp && ![resp isKindOfClass:[UIViewController class]]) {
+                    resp = resp.nextResponder;
+                }
+                if ([resp isKindOfClass:[UIViewController class]]) {
+                    UIViewController *vc = (UIViewController *)resp;
+                    if (!vc.presentingViewController || [vc isKindOfClass:[UITabBarController class]] || [vc isKindOfClass:[UINavigationController class]]) {
+                        [v removeFromSuperview];
+                        continue;
+                    }
+                } else {
+                    [v removeFromSuperview];
+                    continue;
+                }
+            }
+            [queue addObjectsFromArray:v.subviews];
+        }
+    }
+}
+
 static void checkAndInjectProfileDrawerButton(void) {
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *win in windows) {
@@ -2561,8 +2590,9 @@ static void checkAndInjectProfileDrawerButton(void) {
         UILabel *targetLabel = findDrawerLabel(win);
         if (!targetLabel) continue;
 
-        // Если метка скрыта или прозрачна — меню закрыто
-        if (targetLabel.hidden || targetLabel.alpha < 0.2 || !targetLabel.window) {
+        // Если метка скрыта, прозрачна или вне экрана — меню закрыто
+        CGRect inWin = [targetLabel convertRect:targetLabel.bounds toView:nil];
+        if (targetLabel.hidden || targetLabel.alpha < 0.2 || !targetLabel.window || inWin.origin.x < -10.0 || inWin.origin.x > win.bounds.size.width * 0.85) {
             UIView *existingBtn = [win viewWithTag:889911];
             if (existingBtn) existingBtn.hidden = YES;
             continue;
@@ -2599,6 +2629,10 @@ static void checkAndInjectProfileDrawerButton(void) {
 
 static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
     if (!sheetVC || !sheetVC.isViewLoaded) return;
+    // СТРОЖАЙШАЯ ЗАЩИТА: контекстное меню ВСЕГДА модально представлено поверх другого экрана!
+    if (!sheetVC.presentingViewController) return;
+    if ([sheetVC isKindOfClass:[UITabBarController class]] || [sheetVC isKindOfClass:[UINavigationController class]]) return;
+
     UIView *container = sheetVC.view;
     if (!container || !container.window) return;
 
@@ -2609,7 +2643,7 @@ static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
         return;
     }
 
-    // Проверяем, является ли это меню контекстным меню Spotify (наличие "Поделиться" / "Share" / "Любимые треки")
+    // Проверяем, является ли это меню контекстным меню трека Spotify
     BOOL isContextMenu = NO;
     NSMutableArray *chkQueue = [NSMutableArray arrayWithObject:container];
     while (chkQueue.count > 0) {
@@ -2617,9 +2651,10 @@ static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
         [chkQueue removeObjectAtIndex:0];
         if ([v isKindOfClass:[UILabel class]]) {
             NSString *txt = [((UILabel *)v).text lowercaseString];
-            if ([txt containsString:@"поделиться"] || [txt isEqualToString:@"share"] ||
-                [txt containsString:@"любимые треки"] || [txt containsString:@"liked songs"] ||
-                [txt containsString:@"исключить из"]) {
+            if ([txt containsString:@"добавить в очередь"] || [txt containsString:@"add to queue"] ||
+                [txt containsString:@"перейти в очередь"] || [txt containsString:@"go to queue"] ||
+                [txt containsString:@"исключить из музыкальных"] || [txt containsString:@"exclude from your taste"] ||
+                ([txt containsString:@"поделиться"] && [txt containsString:@"плейлист"])) {
                 isContextMenu = YES;
                 break;
             }
