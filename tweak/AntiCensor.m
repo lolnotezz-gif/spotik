@@ -1112,7 +1112,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     if (isnan(targetSeconds) || targetSeconds < 0) return;
 
     g_spotifyLastReportedPosition = targetSeconds;
-    g_spotifyLastReportedTimestamp = CACurrentMediaTime();
+    g_spotifyLastReportedTimestamp = [NSDate timeIntervalSinceReferenceDate];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         NSArray *windows = [UIApplication sharedApplication].windows;
@@ -1664,7 +1664,7 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
     double ourTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
     if (!isnan(ourTime) && ourTime >= 0) {
         g_spotifyLastReportedPosition = ourTime;
-        g_spotifyLastReportedTimestamp = CACurrentMediaTime();
+        g_spotifyLastReportedTimestamp = [NSDate timeIntervalSinceReferenceDate];
     }
 
     // Гарантируем, что громкость нашего плеера всегда 1.0, когда трек должен играть и не идет плавный переход (crossfade)

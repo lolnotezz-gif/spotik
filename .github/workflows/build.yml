@@ -29,6 +29,7 @@ jobs:
             -framework AVFoundation \
             -framework CoreMedia \
             -framework CoreGraphics \
+            -framework QuartzCore \
             -framework MediaPlayer \
             -dynamiclib \
             -o AntiCensor.dylib \
