@@ -28,6 +28,7 @@ jobs:
             -framework UIKit \
             -framework AVFoundation \
             -framework CoreMedia \
+            -framework CoreGraphics \
             -framework MediaPlayer \
             -dynamiclib \
             -o AntiCensor.dylib \
