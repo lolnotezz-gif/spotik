@@ -181,4 +181,558 @@ typedef OSStatus (*AudioUnitRender_t)(void *inUnit,
                                      uint32_t inNumberFrames,
                                      void *ioData);
 
-static AudioUnitRender_t orig_Audio
+static AudioUnitRender_t orig_AudioUnitRender = NULL;
+
+static OSStatus custom_AudioUnitRender(void *inUnit,
+                                       void *ioActionFlags,
+                                       const void *inTimeStamp,
+                                       uint32_t inOutputBusNumber,
+                                       uint32_t inNumberFrames,
+                                       void *ioData) {
+    if (!orig_AudioUnitRender) return 0;
+    OSStatus err = orig_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
+    
+    // Fill Spotify's audio buffer with zeroes (silence)
+    if (isMutingSpotify && ioData && err == 0) {
+        uint32_t *pNumBuffers = (uint32_t *)ioData;
+        uint32_t numBuffers = *pNumBuffers;
+        struct MiniAudioBuffer {
+            uint32_t mNumberChannels;
+            uint32_t mDataByteSize;
+            void *mData;
+        };
+        struct MiniAudioBuffer *buffers = (struct MiniAudioBuffer *)((char *)ioData + sizeof(uint32_t));
+        for (uint32_t i = 0; i < numBuffers; i++) {
+            if (buffers[i].mData && buffers[i].mDataByteSize > 0) {
+                memset(buffers[i].mData, 0, buffers[i].mDataByteSize);
+            }
+        }
+    }
+    return err;
+}
+
+#pragma mark - AntiCensor State
+
+static AVPlayer *ourAudioPlayer = nil;
+static NSString *currentPlayingURI = nil;
+
+static NSString *currentActiveSpotifyTrackURI = nil;
+static NSString *currentActiveSpotifyTrackTitle = nil;
+static NSString *currentActiveSpotifyTrackArtist = nil;
+static double lastKnownSpotifyPosition = 0.0;
+static BOOL isSpotifyCurrentlyPlaying = NO;
+
+static UIButton *floatingPillButton = nil;
+
+#pragma mark - Helpers
+
+static NSString *getServerURL(void) {
+    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:DEFAULTS_SERVER_KEY];
+    if (!url || url.length == 0) {
+        return DEFAULT_SERVER_URL;
+    }
+    return [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
+}
+
+static NSDictionary *getOverrides(void) {
+    NSDictionary *dict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_OVERRIDES_KEY];
+    return dict ?: @{};
+}
+
+static NSString *normalizeKey(NSString *str) {
+    if (!str) return @"";
+    return [[str lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static void saveOverride(NSString *trackKey, NSString *scUrl) {
+    if (!trackKey || trackKey.length == 0) return;
+    NSMutableDictionary *dict = [getOverrides() mutableCopy];
+    NSString *normKey = normalizeKey(trackKey);
+    if (scUrl && scUrl.length > 0) {
+        dict[normKey] = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    } else {
+        [dict removeObjectForKey:normKey];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:dict forKey:DEFAULTS_OVERRIDES_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *artist) {
+    NSDictionary *dict = getOverrides();
+    if (uri && uri.length > 0) {
+        NSString *val = dict[normalizeKey(uri)];
+        if (val) return val;
+    }
+    if (title && title.length > 0) {
+        if (artist && artist.length > 0) {
+            NSString *val = dict[normalizeKey([NSString stringWithFormat:@"%@ - %@", artist, title])];
+            if (val) return val;
+        }
+        NSString *val = dict[normalizeKey(title)];
+        if (val) return val;
+    }
+    return nil;
+}
+
+static NSString *cleanTrackID(NSString *rawUri) {
+    if (!rawUri) return nil;
+    return [rawUri componentsSeparatedByString:@"?"].firstObject;
+}
+
+#pragma mark - AntiCensor Sync Observer
+
+@interface AntiCensorSyncObserver : NSObject
+@end
+
+static AntiCensorSyncObserver *syncObserverInstance = nil;
+
+@implementation AntiCensorSyncObserver
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"status"] && [object isKindOfClass:[AVPlayerItem class]]) {
+        AVPlayerItem *item = (AVPlayerItem *)object;
+        if (item.status == AVPlayerItemStatusReadyToPlay) {
+            if (lastKnownSpotifyPosition > 0.05) {
+                CMTime target = CMTimeMakeWithSeconds(lastKnownSpotifyPosition, NSEC_PER_SEC);
+                [ourAudioPlayer seekToTime:target toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
+                    if (isSpotifyCurrentlyPlaying) {
+                        [ourAudioPlayer play];
+                    }
+                }];
+            }
+        }
+    }
+}
+@end
+
+#pragma mark - Audio Playback Engine
+
+static void stopReplacementAudio(void) {
+    isMutingSpotify = NO;
+    if (ourAudioPlayer) {
+        [ourAudioPlayer pause];
+        ourAudioPlayer = nil;
+    }
+    currentPlayingURI = nil;
+}
+
+static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
+    if (!scUrl || scUrl.length == 0) return;
+
+    NSString *server = getServerURL();
+    NSString *encodedUrl = [scUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *streamEndpoint = [NSString stringWithFormat:@"%@/sc?url=%@", server, encodedUrl];
+    NSURL *audioUrl = [NSURL URLWithString:streamEndpoint];
+    if (!audioUrl) return;
+
+    currentPlayingURI = trackKey;
+    isMutingSpotify = YES; // Immediately mute Spotify's CoreAudio buffer!
+
+    NSError *error = nil;
+    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:&error];
+    [[AVAudioSession sharedInstance] setActive:YES error:&error];
+
+    if (ourAudioPlayer) {
+        [ourAudioPlayer pause];
+        ourAudioPlayer = nil;
+    }
+
+    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:audioUrl];
+    ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
+    ourAudioPlayer.volume = 1.0f;
+
+    if (!syncObserverInstance) {
+        syncObserverInstance = [[AntiCensorSyncObserver alloc] init];
+    }
+    [item addObserver:syncObserverInstance forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:NULL];
+
+    [ourAudioPlayer play];
+}
+
+#pragma mark - Window & Controller Helpers
+
+static UIWindow *getKeyAppWindow(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+            UIWindowScene *winScene = (UIWindowScene *)scene;
+            for (UIWindow *w in winScene.windows) {
+                if (w.isKeyWindow) return w;
+            }
+            if (winScene.windows.count > 0) return winScene.windows.firstObject;
+        }
+    }
+    return [UIApplication sharedApplication].keyWindow ?: [UIApplication sharedApplication].windows.firstObject;
+}
+
+static UIViewController *getTopViewController(void) {
+    UIWindow *window = getKeyAppWindow();
+    UIViewController *topVC = window.rootViewController;
+    while (topVC.presentedViewController) {
+        topVC = topVC.presentedViewController;
+    }
+    if ([topVC isKindOfClass:[UINavigationController class]]) {
+        topVC = [(UINavigationController *)topVC visibleViewController];
+    }
+    if ([topVC isKindOfClass:[UITabBarController class]]) {
+        topVC = [(UITabBarController *)topVC selectedViewController];
+    }
+    return topVC;
+}
+
+#pragma mark - Settings & Replacement Dialog
+
+static void showReplacementDialogWithContext(NSString *targetURI, NSString *targetTitle, NSString *targetArtist) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *topVC = getTopViewController();
+        if (!topVC) return;
+
+        NSString *title = targetTitle ?: currentActiveSpotifyTrackTitle;
+        NSString *uri = targetURI ?: currentActiveSpotifyTrackURI;
+        NSString *artist = targetArtist ?: currentActiveSpotifyTrackArtist;
+
+        NSString *displayTrack = @"Выбранный трек";
+        if (title && title.length > 0) {
+            displayTrack = artist ? [NSString stringWithFormat:@"%@ — %@", artist, title] : title;
+        } else if (uri && uri.length > 0) {
+            displayTrack = uri;
+        }
+
+        NSString *existingUrl = getOverrideForTrack(uri, title, artist) ?: @"";
+        NSString *clip = [UIPasteboard generalPasteboard].string;
+        NSString *defaultText = existingUrl;
+        if (defaultText.length == 0 && clip && ([clip hasPrefix:@"http://"] || [clip hasPrefix:@"https://"])) {
+            defaultText = [clip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        }
+
+        NSString *alertMessage = [NSString stringWithFormat:@"Трек: %@\n\nВставь ссылку на песню из SoundCloud:", displayTrack];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AntiCensor"
+                                                                       message:alertMessage
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
+            textField.placeholder = @"https://soundcloud.com/...";
+            textField.text = defaultText;
+            textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        }];
+
+        UIAlertAction *saveAction = [UIAlertAction actionWithTitle:@"Сохранить" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            UITextField *tf = alert.textFields.firstObject;
+            NSString *inputUrl = [tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (inputUrl.length > 0) {
+                if (uri && uri.length > 0) saveOverride(uri, inputUrl);
+                if (title && title.length > 0) {
+                    saveOverride(title, inputUrl);
+                    if (artist && artist.length > 0) {
+                        saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
+                    }
+                }
+                startReplacementAudio(uri ?: title, inputUrl, lastKnownSpotifyPosition);
+            } else {
+                if (uri && uri.length > 0) saveOverride(uri, nil);
+                if (title && title.length > 0) {
+                    saveOverride(title, nil);
+                    if (artist && artist.length > 0) {
+                        saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
+                    }
+                }
+                stopReplacementAudio();
+            }
+        }];
+
+        // Toggle Floating Button visibility (Скрыть плавающую кнопку)
+        BOOL isFloatHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_FLOAT_KEY];
+        NSString *floatBtnTitle = isFloatHidden ? @"Показать плавающую кнопку (⚡)" : @"Скрыть плавающую кнопку (⚡)";
+        UIAlertAction *toggleFloatAction = [UIAlertAction actionWithTitle:floatBtnTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            BOOL newHidden = !isFloatHidden;
+            [[NSUserDefaults standardUserDefaults] setBool:newHidden forKey:DEFAULTS_HIDE_FLOAT_KEY];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            if (floatingPillButton) {
+                floatingPillButton.hidden = newHidden;
+            }
+        }];
+
+        UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Сбросить замену трека" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+            if (uri && uri.length > 0) saveOverride(uri, nil);
+            if (title && title.length > 0) {
+                saveOverride(title, nil);
+                if (artist && artist.length > 0) {
+                    saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
+                }
+            }
+            stopReplacementAudio();
+        }];
+
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil];
+
+        [alert addAction:saveAction];
+        if (existingUrl.length > 0) [alert addAction:removeAction];
+        [alert addAction:toggleFloatAction];
+        [alert addAction:cancelAction];
+
+        [topVC presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+#pragma mark - Context Menu (3-Dots Menu)
+
+static NSString *extractTrackURIFromObject(id obj, int depth) {
+    if (!obj || depth > 3) return nil;
+    NSArray *selectors = @[@"trackURI", @"entityURI", @"URI", @"uri", @"itemURI", @"targetURI"];
+    for (NSString *selName in selectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([obj respondsToSelector:sel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id val = [obj performSelector:sel];
+            #pragma clang diagnostic pop
+            if (val && [[val description] containsString:@"spotify:track:"]) {
+                return cleanTrackID([val description]);
+            }
+        }
+    }
+    return nil;
+}
+
+static void addAntiCensorButtonToContextMenu(UIViewController *sheetVC) {
+    if (!sheetVC || !sheetVC.isViewLoaded) return;
+    UIView *container = sheetVC.view;
+    if ([container viewWithTag:778899]) return;
+
+    NSString *extractedURI = extractTrackURIFromObject(sheetVC, 0);
+
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.tag = 778899;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    btn.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:1.0];
+    [btn setTitle:@"⚡ Заменить на SoundCloud (AntiCensor)" forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:14.0f];
+    btn.layer.cornerRadius = 22.0f;
+    btn.layer.masksToBounds = YES;
+
+    if (extractedURI) objc_setAssociatedObject(btn, "anticensor_uri", extractedURI, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    [btn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+    [container addSubview:btn];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [btn.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [btn.topAnchor constraintEqualToAnchor:container.safeAreaLayoutGuide.topAnchor constant:12.0],
+        [btn.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16.0],
+        [btn.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16.0],
+        [btn.heightAnchor constraintEqualToConstant:44.0]
+    ]];
+
+    [container bringSubviewToFront:btn];
+}
+
+static void anticensor_onContextMenuButtonTap(UIViewController *self, SEL _cmd, UIButton *sender) {
+    NSString *uri = objc_getAssociatedObject(sender, "anticensor_uri");
+    [self dismissViewControllerAnimated:YES completion:^{
+        showReplacementDialogWithContext(uri, nil, nil);
+    }];
+}
+
+#pragma mark - Method Swizzling
+
+static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void));
+static void custom_presentViewController(UIViewController *self, SEL _cmd, UIViewController *vcToPresent, BOOL animated, void (^completion)(void)) {
+    if ([vcToPresent isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)vcToPresent;
+        BOOL hasAction = NO;
+        for (UIAlertAction *act in alert.actions) {
+            if ([act.title containsString:@"AntiCensor"]) { hasAction = YES; break; }
+        }
+        if (!hasAction) {
+            NSString *uri = extractTrackURIFromObject(alert, 0) ?: currentActiveSpotifyTrackURI;
+            [alert addAction:[UIAlertAction actionWithTitle:@"⚡ Заменить на SoundCloud (AntiCensor)"
+                                                     style:UIAlertActionStyleDefault
+                                                   handler:^(UIAlertAction * _Nonnull a) {
+                showReplacementDialogWithContext(uri, nil, nil);
+            }]];
+        }
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            addAntiCensorButtonToContextMenu(vcToPresent);
+        });
+    }
+
+    if (orig_presentViewController) {
+        orig_presentViewController(self, _cmd, vcToPresent, animated, completion);
+    }
+}
+
+static UIMenu * (*orig_menuWithTitle_image_identifier_options_children)(id, SEL, NSString *, UIImage *, UIMenuIdentifier, UIMenuOptions, NSArray *);
+static UIMenu * custom_menuWithTitle_image_identifier_options_children(id self, SEL _cmd, NSString *title, UIImage *image, UIMenuIdentifier identifier, UIMenuOptions options, NSArray *children) {
+    if (children && children.count > 0) {
+        UIAction *action = [UIAction actionWithTitle:@"⚡ Заменить на SoundCloud (AntiCensor)"
+                                               image:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"]
+                                          identifier:@"com.anticensor.action"
+                                             handler:^(__kindof UIAction * _Nonnull a) {
+            showReplacementDialogWithContext(currentActiveSpotifyTrackURI, title ?: currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+        }];
+        children = [children arrayByAddingObject:action];
+    }
+    if (orig_menuWithTitle_image_identifier_options_children) {
+        return orig_menuWithTitle_image_identifier_options_children(self, _cmd, title, image, identifier, options, children);
+    }
+    return nil;
+}
+
+#pragma mark - Universal Playback & Drift Synchronization
+
+static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, double position, BOOL isPlaying) {
+    if (title && title.length > 0) currentActiveSpotifyTrackTitle = title;
+    if (artist && artist.length > 0) currentActiveSpotifyTrackArtist = artist;
+    lastKnownSpotifyPosition = position;
+    isSpotifyCurrentlyPlaying = isPlaying;
+
+    NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+
+    if (repUrl && repUrl.length > 0) {
+        if (!ourAudioPlayer) {
+            startReplacementAudio(currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle, repUrl, position);
+        } else {
+            isMutingSpotify = YES; // Ensure silence
+
+            if (!isPlaying && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+                [ourAudioPlayer pause];
+            } else if (isPlaying && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPaused) {
+                [ourAudioPlayer play];
+            }
+
+            // High-precision sync: correct any drift greater than 250 milliseconds
+            double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+            double drift = fabs(ourPos - position);
+            if (drift > 0.25) {
+                CMTime newTime = CMTimeMakeWithSeconds(position, NSEC_PER_SEC);
+                [ourAudioPlayer seekToTime:newTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+            }
+        }
+    } else {
+        if (ourAudioPlayer) {
+            stopReplacementAudio();
+        }
+    }
+}
+
+static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *);
+static void custom_setNowPlayingInfo(id self, SEL _cmd, NSDictionary *info) {
+    if (orig_setNowPlayingInfo) orig_setNowPlayingInfo(self, _cmd, info);
+    if (!info || ![info isKindOfClass:[NSDictionary class]]) return;
+
+    NSString *title = nil;
+    NSString *artist = nil;
+    double pos = 0.0;
+    BOOL playing = YES;
+
+    for (id k in info) {
+        NSString *kStr = [k description];
+        if ([kStr localizedCaseInsensitiveContainsString:@"title"]) {
+            title = [info[k] description];
+        } else if ([kStr localizedCaseInsensitiveContainsString:@"artist"]) {
+            artist = [info[k] description];
+        } else if ([kStr localizedCaseInsensitiveContainsString:@"elapsed"]) {
+            pos = [info[k] doubleValue];
+        } else if ([kStr localizedCaseInsensitiveContainsString:@"rate"]) {
+            playing = ([info[k] floatValue] > 0.0f);
+        }
+    }
+
+    handleTrackPlaybackUpdate(title, artist, pos, playing);
+}
+
+#pragma mark - Floating Badge
+
+static void setupFloatingBadge(void) {
+    BOOL isHidden = [[NSUserDefaults standardUserDefaults] boolForKey:DEFAULTS_HIDE_FLOAT_KEY];
+    if (isHidden) return; // Respect user preference
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (floatingPillButton) return;
+        UIWindow *window = getKeyAppWindow();
+        if (!window) return;
+
+        floatingPillButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        floatingPillButton.frame = CGRectMake(window.bounds.size.width - 105, 120, 95, 32);
+        floatingPillButton.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:0.9];
+        [floatingPillButton setTitle:@"⚡ AntiCensor" forState:UIControlStateNormal];
+        [floatingPillButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        floatingPillButton.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
+        floatingPillButton.layer.cornerRadius = 16.0f;
+        floatingPillButton.layer.masksToBounds = YES;
+        floatingPillButton.layer.borderWidth = 1.0f;
+        floatingPillButton.layer.borderColor = [UIColor whiteColor].CGColor;
+
+        [floatingPillButton addTarget:window action:@selector(anticensor_floatingBadgeTapped) forControlEvents:UIControlEventTouchUpInside];
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:window action:@selector(anticensor_handleBadgePan:)];
+        [floatingPillButton addGestureRecognizer:pan];
+
+        [window addSubview:floatingPillButton];
+        [window bringSubviewToFront:floatingPillButton];
+    });
+}
+
+static void anticensor_floatingBadgeTapped(id self, SEL _cmd) {
+    showReplacementDialogWithContext(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+}
+
+static void anticensor_handleBadgePan(id self, SEL _cmd, UIPanGestureRecognizer *pan) {
+    UIView *badge = pan.view;
+    CGPoint translation = [pan translationInView:badge.window];
+    badge.center = CGPointMake(badge.center.x + translation.x, badge.center.y + translation.y);
+    [pan setTranslation:CGPointMake(0, 0) inView:badge.window];
+}
+
+#pragma mark - Dynamic Injection Constructor
+
+__attribute__((constructor)) static void initAntiCensor(void) {
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v2.1...");
+
+    // 1. Hook CoreAudio AudioUnitRender to completely silence Spotify audio during replacement
+    struct rebinding audioRebind[1];
+    audioRebind[0].name = "AudioUnitRender";
+    audioRebind[0].replacement = (void *)custom_AudioUnitRender;
+    audioRebind[0].replaced = (void **)&orig_AudioUnitRender;
+    ac_rebind_symbols(audioRebind, 1);
+
+    // 2. Swizzle UIViewController presentViewController:animated:completion: for 3-dots menu
+    Class vcClass = objc_getClass("UIViewController");
+    if (vcClass) {
+        class_addMethod(vcClass, @selector(anticensor_onContextMenuButtonTap:), (IMP)anticensor_onContextMenuButtonTap, "v@:@");
+        Method mPresent = class_getInstanceMethod(vcClass, @selector(presentViewController:animated:completion:));
+        if (mPresent) {
+            orig_presentViewController = (void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))method_getImplementation(mPresent);
+            method_setImplementation(mPresent, (IMP)custom_presentViewController);
+        }
+    }
+
+    // 3. Swizzle UIMenu (iOS 14+ context menus)
+    Class menuClass = objc_getClass("UIMenu");
+    if (menuClass) {
+        Method mMenu = class_getClassMethod(menuClass, @selector(menuWithTitle:image:identifier:options:children:));
+        if (mMenu) {
+            orig_menuWithTitle_image_identifier_options_children = (UIMenu * (*)(id, SEL, NSString *, UIImage *, UIMenuIdentifier, UIMenuOptions, NSArray *))method_getImplementation(mMenu);
+            method_setImplementation(mMenu, (IMP)custom_menuWithTitle_image_identifier_options_children);
+        }
+    }
+
+    // 4. Hook MPNowPlayingInfoCenter for real-time track synchronization
+    Class npCenterClass = objc_getClass("MPNowPlayingInfoCenter");
+    if (npCenterClass) {
+        Method mInfo = class_getInstanceMethod(npCenterClass, @selector(setNowPlayingInfo:));
+        if (mInfo) {
+            orig_setNowPlayingInfo = (void (*)(id, SEL, NSDictionary *))method_getImplementation(mInfo);
+            method_setImplementation(mInfo, (IMP)custom_setNowPlayingInfo);
+        }
+    }
+
+    Class winClass = objc_getClass("UIWindow");
+    if (winClass) {
+        class_addMethod(winClass, @selector(anticensor_floatingBadgeTapped), (IMP)anticensor_floatingBadgeTapped, "v@:");
+        class_addMethod(winClass, @selector(anticensor_handleBadgePan:), (IMP)anticensor_handleBadgePan, "v@:@");
+    }
+
+    // 5. Setup Floating Badge (if not hidden by user)
+    setupFloatingBadge();
+}
