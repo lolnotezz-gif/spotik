@@ -1409,9 +1409,24 @@ static BOOL isFullScreenLyricsScrollView(UIScrollView *sv) {
     if (!CGRectIntersectsRect(rInWin, screenBounds)) return NO;
     if (rInWin.size.height < 250.0) return NO;
 
-    // СТРОЖАЙШЕ: если внутри есть большая обложка альбома — это плеер, а НЕ экран слов!
-    if (isViewPartOfNowPlayingPlayer(sv)) {
+    // СТРОЖАЙШЕ: если внутри или в супервью есть большая обложка альбома — это плеер, а НЕ экран слов!
+    if (isViewPartOfNowPlayingPlayer(sv) || (sv.superview && isViewPartOfNowPlayingPlayer(sv.superview))) {
         return NO;
+    }
+
+    // СТРОЖАЙШЕ: проверяем, содержит ли этот скролл карточки плеера ("Сведения", "Credits", "Текст")
+    // Если содержит — это основной экран плеера Now Playing, его нельзя заменять на караоке!
+    for (UIView *sub in sv.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            NSString *t = [((UILabel *)sub).text lowercaseString];
+            if ([t isEqualToString:@"сведения"] || [t isEqualToString:@"credits"] ||
+                [t isEqualToString:@"рекомендации"] || [t isEqualToString:@"похожие треки"]) {
+                return NO;
+            }
+        }
+        if (sub.tag == NOWPLAYING_LYRICS_CARD_TAG) {
+            return NO;
+        }
     }
 
     // Исключаем главные вкладки (Главная, Поиск, Медиатека) если они не модальные
@@ -1446,7 +1461,7 @@ static BOOL isFullScreenLyricsScrollView(UIScrollView *sv) {
             UIViewController *vc = (UIViewController *)res;
             NSString *cName = [NSStringFromClass([vc class]) lowercaseString];
             NSString *title = vc.title ? [vc.title lowercaseString] : @"";
-            if ([cName containsString:@"lyric"] || [title containsString:@"lyric"] || [title containsString:@"текст"]) {
+            if ([cName containsString:@"lyric"] || [title containsString:@"lyric"]) {
                 vcMentionsLyrics = YES;
                 break;
             }
@@ -1454,21 +1469,7 @@ static BOOL isFullScreenLyricsScrollView(UIScrollView *sv) {
         res = res.nextResponder;
     }
 
-    // Проверяем: содержит ли скролл несколько строчек текста (UILabel)
-    BOOL hasMultipleTextLabels = NO;
-    int labelCount = 0;
-    for (UIView *sub in sv.subviews) {
-        if ([sub isKindOfClass:[UILabel class]]) {
-            UILabel *ul = (UILabel *)sub;
-            if (ul.text.length > 5) labelCount++;
-        }
-        if (labelCount >= 2) {
-            hasMultipleTextLabels = YES;
-            break;
-        }
-    }
-
-    if (classMentionsLyrics || vcMentionsLyrics || hasLyricsIndicator || hasMultipleTextLabels) {
+    if (classMentionsLyrics || vcMentionsLyrics || hasLyricsIndicator) {
         return YES;
     }
 
@@ -1557,7 +1558,7 @@ static void hideOriginalLyricsViews(UIView *root) {
         UIView *v = q.firstObject;
         [q removeObjectAtIndex:0];
         if (v.tag == KARAOKE_CONTAINER_TAG) continue;
-        if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UICollectionViewCell class]]) {
+        if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
             v.hidden = YES;
             v.alpha = 0.0f;
         }
@@ -1636,7 +1637,8 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
                 while (card && card != win && card.bounds.size.height < 100.0) {
                     card = card.superview;
                 }
-                if (card && card != win) {
+                // Проверяем, что это действительно небольшая карточка плеера, а не весь экран
+                if (card && card != win && card.bounds.size.height <= 350.0 && card.bounds.size.height >= 70.0) {
                     // Создаем или обновляем наш собственный лейбл лайв-текста внутри карточки
                     UILabel *cardLbl = [card viewWithTag:NOWPLAYING_LYRICS_CARD_TAG];
                     if (!cardLbl) {
@@ -1664,16 +1666,14 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
                     cardLbl.attributedText = attrStr;
                     [card bringSubviewToFront:cardLbl];
 
-                    // Скрываем все оригинальные нативные подстроки текста Spotify внутри карточки,
-                    // оставляя видимыми только заголовок 'l' и кнопки действий (поделиться, развернуть)
+                    // Скрываем ТОЛЬКО нативные текстовые лейблы Spotify внутри карточки,
+                    // НЕ трогая контейнеры, жесты и кнопки перехода в полноэкранный режим!
                     for (UIView *sub in card.subviews) {
                         if (sub == cardLbl || sub == l) continue;
-                        if (CGRectGetMaxY(sub.frame) <= CGRectGetMaxY(l.frame) + 14.0) {
-                            // Это кнопки в строке заголовка карточки (поделиться, полноэкранный режим)
-                            continue;
+                        if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UITextView class]]) {
+                            sub.hidden = YES;
+                            sub.alpha = 0.0f;
                         }
-                        sub.hidden = YES;
-                        sub.alpha = 0.0f;
                     }
                     return;
                 }
@@ -1684,7 +1684,24 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
 }
 
 static void checkAndSyncLyricsOnScreen(void) {
-    // 0. СТРОЖАЙШЕ: проверяем, добавил ли пользователь кастомный текст для этого трека
+    // 0. Защита от вмешательства во время анимации перехода между экранами
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - g_lastForegroundOrScreenTransitionTimestamp < 0.7) {
+        return; // Активный переход экрана — даем UIKit спокойно завершить анимацию без краша!
+    }
+
+    UIViewController *top = getKeyAppWindow().rootViewController;
+    while (top.presentedViewController) {
+        if (top.isBeingPresented || top.isBeingDismissed || top.transitionCoordinator != nil) {
+            return;
+        }
+        top = top.presentedViewController;
+    }
+    if (top && (top.isBeingPresented || top.isBeingDismissed || top.transitionCoordinator != nil)) {
+        return;
+    }
+
+    // 0.1 СТРОЖАЙШЕ: проверяем, добавил ли пользователь кастомный текст для этого трека
     NSString *userLyrics = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
     if (!userLyrics || userLyrics.length == 0) {
         // Пользователь НЕ добавлял кастомный текст для этого трека!
@@ -1838,7 +1855,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                 [scrollView bringSubviewToFront:container];
                 scrollView.delaysContentTouches = NO;
                 scrollView.canCancelContentTouches = YES;
-                scrollView.contentSize = CGSizeMake(viewW, curY);
+                if (scrollView.contentSize.height < curY) {
+                    scrollView.contentSize = CGSizeMake(viewW, curY);
+                }
             }
         }
 
