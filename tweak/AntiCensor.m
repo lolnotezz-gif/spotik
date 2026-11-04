@@ -1566,60 +1566,140 @@ static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
     }
 }
 
+// Рекурсивно скрывает нативный текст Spotify внутри scroll view, исключая наш караоке-контейнер
+static void hideOriginalLyricsViews(UIView *root) {
+    if (!root || root.tag == KARAOKE_CONTAINER_TAG) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+        if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
+            v.hidden = YES;
+            v.alpha = 0.0f;
+        }
+        [q addObjectsFromArray:v.subviews];
+    }
+}
+
+// Обновление карточки "Текст" в лайв-режиме на экране плеера (в точности то, что обвёл пользователь)
+static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
+    if (!g_currentKaraokeItems || g_currentKaraokeItems.count == 0) return;
+
+    NSInteger cardIdx = 0;
+    for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
+        if (g_currentKaraokeItems[i].time >= 0 && currentTime >= g_currentKaraokeItems[i].time) {
+            cardIdx = i;
+        } else if (g_currentKaraokeItems[i].time >= 0) {
+            break;
+        }
+    }
+
+    // Собираем 3 активные/следующие строчки текста
+    NSMutableString *previewStr = [NSMutableString string];
+    for (NSInteger k = cardIdx; k < (NSInteger)g_currentKaraokeItems.count && k < cardIdx + 3; k++) {
+        if (previewStr.length > 0) [previewStr appendString:@"\n\n"];
+        [previewStr appendString:g_currentKaraokeItems[k].text];
+    }
+    if (previewStr.length == 0) return;
+
+    NSMutableArray *cQueue = [NSMutableArray arrayWithObject:win];
+    while (cQueue.count > 0) {
+        UIView *v = cQueue.firstObject;
+        [cQueue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)v;
+            NSString *t = [l.text lowercaseString];
+            if ([t isEqualToString:@"текст"] || [t isEqualToString:@"lyrics"]) {
+                // l — это заголовок "Текст" на карточке плеера!
+                UIView *card = l.superview;
+                while (card && card != win && card.bounds.size.height < 80.0) {
+                    card = card.superview;
+                }
+                if (card && card != win && card.bounds.size.height < 450.0) {
+                    // Ищем лейбл с текстом внутри карточки
+                    NSMutableArray *subQ = [NSMutableArray arrayWithObject:card];
+                    while (subQ.count > 0) {
+                        UIView *sv = subQ.firstObject;
+                        [subQ removeObjectAtIndex:0];
+                        if ([sv isKindOfClass:[UILabel class]] && sv != l) {
+                            UILabel *previewLbl = (UILabel *)sv;
+                            if (previewLbl.bounds.size.height > 20.0 || previewLbl.numberOfLines != 1) {
+                                previewLbl.numberOfLines = 0;
+                                previewLbl.font = [UIFont systemFontOfSize:19.0 weight:UIFontWeightBold];
+                                previewLbl.textColor = [UIColor whiteColor];
+                                previewLbl.alpha = 1.0f;
+                                if (![previewLbl.text isEqualToString:previewStr]) {
+                                    previewLbl.text = previewStr;
+                                }
+                                return;
+                            }
+                        }
+                        [subQ addObjectsFromArray:sv.subviews];
+                    }
+                }
+            }
+        }
+        [cQueue addObjectsFromArray:v.subviews];
+    }
+}
+
 static void checkAndSyncLyricsOnScreen(void) {
+    // 1. Текущее время и трек
+    double currentTime = 0.0;
+    double duration = 0.0;
+    if (ourAudioPlayer && ourAudioPlayer.currentItem) {
+        currentTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+        CMTime d = ourAudioPlayer.currentItem.duration;
+        if (CMTIME_IS_VALID(d) && !CMTIME_IS_INDEFINITE(d)) {
+            duration = CMTimeGetSeconds(d);
+        }
+    }
+    if (duration <= 1.0) {
+        currentTime = getCurrentSpotifyPreciseTime();
+        MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+        NSNumber *durNum = center.nowPlayingInfo[MPMediaItemPropertyPlaybackDuration];
+        if (durNum && [durNum doubleValue] > 0) {
+            duration = [durNum doubleValue];
+        }
+    }
+    if (isnan(currentTime) || currentTime < 0) currentTime = 0;
+    if (isnan(duration) || duration <= 10.0) duration = 180.0;
+    g_currentTrackDuration = duration;
+
+    NSString *trackKey = currentActiveSpotifyTrackURI ?: (currentActiveSpotifyTrackTitle ?: @"");
+
+    // Подгружаем текст песни для текущего трека (если еще не загружен)
+    if (!g_currentKaraokeItems || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
+        NSString *lyricsStr = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+        if (lyricsStr && lyricsStr.length > 0) {
+            g_currentKaraokeTrackKey = trackKey;
+            g_lastActiveKaraokeIdx = -1;
+            g_currentKaraokeItems = parseLyricsForTrack(lyricsStr, duration);
+        }
+    }
+
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *win in windows) {
         if (!win || win.hidden) continue;
 
-        // 1. Ищем ТОЛЬКО специализированный экран слов песни (никаких главных экранов!).
-        // findLyricsScrollViewInView уже содержит всю логику включая удаление orphan-контейнеров.
-        UIScrollView *scrollView = findLyricsScrollViewInView(win);
+        // 2. ВСЕГДА обновляем карточку "Текст" на экране плеера в реальном времени!
+        updateNowPlayingLyricsCard(win, currentTime);
 
+        // 3. Ищем ТОЛЬКО специализированный полноэкранный экран слов песни
+        UIScrollView *scrollView = findLyricsScrollViewInView(win);
         if (!scrollView) continue;
 
-        // 2. Текущее время и трек
-        double currentTime = 0.0;
-        double duration = 0.0;
-        if (ourAudioPlayer && ourAudioPlayer.currentItem) {
-            currentTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-            CMTime d = ourAudioPlayer.currentItem.duration;
-            if (CMTIME_IS_VALID(d) && !CMTIME_IS_INDEFINITE(d)) {
-                duration = CMTimeGetSeconds(d);
-            }
-        }
-        if (duration <= 1.0) {
-            currentTime = getCurrentSpotifyPreciseTime();
-            MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
-            NSNumber *durNum = center.nowPlayingInfo[MPMediaItemPropertyPlaybackDuration];
-            if (durNum && [durNum doubleValue] > 0) {
-                duration = [durNum doubleValue];
-            }
-        }
-        if (isnan(currentTime) || currentTime < 0) currentTime = 0;
-        if (isnan(duration) || duration <= 10.0) duration = 180.0;
-        g_currentTrackDuration = duration;
-
-        NSString *trackKey = currentActiveSpotifyTrackURI ?: (currentActiveSpotifyTrackTitle ?: @"");
-
-        // 3. Полноэкранный караоке вид (в точности как нативный Spotify "двашки")
+        // 4. Полноэкранный караоке вид
         UIView *existingContainer = [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
         if (existingContainer) {
             [scrollView bringSubviewToFront:existingContainer];
-            // Скрываем нативные subviews scroll view чтобы не было двойного текста.
-            // Кнопка закрытия ("v") находится вне scroll view — в nav bar родительского VC — поэтому она не пострадает.
-            for (UIView *sub in scrollView.subviews) {
-                if (sub != existingContainer && sub.tag != KARAOKE_CONTAINER_TAG) {
-                    sub.hidden = YES;
-                    sub.userInteractionEnabled = NO;
-                }
-            }
+            hideOriginalLyricsViews(scrollView);
         }
 
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
             NSString *lyricsStr = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
             if (!lyricsStr || lyricsStr.length == 0) {
-                // Читаем нативный текст из scroll view ДО создания нашего контейнера
-                // (existingContainer == nil в этой ветке, так что наших меток там нет)
                 NSMutableArray<NSString *> *lines = [NSMutableArray array];
                 collectAllLyricsLines(scrollView, lines);
                 if (lines.count > 0) {
@@ -1627,7 +1707,6 @@ static void checkAndSyncLyricsOnScreen(void) {
                 }
             }
 
-            // Прячем серую плашку "Синхронизация текста..."
             hideUnsyncedLyricsIndicator(win);
 
             if (lyricsStr && lyricsStr.length > 0) {
@@ -1636,7 +1715,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 g_currentKaraokeItems = parseLyricsForTrack(lyricsStr, duration);
 
                 if (!g_currentKaraokeItems || g_currentKaraokeItems.count == 0) {
-                    // Нет строк — ничего не делаем
+                    // нет строк
                 } else {
                     if (existingContainer) {
                         [existingContainer removeFromSuperview];
@@ -1693,13 +1772,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                     curY += 280.0;
                     container.frame = CGRectMake(0, 0, viewW, curY);
 
-                    // Скрываем нативные subviews перед добавлением нашего контейнера
-                    for (UIView *sub in scrollView.subviews) {
-                        if (sub.tag != KARAOKE_CONTAINER_TAG) {
-                            sub.hidden = YES;
-                            sub.userInteractionEnabled = NO;
-                        }
-                    }
+                    // Рекурсивно скрываем весь оригинальный нативный текст Spotify
+                    hideOriginalLyricsViews(scrollView);
 
                     [scrollView addSubview:container];
                     [scrollView bringSubviewToFront:container];
@@ -1712,8 +1786,6 @@ static void checkAndSyncLyricsOnScreen(void) {
 
         // 5. Актуализация активной строки в реальном времени
         if (g_currentKaraokeItems && g_currentKaraokeLabels.count == g_currentKaraokeItems.count) {
-            // Ищем активную строку: последняя строка чей time <= currentTime
-            // -1 означает "ещё не началось" (до первой строки)
             NSInteger activeIdx = -1;
             for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
                 if (g_currentKaraokeItems[i].time >= 0 && currentTime >= g_currentKaraokeItems[i].time) {
@@ -1729,12 +1801,10 @@ static void checkAndSyncLyricsOnScreen(void) {
                     for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
                         UILabel *lbl = g_currentKaraokeLabels[i];
                         if ((NSInteger)i == activeIdx) {
-                            // Активная строка — чисто белая, яркая
                             lbl.textColor = [UIColor whiteColor];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
                         } else {
-                            // Неактивные — тёмно-черные (как в нативном Spotify караоке)
                             lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
@@ -2718,23 +2788,6 @@ static void cleanupRogueBanners(void) {
                 }
             }
 
-            if (v.tag == 778899) {
-                // Если этот баннер не внутри модально представленного контекстного контроллера — немедленно удаляем!
-                UIResponder *resp = v.nextResponder;
-                while (resp && ![resp isKindOfClass:[UIViewController class]]) {
-                    resp = resp.nextResponder;
-                }
-                if ([resp isKindOfClass:[UIViewController class]]) {
-                    UIViewController *vc = (UIViewController *)resp;
-                    if (!vc.presentingViewController || [vc isKindOfClass:[UITabBarController class]] || [vc isKindOfClass:[UINavigationController class]]) {
-                        [v removeFromSuperview];
-                        continue;
-                    }
-                } else {
-                    [v removeFromSuperview];
-                    continue;
-                }
-            }
             [queue addObjectsFromArray:v.subviews];
         }
     }
