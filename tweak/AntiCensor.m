@@ -948,15 +948,21 @@ static void safeSeekPlayerToTime(double targetSeconds) {
     g_pendingSeekTarget = -1.0;
 
     CMTime seekTime = CMTimeMakeWithSeconds(toSeek, NSEC_PER_SEC);
+    CMTime tolerance = CMTimeMakeWithSeconds(0.3, NSEC_PER_SEC);
 
-    // Сторожевой сброс флага перемотки через 0.6 сек на случай долгой буферизации удаленного потока
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Сторожевой сброс флага перемотки: если плеер зависнет, не теряем отложенный запрос!
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (g_isPlayerSeeking) {
             g_isPlayerSeeking = NO;
+            if (g_pendingSeekTarget >= 0) {
+                double nextPos = g_pendingSeekTarget;
+                g_pendingSeekTarget = -1.0;
+                safeSeekPlayerToTime(nextPos);
+            }
         }
     });
 
-    [ourAudioPlayer seekToTime:seekTime completionHandler:^(BOOL finished) {
+    [ourAudioPlayer seekToTime:seekTime toleranceBefore:tolerance toleranceAfter:tolerance completionHandler:^(BOOL finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             g_isPlayerSeeking = NO;
             if (g_pendingSeekTarget >= 0) {
@@ -1201,8 +1207,10 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                             if (val > maxV) val = maxV;
                             slider.value = val;
                             [slider sendActionsForControlEvents:UIControlEventValueChanged];
-                            [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
-                            [slider sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
+                            if (!ourAudioPlayer) {
+                                [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
+                                [slider sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
+                            }
                         }
                     }
                 }
@@ -1266,7 +1274,13 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     if (!g_currentKaraokeItems || idx < 0 || idx >= (NSInteger)g_currentKaraokeItems.count) return;
 
     double seekTarget = g_currentKaraokeItems[idx].time;
-    if (seekTarget < 0) return;
+    if (seekTarget < 0) {
+        if (g_currentTrackDuration > 0 && g_currentKaraokeItems.count > 0) {
+            seekTarget = ((double)idx / (double)g_currentKaraokeItems.count) * g_currentTrackDuration;
+        } else {
+            return;
+        }
+    }
 
     // Сразу фиксируем время взаимодействия, чтобы автоскролл и сетевые события Spotify не перебивали наш выбор
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -1332,13 +1346,24 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
 - (void)onLyricsContainerTapped:(UITapGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateEnded) return;
     g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
+    if (!g_currentKaraokeLabels || g_currentKaraokeLabels.count == 0) return;
+
     CGPoint pt = [gesture locationInView:gesture.view];
+    NSInteger closestIdx = -1;
+    CGFloat minDistance = CGFLOAT_MAX;
+
     for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
         UILabel *lbl = g_currentKaraokeLabels[i];
-        if (pt.y >= lbl.frame.origin.y - 14.0 && pt.y <= CGRectGetMaxY(lbl.frame) + 14.0) {
-            [self handleSeekToLyricIndex:i inView:lbl];
-            return;
+        CGFloat midY = CGRectGetMidY(lbl.frame);
+        CGFloat dist = fabs(pt.y - midY);
+        if (dist < minDistance) {
+            minDistance = dist;
+            closestIdx = (NSInteger)i;
         }
+    }
+
+    if (closestIdx >= 0 && minDistance < 120.0) {
+        [self handleSeekToLyricIndex:closestIdx inView:g_currentKaraokeLabels[closestIdx]];
     }
 }
 
@@ -1663,29 +1688,35 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
         [q removeObjectAtIndex:0];
         if (v.tag == KARAOKE_CONTAINER_TAG) continue;
 
-        // 1. Все кнопки в окне (включая кнопку-шеврон '⌵' для скрытия текста)
+        // 1. Кнопки (только верхняя кнопка-шеврон '⌵' для скрытия текста!)
         if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
-            v.hidden = NO;
-            v.alpha = 1.0f;
-            v.userInteractionEnabled = YES;
-
             CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
-            if (ptInWin.y < 140.0 && ptInWin.x < 120.0) {
+            if (ptInWin.y < 140.0) {
+                // Верхняя навигация: кнопка-шеврон '⌵' для закрытия экрана слов
+                v.hidden = NO;
+                v.alpha = 1.0f;
+                v.userInteractionEnabled = YES;
+
                 if ([v isKindOfClass:[UIButton class]]) {
                     UIButton *btn = (UIButton *)v;
                     [btn addTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onChevronDismissTapped:) forControlEvents:UIControlEventTouchUpInside];
                 }
-            }
 
-            UIView *p = v.superview;
-            while (p && p != topVC.view && p != topVC.view.window) {
-                p.hidden = NO;
-                p.alpha = 1.0f;
-                p.userInteractionEnabled = YES;
-                p = p.superview;
-            }
-            if (v.superview) {
-                [v.superview bringSubviewToFront:v];
+                UIView *p = v.superview;
+                while (p && p != topVC.view && p != topVC.view.window) {
+                    p.hidden = NO;
+                    p.alpha = 1.0f;
+                    p.userInteractionEnabled = YES;
+                    p = p.superview;
+                }
+                if (v.superview) {
+                    [v.superview bringSubviewToFront:v];
+                }
+            } else {
+                // Все нижние кнопки (караоке-микрофон, перевод, шеринг и т.д.) — ПОЛНОСТЬЮ СКРЫВАЕМ!
+                v.hidden = YES;
+                v.alpha = 0.0f;
+                v.userInteractionEnabled = NO;
             }
         }
 
@@ -2056,22 +2087,9 @@ static void checkAndSyncLyricsOnScreen(void) {
         if (!scrollView) continue;
 
         // 4. Полноэкранный караоке вид
-        CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
-        CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-        CGFloat topInset = 44.0;
-        if (@available(iOS 11.0, *)) {
-            if (win.safeAreaInsets.top > 0) {
-                topInset = win.safeAreaInsets.top;
-            }
-        }
-        CGFloat topSafeY = topInset + 44.0; // Высота шапки (статус бар + навигационный бар с шевроном)
-        CGFloat startY = scrollView.frame.origin.y;
-        if (startY < topSafeY) {
-            startY = topSafeY;
-        }
-        CGFloat targetW = scrollView.frame.size.width >= 200.0 ? scrollView.frame.size.width : screenW;
-        CGFloat targetH = screenH - startY;
-        CGRect targetFrame = CGRectMake(0, startY, targetW, targetH);
+        CGRect targetFrame = scrollView.frame;
+        if (targetFrame.size.width < 200.0) targetFrame.size.width = [UIScreen mainScreen].bounds.size.width;
+        if (targetFrame.size.height < 300.0) targetFrame.size.height = [UIScreen mainScreen].bounds.size.height - targetFrame.origin.y;
 
         UIViewController *topVC = win.rootViewController;
         while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
@@ -2107,9 +2125,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                 CGFloat viewW = targetFrame.size.width;
                 CGFloat padX = 24.0;
                 CGFloat contentW = viewW - (padX * 2);
-                CGFloat curY = 24.0;
+                CGFloat curY = 16.0;
 
-                // Создаем собственный UIScrollView оверлей поверх экрана слов
+                // Создаем собственный UIScrollView оверлей точно в границах нативного скролла Spotify
                 UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:targetFrame];
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
                 containerScroll.backgroundColor = [UIColor clearColor];
@@ -2122,15 +2140,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.showsVerticalScrollIndicator = YES;
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 // Оптимальный нижний отступ (150pt), чтобы последние строчки поднимались над нижней панелью без пустой бездны
-                containerScroll.contentInset = UIEdgeInsetsMake(10.0, 0, 150.0, 0);
+                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 150.0, 0);
 
-                // Свайп вниз для удобного закрытия текста, когда пользователь наверху
-                UISwipeGestureRecognizer *swipeDown = [[UISwipeGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onDismissSwipeDown:)];
-                swipeDown.direction = UISwipeGestureRecognizerDirectionDown;
-                swipeDown.delegate = [AntiCensorTapHandler sharedHandler];
-                [containerScroll addGestureRecognizer:swipeDown];
-
-                // Единый жест нажатия на весь контейнер (не блокирует скроллирование!)
+                // Единый жест нажатия на весь контейнер (не блокирует скроллирование и быстро перематывает трек)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
                 lyricsTap.delegate = [AntiCensorTapHandler sharedHandler];
                 lyricsTap.cancelsTouchesInView = NO;
@@ -2146,8 +2158,13 @@ static void checkAndSyncLyricsOnScreen(void) {
                     lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
                     lbl.alpha = 1.0f;
                     lbl.text = it.text;
-                    lbl.userInteractionEnabled = NO; // Пропускаем касания в скролл для идеальной прокрутки!
+                    lbl.userInteractionEnabled = YES;
                     lbl.tag = i;
+
+                    UITapGestureRecognizer *lineTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeLineTapped:)];
+                    lineTap.delegate = [AntiCensorTapHandler sharedHandler];
+                    lineTap.cancelsTouchesInView = NO;
+                    [lbl addGestureRecognizer:lineTap];
 
                     CGSize maxS = CGSizeMake(contentW, CGFLOAT_MAX);
                     CGRect b = [it.text boundingRectWithSize:maxS
