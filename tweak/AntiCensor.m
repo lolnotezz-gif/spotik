@@ -1336,7 +1336,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
         sv = (UIScrollView *)view.superview;
     }
     if ([sv isKindOfClass:[UIScrollView class]]) {
-        CGFloat targetY = view.frame.origin.y - (sv.bounds.size.height * 0.25);
+        CGFloat targetY = view.frame.origin.y - (sv.bounds.size.height * 0.22);
         if (targetY < 0) targetY = 0;
         CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
         if (maxY < 0) maxY = 0;
@@ -1962,35 +1962,39 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
         }
     }
 
-    // Собираем 4 строчки в лайв-формате по нативному стилю Spotify (Скриншот 3): активная — белая, остальные — черные, единый жирный шрифт
+    // Собираем 4 строчки в лайв-формате в точности по дизайну карточки Spotify (Скриншот 3)
+    NSInteger activeIdx = -1;
+    for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
+        if (g_currentKaraokeItems[i].time >= 0 && currentTime >= g_currentKaraokeItems[i].time) {
+            activeIdx = i;
+        } else if (g_currentKaraokeItems[i].time >= 0) {
+            break;
+        }
+    }
+
+    NSInteger startIdx = (activeIdx >= 0) ? activeIdx : 0;
     NSMutableAttributedString *attrStr = [[NSMutableAttributedString alloc] init];
-    NSMutableString *plainStr = [NSMutableString string];
-    for (NSInteger k = activeIdx; k < (NSInteger)g_currentKaraokeItems.count && k < activeIdx + 4; k++) {
+    NSMutableParagraphStyle *paraStyle = [[NSMutableParagraphStyle alloc] init];
+    paraStyle.lineSpacing = 3.0;
+    paraStyle.paragraphSpacing = 14.0;
+
+    for (NSInteger k = startIdx; k < (NSInteger)g_currentKaraokeItems.count && k < startIdx + 4; k++) {
         NSString *line = g_currentKaraokeItems[k].text;
         if (!line || line.length == 0) continue;
 
-        if (plainStr.length > 0) [plainStr appendString:@"\n\n"];
-        [plainStr appendString:line];
-
-        NSDictionary *attrs = nil;
-        if (k == activeIdx) {
-            attrs = @{
-                NSFontAttributeName: [UIFont systemFontOfSize:18.5 weight:UIFontWeightHeavy],
-                NSForegroundColorAttributeName: [UIColor whiteColor]
-            };
-        } else {
-            attrs = @{
-                NSFontAttributeName: [UIFont systemFontOfSize:18.5 weight:UIFontWeightHeavy],
-                NSForegroundColorAttributeName: [UIColor blackColor]
-            };
-        }
+        UIColor *color = (k == activeIdx) ? [UIColor whiteColor] : [UIColor blackColor];
+        NSDictionary *attrs = @{
+            NSFontAttributeName: [UIFont systemFontOfSize:19.0 weight:UIFontWeightHeavy],
+            NSForegroundColorAttributeName: color,
+            NSParagraphStyleAttributeName: paraStyle
+        };
 
         if (attrStr.length > 0) {
-            [attrStr appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n\n"]];
+            [attrStr appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
         }
         [attrStr appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:attrs]];
     }
-    if (plainStr.length == 0) return;
+    if (attrStr.length == 0) return;
 
     CGFloat maxCardH = [UIScreen mainScreen].bounds.size.height * 0.65;
     UIWindow *parentWin = [win isKindOfClass:[UIWindow class]] ? (UIWindow *)win : win.window;
@@ -2214,9 +2218,15 @@ static void checkAndSyncLyricsOnScreen(void) {
         // 4. Полноэкранный караоке вид во всю ширину экрана (Скриншот 4)
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+
+        // Позиционируем оверлей ровно по нативному скроллу Spotify
         CGFloat topY = scrollView.frame.origin.y;
-        if (topY < 60.0 || topY > 160.0) topY = 100.0;
-        CGRect targetFrame = CGRectMake(0, topY, screenW, screenH - topY);
+        if (topY < 60.0 || topY > 160.0) topY = 120.0;
+        CGFloat bottomControlsY = screenH - 240.0;
+        CGFloat height = bottomControlsY - topY;
+        if (height < 250.0) height = screenH - topY - 100.0;
+
+        CGRect targetFrame = CGRectMake(0, topY, screenW, height);
 
         UIViewController *topVC = win.rootViewController;
         while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
@@ -2232,6 +2242,7 @@ static void checkAndSyncLyricsOnScreen(void) {
             if (!CGRectEqualToRect(existingContainer.frame, targetFrame)) {
                 existingContainer.frame = targetFrame;
             }
+            existingContainer.clipsToBounds = YES;
             [existingContainer.superview bringSubviewToFront:existingContainer];
             hideOriginalLyricsViews(scrollView);
             hideUnsyncedLyricsIndicator(win);
@@ -2250,11 +2261,11 @@ static void checkAndSyncLyricsOnScreen(void) {
                 }
 
                 CGFloat viewW = screenW;
-                CGFloat padX = 20.0;
+                CGFloat padX = 24.0;
                 CGFloat contentW = viewW - (padX * 2);
-                CGFloat curY = 16.0;
+                CGFloat curY = 8.0;
 
-                // Создаем собственный UIScrollView оверлей точно в границах нативного скролла Spotify
+                // Создаем собственный UIScrollView оверлей
                 UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:targetFrame];
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
                 containerScroll.backgroundColor = [UIColor clearColor];
@@ -2265,9 +2276,13 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.delaysContentTouches = NO;
                 containerScroll.canCancelContentTouches = YES;
                 containerScroll.showsVerticalScrollIndicator = YES;
+                containerScroll.clipsToBounds = YES;
+                // СТРОЖАЙШЕ: отключаем автоматический сдвиг контента iOS (иначе текст съезжает вниз на 134px!)
+                if (@available(iOS 11.0, *)) {
+                    containerScroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+                }
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                // Оптимальный нижний отступ (150pt), чтобы последние строчки поднимались над нижней панелью без пустой бездны
-                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 150.0, 0);
+                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 80.0, 0);
 
                 // Единый жест нажатия на весь контейнер (не блокирует скроллирование и быстро перематывает трек)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
@@ -2366,7 +2381,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 if (!userRecentlyInteracted && !activeScroll.isDragging && !activeScroll.isDecelerating
                     && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
                     UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
-                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.25);
+                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.22);
                     if (targetY < 0) targetY = 0;
                     CGFloat maxY = activeScroll.contentSize.height - activeScroll.bounds.size.height + activeScroll.contentInset.bottom;
                     if (maxY < 0) maxY = 0;
