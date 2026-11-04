@@ -1616,6 +1616,8 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
     if (plainStr.length == 0) return;
 
     CGFloat maxCardH = [UIScreen mainScreen].bounds.size.height * 0.65;
+    UIWindow *parentWin = [win isKindOfClass:[UIWindow class]] ? (UIWindow *)win : win.window;
+    UIView *rootView = parentWin.rootViewController.view;
 
     NSMutableArray *cQueue = [NSMutableArray arrayWithObject:win];
     while (cQueue.count > 0) {
@@ -1626,11 +1628,11 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
             NSString *t = [l.text lowercaseString];
             if ([t isEqualToString:@"текст"] || [t isEqualToString:@"lyrics"]) {
                 UIView *card = l.superview;
-                while (card && card != win && card != win.rootViewController.view && card.bounds.size.height < 100.0) {
+                while (card && card != win && card != rootView && card.bounds.size.height < 100.0) {
                     card = card.superview;
                 }
                 // Проверяем, что это действительно карточка плеера, а не корневой экран приложения
-                if (card && card != win && card != win.rootViewController.view &&
+                if (card && card != win && card != rootView &&
                     card.bounds.size.height >= 70.0 && card.bounds.size.height <= maxCardH) {
 
                     CGRect lInCard = [l convertRect:l.bounds toView:card];
