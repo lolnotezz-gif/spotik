@@ -40,6 +40,7 @@ static void showLyricsManagerDialog(NSString *targetURI, NSString *targetTitle, 
 static void showLyricsEditPrompt(NSString *uri, NSString *title, NSString *artist, NSString *displayTrack, NSString *existingLyrics);
 static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist);
 static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics);
+static void persistLyrics(NSDictionary *dict);
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition);
 static void stopReplacementAudio(void);
 static void safeSeekPlayerToTime(double targetSeconds);
