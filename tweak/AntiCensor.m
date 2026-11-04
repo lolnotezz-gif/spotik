@@ -1207,10 +1207,8 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                             if (val > maxV) val = maxV;
                             slider.value = val;
                             [slider sendActionsForControlEvents:UIControlEventValueChanged];
-                            if (!ourAudioPlayer) {
-                                [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
-                                [slider sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
-                            }
+                            [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
+                            [slider sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
                         }
                     }
                 }
@@ -1282,11 +1280,11 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
         }
     }
 
-    // Защита от дребезга контактов: не запускаем перемотку на тот же таймкод повторно в течение 0.35 сек
+    // Защита от дребезга контактов: не запускаем перемотку на тот же таймкод повторно в течение 0.15 сек
     static double s_lastSeekTarget = -1.0;
     static NSTimeInterval s_lastSeekTime = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (fabs(seekTarget - s_lastSeekTarget) < 0.2 && (now - s_lastSeekTime < 0.35)) {
+    if (fabs(seekTarget - s_lastSeekTarget) < 0.05 && (now - s_lastSeekTime < 0.15)) {
         return;
     }
     s_lastSeekTarget = seekTarget;
@@ -1358,6 +1356,12 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     if (!g_currentKaraokeLabels || g_currentKaraokeLabels.count == 0) return;
 
     CGPoint pt = [gesture locationInView:gesture.view];
+    for (UILabel *l in g_currentKaraokeLabels) {
+        if (CGRectContainsPoint(l.frame, pt)) {
+            return; // Уже обработано жестом нажатия конкретной строки!
+        }
+    }
+
     NSInteger closestIdx = -1;
     CGFloat minDistance = CGFLOAT_MAX;
 
@@ -2095,15 +2099,19 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
 }
 
 static void checkAndSyncLyricsOnScreen(void) {
-    // 0. Если экран закрывается (dismiss), даем ему спокойно закрыться
-    UIViewController *top = getKeyAppWindow().rootViewController;
+    // 0. Если открыт алерт/диалог (UIAlertController) или экран закрывается (dismiss), даем ему спокойно работать/закрыться
+    UIWindow *keyWin = getKeyAppWindow();
+    UIViewController *top = keyWin.rootViewController;
     while (top.presentedViewController) {
-        if (top.isBeingDismissed) {
-            return;
+        if (top.isBeingDismissed) return;
+        if ([top.presentedViewController isKindOfClass:[UIAlertController class]] ||
+            [top.presentedViewController isKindOfClass:[UIActivityViewController class]] ||
+            [top.presentedViewController isKindOfClass:[UIDocumentPickerViewController class]]) {
+            return; // СТРОЖАЙШЕ: НИКОГДА не инжектим караоке, когда открыт диалог/алерт!
         }
         top = top.presentedViewController;
     }
-    if (top && top.isBeingDismissed) {
+    if (top && (top.isBeingDismissed || [top isKindOfClass:[UIAlertController class]])) {
         return;
     }
 
@@ -2220,28 +2228,49 @@ static void checkAndSyncLyricsOnScreen(void) {
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
 
         UIViewController *topVC = win.rootViewController;
+        BOOL alertActive = NO;
         while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
+            if ([topVC.presentedViewController isKindOfClass:[UIAlertController class]] ||
+                [topVC.presentedViewController isKindOfClass:[UIActivityViewController class]] ||
+                [topVC.presentedViewController isKindOfClass:[UIDocumentPickerViewController class]]) {
+                alertActive = YES;
+                break;
+            }
             topVC = topVC.presentedViewController;
         }
-        if (!topVC || !topVC.view) continue;
+        if (alertActive || !topVC || !topVC.view || [topVC isKindOfClass:[UIAlertController class]]) continue;
 
-        // В системе координат topVC.view:
-        // Шапка (chevron '⌵', название, артист) занимает верхние ~115pt.
-        // Нижняя панель плеера (Share, Slider, Play/Pause) занимает нижние ~240pt.
-        CGFloat topY = 115.0;
-        CGFloat bottomControlsY = screenH - 240.0;
-        CGFloat height = bottomControlsY - topY;
-        if (height < 250.0) height = 350.0;
+        // Находим настоящий LyricsViewController, владеющий нативным скроллом
+        UIViewController *lyricsVC = nil;
+        UIResponder *resp = scrollView;
+        while (resp) {
+            if ([resp isKindOfClass:[UIViewController class]]) {
+                lyricsVC = (UIViewController *)resp;
+                break;
+            }
+            resp = resp.nextResponder;
+        }
+        if (!lyricsVC) lyricsVC = topVC;
+        if ([lyricsVC isKindOfClass:[UIAlertController class]]) continue;
+
+        CGRect sf = [scrollView convertRect:scrollView.bounds toView:lyricsVC.view];
+        CGFloat topY = sf.origin.y;
+        if (topY < 60.0 || topY > 160.0) topY = 115.0;
+        // Гарантируем, что оверлей караоке строго заканчивается над нижней панелью плеера (Share, Slider, Play)
+        CGFloat maxH = screenH - 290.0 - topY;
+        CGFloat height = sf.size.height;
+        if (height > maxH || height < 100.0) height = maxH;
+        if (height < 200.0) height = 280.0;
 
         CGRect targetFrame = CGRectMake(0, topY, screenW, height);
 
-        UIView *existingContainer = [topVC.view viewWithTag:KARAOKE_CONTAINER_TAG];
+        UIView *existingContainer = [lyricsVC.view viewWithTag:KARAOKE_CONTAINER_TAG];
         if (!existingContainer && g_activeKaraokeContainer && g_activeKaraokeContainer.window != nil) {
             existingContainer = g_activeKaraokeContainer;
         }
 
         if (existingContainer) {
-            if (existingContainer.superview != topVC.view) {
+            if (existingContainer.superview != lyricsVC.view) {
                 [existingContainer removeFromSuperview];
                 existingContainer = nil;
                 g_activeKaraokeContainer = nil;
@@ -2250,10 +2279,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                     existingContainer.frame = targetFrame;
                 }
                 existingContainer.clipsToBounds = YES;
-                [topVC.view bringSubviewToFront:existingContainer];
                 hideOriginalLyricsViews(scrollView);
                 hideUnsyncedLyricsIndicator(win);
-                ensureHeaderAndChevronVisible(topVC);
+                ensureHeaderAndChevronVisible(lyricsVC);
             }
         }
 
@@ -2269,9 +2297,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                 CGFloat viewW = screenW;
                 CGFloat padX = 24.0;
                 CGFloat contentW = viewW - (padX * 2);
-                CGFloat curY = 8.0;
+                CGFloat curY = 24.0;
 
-                // Создаем собственный UIScrollView оверлей прямо в topVC.view между шапкой и панелью плеера
+                // Создаем собственный UIScrollView оверлей прямо в lyricsVC.view между шапкой и панелью плеера
                 UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:targetFrame];
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
                 containerScroll.backgroundColor = [UIColor clearColor];
@@ -2287,7 +2315,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     containerScroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
                 }
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 60.0, 0);
+                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 80.0, 0);
 
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
                 lyricsTap.delegate = [AntiCensorTapHandler sharedHandler];
@@ -2327,17 +2355,16 @@ static void checkAndSyncLyricsOnScreen(void) {
                     curY += lineH + 16.0;
                 }
 
-                curY += 60.0;
+                curY += 80.0;
                 containerScroll.contentSize = CGSizeMake(viewW, curY);
 
                 hideOriginalLyricsViews(scrollView);
 
-                [topVC.view addSubview:containerScroll];
-                [topVC.view bringSubviewToFront:containerScroll];
+                [lyricsVC.view addSubview:containerScroll];
                 g_activeKaraokeContainer = containerScroll;
 
-                if (topVC) {
-                    ensureHeaderAndChevronVisible(topVC);
+                if (lyricsVC) {
+                    ensureHeaderAndChevronVisible(lyricsVC);
                 }
             }
         }
@@ -2383,7 +2410,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 if (!userRecentlyInteracted && !activeScroll.isDragging && !activeScroll.isDecelerating
                     && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
                     UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
-                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.22);
+                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.28);
                     if (targetY < 0) targetY = 0;
                     CGFloat maxY = activeScroll.contentSize.height - activeScroll.bounds.size.height + activeScroll.contentInset.bottom;
                     if (maxY < 0) maxY = 0;
@@ -2686,13 +2713,13 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         if (hasElapsed && ourAudioPlayer) {
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-            // Игнорируем сетевые эхо-события только в первые 0.6 сек сразу после нашего ручного поиска
-            BOOL isOurOwnEcho = (now - g_lastUserManualLyricsSeekTimestamp < 0.6);
+            // Игнорируем сетевые эхо-события только в первые 2.0 сек сразу после нашего ручного поиска
+            BOOL isOurOwnEcho = (now - g_lastUserManualLyricsSeekTimestamp < 2.0);
             if (!isOurOwnEcho && !g_isPlayerSeeking) {
                 double diff = fabs(position - ourPos);
-                // Если позиция Spotify изменилась более чем на 0.8 сек (нажатие на строку текста или сдвиг ползунка):
+                // Если позиция Spotify изменилась (нажатие на строку текста Spotify или сдвиг ползунка):
                 // МГНОВЕННО перематываем наш аудиоплеер на нужный таймкод!
-                if (diff > 0.8) {
+                if (diff > 0.35) {
                     safeSeekPlayerToTime(position);
                 }
             }
@@ -3226,6 +3253,27 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
             }];
         }
 
+        // 5.1 Удалить кастомный текст (если есть) прямо из главного диалога
+        UIAlertAction *removeLyricsAction = nil;
+        if (existingLyrics.length > 0) {
+            removeLyricsAction = [UIAlertAction actionWithTitle:@"🗑️ Сбросить / Удалить текст песни"
+                                                          style:UIAlertActionStyleDestructive
+                                                        handler:^(UIAlertAction * _Nonnull a) {
+                if (uri && uri.length > 5) saveLyricsForTrack(uri, nil);
+                if (displayTrack.length > 1) saveLyricsForTrack(displayTrack, nil);
+                if (title && title.length > 1) saveLyricsForTrack(title, nil);
+                if (artist && title) {
+                    saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
+                    saveLyricsForTrack([NSString stringWithFormat:@"%@ — %@", artist, title], nil);
+                }
+                g_currentKaraokeTrackKey = nil;
+                g_currentKaraokeItems = nil;
+                g_currentKaraokeLabels = nil;
+                g_lastActiveKaraokeIdx = -1;
+                checkAndSyncLyricsOnScreen();
+            }];
+        }
+
         // 6. Список всех замен
         UIAlertAction *manageAction = [UIAlertAction actionWithTitle:@"⚙️ Список всех замен и текстов"
                                                                style:UIAlertActionStyleDefault
@@ -3240,6 +3288,7 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
         [sheet addAction:lyricsAction];
         [sheet addAction:cloudSyncAction];
         if (removeOverrideAction) [sheet addAction:removeOverrideAction];
+        if (removeLyricsAction) [sheet addAction:removeLyricsAction];
         [sheet addAction:manageAction];
         [sheet addAction:cancelAction];
 
@@ -3279,6 +3328,47 @@ static NSString *extractTrackURIFromObject(id obj, int depth) {
         }
     }
     return nil;
+}
+
+static BOOL isContextMenuActionLabel(NSString *str) {
+    if (!str || str.length == 0) return YES;
+    NSString *s = [str lowercaseString];
+    if ([s containsString:@"очеред"] ||
+        [s containsString:@"queue"] ||
+        [s containsString:@"плейлист"] ||
+        [s containsString:@"playlist"] ||
+        [s containsString:@"поделиться"] ||
+        [s containsString:@"share"] ||
+        [s containsString:@"радио"] ||
+        [s containsString:@"radio"] ||
+        [s containsString:@"сведения"] ||
+        [s containsString:@"credits"] ||
+        [s containsString:@"нравится"] ||
+        [s containsString:@"like"] ||
+        [s containsString:@"любим"] ||
+        [s containsString:@"альбом"] ||
+        [s containsString:@"album"] ||
+        [s containsString:@"исполнител"] ||
+        [s containsString:@"artist"] ||
+        [s containsString:@"скрыть"] ||
+        [s containsString:@"hide"] ||
+        [s containsString:@"исключить"] ||
+        [s containsString:@"exclude"] ||
+        [s containsString:@"джем"] ||
+        [s containsString:@"jam"] ||
+        [s containsString:@"текст песни"] ||
+        [s containsString:@"lyrics"] ||
+        [s containsString:@"пожаловаться"] ||
+        [s containsString:@"report"] ||
+        [s containsString:@"удалить"] ||
+        [s containsString:@"remove"] ||
+        [s containsString:@"загрузить"] ||
+        [s containsString:@"download"] ||
+        [s containsString:@"отмена"] ||
+        [s containsString:@"cancel"]) {
+        return YES;
+    }
+    return NO;
 }
 
 static void extractBestTrackInfo(UIViewController *sheetVC, NSString **outURI, NSString **outTitle, NSString **outArtist) {
@@ -3324,7 +3414,12 @@ static void extractBestTrackInfo(UIViewController *sheetVC, NSString **outURI, N
         if ([curr isKindOfClass:[UILabel class]]) {
             UILabel *l = (UILabel *)curr;
             if (l.text.length > 1 && ![l.text containsString:@"⚡"] && ![l.text containsString:@"AntiCensor"]) {
-                [labels addObject:l];
+                if (!isContextMenuActionLabel(l.text)) {
+                    CGPoint pt = [l convertPoint:CGPointZero toView:container];
+                    if (pt.y < 140.0) {
+                        [labels addObject:l];
+                    }
+                }
             }
         }
         [queue addObjectsFromArray:curr.subviews];
@@ -3341,6 +3436,17 @@ static void extractBestTrackInfo(UIViewController *sheetVC, NSString **outURI, N
     }
     if (!*outArtist && labels.count > 1) {
         *outArtist = labels[1].text;
+    }
+
+    // Если всё ещё пусто, безопасно берем текущий играющий трек Spotify
+    if (!*outTitle && currentActiveSpotifyTrackTitle.length > 0) {
+        *outTitle = currentActiveSpotifyTrackTitle;
+    }
+    if (!*outArtist && currentActiveSpotifyTrackArtist.length > 0) {
+        *outArtist = currentActiveSpotifyTrackArtist;
+    }
+    if (!*outURI && currentActiveSpotifyTrackURI.length > 0) {
+        *outURI = currentActiveSpotifyTrackURI;
     }
 }
 
@@ -3798,24 +3904,75 @@ static void setupFloatingBadge(void) {
 
 static void cleanupPoisonedLyricsDatabase(void) {
     NSMutableDictionary *lyricsDict = loadAllLyrics();
-    if (!lyricsDict || lyricsDict.count == 0) return;
-    NSMutableArray *toRemove = [NSMutableArray array];
-    for (NSString *key in lyricsDict) {
-        NSString *val = [lyricsDict[key] description];
-        // Если текст ошибочно сохранён от другой песни (например, "эстетику" под "сборник хуйни")
-        if ([key containsString:@"сборник"] && [val containsString:@"эстетику"]) {
-            [toRemove addObject:key];
+    NSMutableDictionary *overridesDict = loadAllOverrides();
+    BOOL lyricsChanged = NO;
+    BOOL overridesChanged = NO;
+
+    if (lyricsDict && lyricsDict.count > 0) {
+        NSMutableArray *toRemove = [NSMutableArray array];
+        for (NSString *key in lyricsDict) {
+            NSString *val = [lyricsDict[key] description];
+            NSString *kLower = [key lowercaseString];
+            NSString *vLower = [val lowercaseString];
+
+            // 1. Очищаем мусорные ключи с действиями контекстного меню
+            if ([kLower containsString:@"очеред"] ||
+                [kLower containsString:@"джем"] ||
+                [kLower containsString:@"плейлист"] ||
+                [kLower containsString:@"поделит"] ||
+                [kLower containsString:@"радио"] ||
+                [kLower containsString:@"сведения"]) {
+                [toRemove addObject:key];
+                continue;
+            }
+            // 2. Очищаем фантомный текст "jealous (akkiru)" под "прыгай, дура!"
+            if ([kLower containsString:@"прыгай"] && ([vLower containsString:@"jealous"] || [vLower containsString:@"akkiru"] || [vLower containsString:@"three, two, one"])) {
+                [toRemove addObject:key];
+                continue;
+            }
+            // 3. Ошибочный текст "эстетику"
+            if ([kLower containsString:@"сборник"] && [vLower containsString:@"эстетику"]) {
+                [toRemove addObject:key];
+                continue;
+            }
+            if ([kLower containsString:@"кишлак"] && [vLower containsString:@"эстетику"] && ![kLower containsString:@"эстетик"]) {
+                [toRemove addObject:key];
+                continue;
+            }
         }
-        if ([key containsString:@"кишлак"] && [val containsString:@"эстетику"] && ![key containsString:@"эстетик"]) {
-            [toRemove addObject:key];
+        if (toRemove.count > 0) {
+            for (NSString *k in toRemove) {
+                [lyricsDict removeObjectForKey:k];
+                syncPushToCloud(k, @"", YES);
+            }
+            lyricsChanged = YES;
         }
     }
-    if (toRemove.count > 0) {
-        for (NSString *k in toRemove) {
-            [lyricsDict removeObjectForKey:k];
+
+    if (overridesDict && overridesDict.count > 0) {
+        NSMutableArray *toRemove = [NSMutableArray array];
+        for (NSString *key in overridesDict) {
+            NSString *kLower = [key lowercaseString];
+            if ([kLower containsString:@"очеред"] ||
+                [kLower containsString:@"джем"] ||
+                [kLower containsString:@"плейлист"] ||
+                [kLower containsString:@"поделит"] ||
+                [kLower containsString:@"радио"] ||
+                [kLower containsString:@"сведения"]) {
+                [toRemove addObject:key];
+            }
         }
-        persistLyrics(lyricsDict);
+        if (toRemove.count > 0) {
+            for (NSString *k in toRemove) {
+                [overridesDict removeObjectForKey:k];
+                syncPushToCloud(k, @"", NO);
+            }
+            overridesChanged = YES;
+        }
     }
+
+    if (lyricsChanged) persistLyrics(lyricsDict);
+    if (overridesChanged) persistOverrides(overridesDict);
 }
 
 __attribute__((constructor)) static void initAntiCensor(void) {
