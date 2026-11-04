@@ -1321,9 +1321,9 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
             if ((NSInteger)i == idx) {
                 lbl.textColor = [UIColor whiteColor];
                 lbl.alpha = 1.0f;
-                lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
+                lbl.transform = CGAffineTransformIdentity;
             } else {
-                lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+                lbl.textColor = [UIColor blackColor];
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformIdentity;
             }
@@ -1689,6 +1689,84 @@ static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
 }
 
 // Гарантирует, что верхняя шапка (кнопка '⌵', название, артист) и нижняя панель управления плеером (Play/Pause, слайдер, Share, More) всегда видны и доступны!
+static BOOL isRogueLyricsOrStreamElement(UIView *v) {
+    if (!v || v.tag == KARAOKE_CONTAINER_TAG) return NO;
+
+    NSString *acc = @"";
+    if ([v isKindOfClass:[UIButton class]]) {
+        UIButton *b = (UIButton *)v;
+        acc = [NSString stringWithFormat:@"%@ %@ %@ %@",
+            b.accessibilityLabel ?: @"",
+            b.accessibilityIdentifier ?: @"",
+            b.titleLabel.text ?: @"",
+            b.currentTitle ?: @""];
+    } else {
+        acc = [NSString stringWithFormat:@"%@ %@ %@",
+            v.accessibilityLabel ?: @"",
+            v.accessibilityIdentifier ?: @"",
+            NSStringFromClass([v class])];
+    }
+    acc = [acc lowercaseString];
+
+    if ([acc containsString:@"трансляц"] ||
+        [acc containsString:@"прямая"] ||
+        [acc containsString:@"live stream"] ||
+        [acc containsString:@"live broadcast"] ||
+        [acc containsString:@"livestream"] ||
+        [acc containsString:@"livebadge"] ||
+        [acc containsString:@"live_badge"] ||
+        [acc containsString:@"broadcast"] ||
+        [acc containsString:@"stream"] ||
+        [acc containsString:@"sing"] ||
+        [acc containsString:@"vocal"] ||
+        [acc containsString:@"karaoke"] ||
+        [acc containsString:@"караоке"] ||
+        [acc containsString:@"translat"] ||
+        [acc containsString:@"перевод"] ||
+        [acc containsString:@"connect"] ||
+        [acc containsString:@"устройств"] ||
+        [acc containsString:@"speaker"] ||
+        [acc containsString:@"device"] ||
+        [acc containsString:@"синхронизац"] ||
+        [acc containsString:@"synced"]) {
+        return YES;
+    }
+
+    if ([v isKindOfClass:[UILabel class]]) {
+        NSString *txt = [((UILabel *)v).text lowercaseString] ?: @"";
+        if ([txt containsString:@"трансляц"] ||
+            [txt containsString:@"прямая"] ||
+            [txt containsString:@"live stream"] ||
+            [txt containsString:@"live broadcast"] ||
+            [txt containsString:@"livestream"] ||
+            [txt containsString:@"broadcast"] ||
+            [txt containsString:@"синхронизац"] ||
+            [txt containsString:@"не синхронизирован"] ||
+            [txt containsString:@"synced"] ||
+            [txt containsString:@"not synced"]) {
+            return YES;
+        }
+    }
+
+    // Рекурсивно проверяем текст дочерних меток внутри контейнера
+    for (UIView *sub in v.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            NSString *st = [((UILabel *)sub).text lowercaseString] ?: @"";
+            if ([st containsString:@"трансляц"] ||
+                [st containsString:@"прямая"] ||
+                [st containsString:@"live stream"] ||
+                [st containsString:@"live broadcast"] ||
+                [st containsString:@"livestream"] ||
+                [st containsString:@"broadcast"]) {
+                return YES;
+            }
+        }
+    }
+
+    return NO;
+}
+
+// Гарантирует, что верхняя шапка и нижняя панель управления плеером (Play/Pause, слайдер, Share, More) всегда видны и доступны!
 static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
     if (!topVC || !topVC.view) return;
     CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
@@ -1700,6 +1778,21 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
         if (v.tag == KARAOKE_CONTAINER_TAG) continue;
 
         CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
+
+        // 0. Строго глушим любые элементы "прямая трансляция", микрофон караоке, перевод и нежелательные плашки
+        if (isRogueLyricsOrStreamElement(v)) {
+            v.hidden = YES;
+            v.alpha = 0.0f;
+            v.userInteractionEnabled = NO;
+            UIView *parent = v.superview;
+            while (parent && parent != topVC.view && parent != topVC.view.window && parent.bounds.size.height < 60.0) {
+                parent.hidden = YES;
+                parent.alpha = 0.0f;
+                parent.userInteractionEnabled = NO;
+                parent = parent.superview;
+            }
+            continue;
+        }
 
         // 1. Ползунок таймлайна UISlider — ВСЕГДА ВИДИМ И АКТИВЕН!
         if ([v isKindOfClass:[UISlider class]]) {
@@ -1717,49 +1810,30 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
             }
         }
 
-        // 2. Кнопки: верхняя навигация ('⌵') и нижние элементы плеера (Play/Pause, Share, More)
+        // 2. Кнопки: верхняя навигация и нижние элементы плеера (Play/Pause, Share, More)
         if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
             UIButton *btn = [v isKindOfClass:[UIButton class]] ? (UIButton *)v : nil;
-            NSString *acc = @"";
-            if (btn) {
-                acc = [[btn.accessibilityLabel ?: (btn.accessibilityIdentifier ?: @"") stringByAppendingString:btn.titleLabel.text ?: @""] lowercaseString];
-            }
+            BOOL isTopHeader = (ptInWin.y < 140.0);
+            BOOL isBottomControls = (ptInWin.y > screenH - 240.0);
 
-            // Исключаем ТОЛЬКО микрофон караоке и перевод, которые торчали посреди текста
-            BOOL isMicOrTranslate = ([acc containsString:@"sing"] ||
-                                     [acc containsString:@"vocal"] ||
-                                     [acc containsString:@"karaoke"] ||
-                                     [acc containsString:@"караоке"] ||
-                                     [acc containsString:@"translat"] ||
-                                     [acc containsString:@"перевод"]);
+            if (isTopHeader || isBottomControls) {
+                v.hidden = NO;
+                v.alpha = 1.0f;
+                v.userInteractionEnabled = YES;
 
-            if (isMicOrTranslate) {
-                v.hidden = YES;
-                v.alpha = 0.0f;
-                v.userInteractionEnabled = NO;
-            } else {
-                BOOL isTopHeader = (ptInWin.y < 140.0);
-                BOOL isBottomControls = (ptInWin.y > screenH - 240.0);
+                if (isTopHeader && ptInWin.x < 120.0 && btn) {
+                    [btn addTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onChevronDismissTapped:) forControlEvents:UIControlEventTouchUpInside];
+                }
 
-                if (isTopHeader || isBottomControls) {
-                    v.hidden = NO;
-                    v.alpha = 1.0f;
-                    v.userInteractionEnabled = YES;
-
-                    if (isTopHeader && ptInWin.x < 120.0 && btn) {
-                        [btn addTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onChevronDismissTapped:) forControlEvents:UIControlEventTouchUpInside];
-                    }
-
-                    UIView *p = v.superview;
-                    while (p && p != topVC.view && p != topVC.view.window) {
-                        p.hidden = NO;
-                        p.alpha = 1.0f;
-                        p.userInteractionEnabled = YES;
-                        p = p.superview;
-                    }
-                    if (v.superview) {
-                        [v.superview bringSubviewToFront:v];
-                    }
+                UIView *p = v.superview;
+                while (p && p != topVC.view && p != topVC.view.window) {
+                    p.hidden = NO;
+                    p.alpha = 1.0f;
+                    p.userInteractionEnabled = YES;
+                    p = p.superview;
+                }
+                if (v.superview) {
+                    [v.superview bringSubviewToFront:v];
                 }
             }
         }
@@ -1767,21 +1841,30 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
         // 3. Текстовые метки: шапка и нижние таймкоды
         if ([v isKindOfClass:[UILabel class]]) {
             UILabel *lbl = (UILabel *)v;
-            NSString *txt = [lbl.text lowercaseString];
-            BOOL isSyncIndicator = ([txt containsString:@"синхронизац"] ||
-                                    [txt containsString:@"не синхронизирован"] ||
-                                    [txt containsString:@"synced"] ||
-                                    [txt containsString:@"not synced"]);
-            if (!isSyncIndicator) {
-                if ((ptInWin.y < 140.0 && lbl.font.pointSize < 24.0) || ptInWin.y > screenH - 240.0) {
-                    lbl.hidden = NO;
-                    lbl.alpha = 1.0f;
-                    UIView *p = lbl.superview;
-                    while (p && p != topVC.view && p != topVC.view.window) {
-                        p.hidden = NO;
-                        p.alpha = 1.0f;
-                        p = p.superview;
-                    }
+            BOOL isTopLabel = (ptInWin.y < 140.0 && lbl.font.pointSize < 24.0);
+            // Ниже экрана (панель плеера) разрешаем показывать ТОЛЬКО таймкоды трека! (например "0:04", "-2:13", "1:25")
+            BOOL isBottomTimestamp = (ptInWin.y > screenH - 240.0 && [lbl.text containsString:@":"] && lbl.text.length <= 8);
+
+            if (isTopLabel || isBottomTimestamp) {
+                lbl.hidden = NO;
+                lbl.alpha = 1.0f;
+                UIView *p = lbl.superview;
+                while (p && p != topVC.view && p != topVC.view.window) {
+                    p.hidden = NO;
+                    p.alpha = 1.0f;
+                    p = p.superview;
+                }
+            } else if (ptInWin.y > screenH - 240.0) {
+                // Любой другой лейбл внизу, не являющийся таймкодом (включая надписи бейджей) — СКРЫВАЕМ!
+                lbl.hidden = YES;
+                lbl.alpha = 0.0f;
+                lbl.userInteractionEnabled = NO;
+                UIView *badgeParent = lbl.superview;
+                while (badgeParent && badgeParent != topVC.view && badgeParent != topVC.view.window && badgeParent.bounds.size.height < 60.0) {
+                    badgeParent.hidden = YES;
+                    badgeParent.alpha = 0.0f;
+                    badgeParent.userInteractionEnabled = NO;
+                    badgeParent = badgeParent.superview;
                 }
             }
         }
@@ -2197,9 +2280,11 @@ static void checkAndSyncLyricsOnScreen(void) {
                     AntiCensorLyricItem *it = g_currentKaraokeItems[i];
                     UILabel *lbl = [[UILabel alloc] init];
                     lbl.numberOfLines = 0;
-                    lbl.font = [UIFont systemFontOfSize:25.0 weight:UIFontWeightHeavy];
-                    lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+                    lbl.lineBreakMode = NSLineBreakByWordWrapping;
+                    lbl.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightHeavy];
+                    lbl.textColor = [UIColor blackColor];
                     lbl.alpha = 1.0f;
+                    lbl.transform = CGAffineTransformIdentity;
                     lbl.text = it.text;
                     lbl.userInteractionEnabled = YES;
                     lbl.tag = i;
@@ -2214,12 +2299,12 @@ static void checkAndSyncLyricsOnScreen(void) {
                                                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                                   attributes:@{NSFontAttributeName: lbl.font}
                                                      context:nil];
-                    CGFloat lineH = MAX(30.0, ceil(b.size.height));
+                    CGFloat lineH = MAX(32.0, ceil(b.size.height));
                     lbl.frame = CGRectMake(padX, curY, contentW, lineH);
                     [containerScroll addSubview:lbl];
                     [g_currentKaraokeLabels addObject:lbl];
 
-                    curY += lineH + 24.0;
+                    curY += lineH + 26.0;
                 }
 
                 curY += 60.0;
@@ -2264,9 +2349,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                         if ((NSInteger)i == activeIdx) {
                             lbl.textColor = [UIColor whiteColor];
                             lbl.alpha = 1.0f;
-                            lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
+                            lbl.transform = CGAffineTransformIdentity;
                         } else {
-                            lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+                            lbl.textColor = [UIColor blackColor];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
                         }
