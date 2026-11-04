@@ -1149,6 +1149,8 @@ static void updateNowPlayingCenter(void) {
 - (void)onKaraokeLineTapped:(UITapGestureRecognizer *)gesture;
 - (void)onLyricsContainerTapped:(UITapGestureRecognizer *)gesture;
 - (void)onNowPlayingCardTapped:(UITapGestureRecognizer *)gesture;
+- (void)onDismissSwipeDown:(UISwipeGestureRecognizer *)gesture;
+- (void)onChevronDismissTapped:(id)sender;
 - (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view;
 @end
 
@@ -1226,6 +1228,33 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     return YES;
+}
+
+- (void)onDismissSwipeDown:(UISwipeGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    if (g_activeKaraokeContainer && [g_activeKaraokeContainer isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *sv = (UIScrollView *)g_activeKaraokeContainer;
+        if (sv.contentOffset.y > 40.0) {
+            return; // Пользователь скроллит текст вверх из глубины
+        }
+    }
+    UIViewController *topVC = getKeyAppWindow().rootViewController;
+    while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
+        topVC = topVC.presentedViewController;
+    }
+    if (topVC && topVC != getKeyAppWindow().rootViewController) {
+        [topVC dismissViewControllerAnimated:YES completion:nil];
+    }
+}
+
+- (void)onChevronDismissTapped:(id)sender {
+    UIViewController *topVC = getKeyAppWindow().rootViewController;
+    while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
+        topVC = topVC.presentedViewController;
+    }
+    if (topVC && topVC != getKeyAppWindow().rootViewController) {
+        [topVC dismissViewControllerAnimated:YES completion:nil];
+    }
 }
 
 - (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view {
@@ -1426,9 +1455,11 @@ static UILabel *findUnsyncedLyricsIndicatorLabel(UIView *root) {
     if ([root isKindOfClass:[UILabel class]]) {
         UILabel *lbl = (UILabel *)root;
         NSString *txt = [lbl.text lowercaseString];
-        if ([txt containsString:@"синхронизация текста"] ||
+        if ([txt containsString:@"синхронизац"] ||
+            [txt containsString:@"не синхронизирован"] ||
             [txt containsString:@"lyrics aren't synced"] ||
-            [txt containsString:@"lyrics are not synced"]) {
+            [txt containsString:@"lyrics are not synced"] ||
+            [txt containsString:@"not synced"]) {
             return lbl;
         }
     }
@@ -1590,17 +1621,102 @@ static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
     if (indicator) {
         indicator.hidden = YES;
         indicator.alpha = 0.0f;
-        // Скрываем контейнер-плашку (серую полоску под заголовком), в которой лежит индикатор
-        UIView *p = indicator.superview;
-        while (p && p != win && p != win.rootViewController.view && p.bounds.size.height <= 80.0) {
-            p.hidden = YES;
-            p.alpha = 0.0f;
-            p = p.superview;
+
+        UIView *badge = indicator.superview;
+        // Скрываем ТОЛЬКО саму плашку индикатора (серую полоску), ни в коем случае не трогая шапку и кнопки!
+        if (badge && badge != win && badge != win.rootViewController.view) {
+            BOOL containsInteractiveElements = NO;
+            BOOL containsOtherText = NO;
+            for (UIView *sub in badge.subviews) {
+                if ([sub isKindOfClass:[UIButton class]] || [sub isKindOfClass:[UIControl class]]) {
+                    containsInteractiveElements = YES;
+                    break;
+                }
+                if ([sub isKindOfClass:[UILabel class]] && sub != indicator) {
+                    UILabel *otherLbl = (UILabel *)sub;
+                    if (otherLbl.text.length > 0) {
+                        containsOtherText = YES;
+                        break;
+                    }
+                }
+            }
+            if (!containsInteractiveElements && !containsOtherText && badge.bounds.size.height < 50.0) {
+                badge.hidden = YES;
+                badge.alpha = 0.0f;
+                badge.backgroundColor = [UIColor clearColor];
+                if (badge.layer) {
+                    badge.layer.opacity = 0.0f;
+                }
+            } else {
+                badge.backgroundColor = [UIColor clearColor];
+            }
         }
     }
 }
 
-// Рекурсивно скрывает нативный текст Spotify внутри scroll view, исключая наш караоке-контейнер
+// Гарантирует, что верхняя шапка (кнопка '⌵' для скрытия текста, название трека и имя артиста) всегда видны и доступны!
+static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
+    if (!topVC || !topVC.view) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:topVC.view];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+
+        // 1. Все кнопки в окне (включая кнопку-шеврон '⌵' для скрытия текста)
+        if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
+            v.hidden = NO;
+            v.alpha = 1.0f;
+            v.userInteractionEnabled = YES;
+
+            CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
+            if (ptInWin.y < 140.0 && ptInWin.x < 120.0) {
+                if ([v isKindOfClass:[UIButton class]]) {
+                    UIButton *btn = (UIButton *)v;
+                    [btn addTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onChevronDismissTapped:) forControlEvents:UIControlEventTouchUpInside];
+                }
+            }
+
+            UIView *p = v.superview;
+            while (p && p != topVC.view && p != topVC.view.window) {
+                p.hidden = NO;
+                p.alpha = 1.0f;
+                p.userInteractionEnabled = YES;
+                p = p.superview;
+            }
+            if (v.superview) {
+                [v.superview bringSubviewToFront:v];
+            }
+        }
+
+        // 2. Название трека и артист в верхней шапке (y < 140 pt)
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)v;
+            NSString *txt = [lbl.text lowercaseString];
+            BOOL isSyncIndicator = ([txt containsString:@"синхронизац"] ||
+                                    [txt containsString:@"не синхронизирован"] ||
+                                    [txt containsString:@"synced"] ||
+                                    [txt containsString:@"not synced"]);
+            if (!isSyncIndicator) {
+                CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
+                if (ptInWin.y < 140.0 && lbl.font.pointSize < 24.0) {
+                    lbl.hidden = NO;
+                    lbl.alpha = 1.0f;
+                    UIView *p = lbl.superview;
+                    while (p && p != topVC.view && p != topVC.view.window) {
+                        p.hidden = NO;
+                        p.alpha = 1.0f;
+                        p = p.superview;
+                    }
+                }
+            }
+        }
+
+        [q addObjectsFromArray:v.subviews];
+    }
+}
+
+// Рекурсивно скрывает нативный текст Spotify внутри scroll view, исключая наш караоке-контейнер и шапку навигации
 static void hideOriginalLyricsViews(UIView *root) {
     if (!root || root.tag == KARAOKE_CONTAINER_TAG) return;
     NSMutableArray *q = [NSMutableArray arrayWithObject:root];
@@ -1608,6 +1724,12 @@ static void hideOriginalLyricsViews(UIView *root) {
         UIView *v = q.firstObject;
         [q removeObjectAtIndex:0];
         if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+
+        // Никогда не скрываем кнопки и интерактивные элементы
+        if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
+            continue;
+        }
+
         if ([v isKindOfClass:[UICollectionViewCell class]]) {
             UIView *cv = ((UICollectionViewCell *)v).contentView;
             if (cv) {
@@ -1616,6 +1738,12 @@ static void hideOriginalLyricsViews(UIView *root) {
             }
         }
         if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
+            UILabel *lbl = (UILabel *)v;
+            // Проверяем: если метка находится в верхней шапке (y < 130 pt) и шрифт небольшой, это заголовок трека / артист! Не скрываем!
+            CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
+            if (ptInWin.y < 130.0 && lbl.font.pointSize < 24.0) {
+                continue;
+            }
             v.hidden = YES;
             v.alpha = 0.0f;
         }
@@ -1641,12 +1769,6 @@ static void restoreOriginalLyricsViews(UIView *root) {
         if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
             v.hidden = NO;
             v.alpha = 1.0f;
-            UIView *p = v.superview;
-            while (p && p != root && p.bounds.size.height <= 80.0) {
-                p.hidden = NO;
-                p.alpha = 1.0f;
-                p = p.superview;
-            }
         }
         [q addObjectsFromArray:v.subviews];
     }
@@ -1934,21 +2056,43 @@ static void checkAndSyncLyricsOnScreen(void) {
         if (!scrollView) continue;
 
         // 4. Полноэкранный караоке вид
+        CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+        CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+        CGFloat topInset = 44.0;
+        if (@available(iOS 11.0, *)) {
+            if (win.safeAreaInsets.top > 0) {
+                topInset = win.safeAreaInsets.top;
+            }
+        }
+        CGFloat topSafeY = topInset + 44.0; // Высота шапки (статус бар + навигационный бар с шевроном)
+        CGFloat startY = scrollView.frame.origin.y;
+        if (startY < topSafeY) {
+            startY = topSafeY;
+        }
+        CGFloat targetW = scrollView.frame.size.width >= 200.0 ? scrollView.frame.size.width : screenW;
+        CGFloat targetH = screenH - startY;
+        CGRect targetFrame = CGRectMake(0, startY, targetW, targetH);
+
+        UIViewController *topVC = win.rootViewController;
+        while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
+            topVC = topVC.presentedViewController;
+        }
+
         UIView *existingContainer = [scrollView.superview viewWithTag:KARAOKE_CONTAINER_TAG] ?: [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
         if (!existingContainer && g_activeKaraokeContainer && g_activeKaraokeContainer.window != nil) {
             existingContainer = g_activeKaraokeContainer;
         }
 
         if (existingContainer) {
-            CGRect sFrame = scrollView.frame;
-            if (sFrame.size.height > 100.0 && sFrame.size.width > 100.0) {
-                if (!CGRectEqualToRect(existingContainer.frame, sFrame)) {
-                    existingContainer.frame = sFrame;
-                }
+            if (!CGRectEqualToRect(existingContainer.frame, targetFrame)) {
+                existingContainer.frame = targetFrame;
             }
             [existingContainer.superview bringSubviewToFront:existingContainer];
             hideOriginalLyricsViews(scrollView);
             hideUnsyncedLyricsIndicator(win);
+            if (topVC) {
+                ensureHeaderAndChevronVisible(topVC);
+            }
         }
 
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
@@ -1960,14 +2104,10 @@ static void checkAndSyncLyricsOnScreen(void) {
                     existingContainer = nil;
                 }
 
-                CGRect targetFrame = scrollView.frame;
-                if (targetFrame.size.width < 200.0) targetFrame.size.width = [UIScreen mainScreen].bounds.size.width;
-                if (targetFrame.size.height < 300.0) targetFrame.size.height = [UIScreen mainScreen].bounds.size.height;
-
                 CGFloat viewW = targetFrame.size.width;
                 CGFloat padX = 24.0;
                 CGFloat contentW = viewW - (padX * 2);
-                CGFloat curY = 32.0;
+                CGFloat curY = 24.0;
 
                 // Создаем собственный UIScrollView оверлей поверх экрана слов
                 UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:targetFrame];
@@ -1982,7 +2122,13 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.showsVerticalScrollIndicator = YES;
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 // Оптимальный нижний отступ (150pt), чтобы последние строчки поднимались над нижней панелью без пустой бездны
-                containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 150.0, 0);
+                containerScroll.contentInset = UIEdgeInsetsMake(10.0, 0, 150.0, 0);
+
+                // Свайп вниз для удобного закрытия текста, когда пользователь наверху
+                UISwipeGestureRecognizer *swipeDown = [[UISwipeGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onDismissSwipeDown:)];
+                swipeDown.direction = UISwipeGestureRecognizerDirectionDown;
+                swipeDown.delegate = [AntiCensorTapHandler sharedHandler];
+                [containerScroll addGestureRecognizer:swipeDown];
 
                 // Единый жест нажатия на весь контейнер (не блокирует скроллирование!)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
@@ -2026,6 +2172,10 @@ static void checkAndSyncLyricsOnScreen(void) {
                 [mountParent addSubview:containerScroll];
                 [mountParent bringSubviewToFront:containerScroll];
                 g_activeKaraokeContainer = containerScroll;
+
+                if (topVC) {
+                    ensureHeaderAndChevronVisible(topVC);
+                }
             }
         }
 
@@ -3461,8 +3611,17 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
     if ([clsName containsString:@"Lyric"] || [clsName containsString:@"lyric"]) {
         NSString *userLyrics = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
         if (userLyrics && userLyrics.length > 0) {
-            hideOriginalLyricsViews(vcToPresent.view);
+            NSMutableArray *queue = [NSMutableArray arrayWithObject:vcToPresent.view];
+            while (queue.count > 0) {
+                UIView *v = queue.firstObject;
+                [queue removeObjectAtIndex:0];
+                if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
+                    hideOriginalLyricsViews(v);
+                }
+                [queue addObjectsFromArray:v.subviews];
+            }
             hideUnsyncedLyricsIndicator(vcToPresent.view);
+            ensureHeaderAndChevronVisible(vcToPresent);
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             checkAndSyncLyricsOnScreen();
