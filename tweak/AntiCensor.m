@@ -1188,7 +1188,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
             } else {
-                lbl.textColor = [UIColor colorWithWhite:0.3 alpha:0.7];
+                lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformIdentity;
             }
@@ -1232,87 +1232,82 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
     if (!rawLrcOrText || rawLrcOrText.length == 0) return nil;
     NSMutableArray<AntiCensorLyricItem *> *items = [NSMutableArray array];
 
-    // Поддержка inline LRC: "[00:14.02]текст[00:17.23]текст" в одной строке
-    // Сначала проверяем, содержит ли строка теги — если да, сплитируем по ним
-    NSRegularExpression *tagSplitRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[\\d{1,2}:\\d{2}(?:\\.\\d{1,3})?\\]" options:0 error:nil];
-    NSString *joinedText = [rawLrcOrText stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
-    joinedText = [joinedText stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSString *cleanText = [rawLrcOrText stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
+    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
 
-    // Если LRC теги встречаются внутри строки (не только в начале) — разобьём по тегам
-    NSArray<NSTextCheckingResult *> *allTagMatches = [tagSplitRegex matchesInString:joinedText options:0 range:NSMakeRange(0, joinedText.length)];
-    NSMutableString *preprocessed = [NSMutableString string];
-    if (allTagMatches.count > 1) {
-        // Расставляем перенос строки перед каждым тегом
-        NSUInteger lastEnd = 0;
-        for (NSTextCheckingResult *m in allTagMatches) {
-            if (m.range.location > lastEnd) {
-                NSString *between = [joinedText substringWithRange:NSMakeRange(lastEnd, m.range.location - lastEnd)];
-                [preprocessed appendString:between];
+    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[(\\d{1,2}):(\\d{2})(?:\\.(\\d{1,3}))?\\]" options:0 error:nil];
+    NSArray<NSTextCheckingResult *> *matches = [tagRegex matchesInString:cleanText options:0 range:NSMakeRange(0, cleanText.length)];
+
+    if (matches.count > 0) {
+        // Текст до первого тега (если есть) — относится к 0.0s (начало песни)
+        NSUInteger firstTagPos = matches[0].range.location;
+        if (firstTagPos > 0) {
+            NSString *preTag = [[cleanText substringToIndex:firstTagPos] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (preTag.length > 0) {
+                AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
+                it.time = 0.0;
+                it.text = preTag;
+                [items addObject:it];
             }
-            if (preprocessed.length > 0 && [preprocessed characterAtIndex:preprocessed.length - 1] != '\n') {
-                [preprocessed appendString:@"\n"];
-            }
-            lastEnd = m.range.location;
         }
-        [preprocessed appendString:[joinedText substringFromIndex:lastEnd]];
-    } else {
-        [preprocessed appendString:joinedText];
-    }
 
-    NSArray *rawLines = [preprocessed componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\[(\\d{1,2}):(\\d{2})(?:\\.(\\d{1,3}))?\\](.*)" options:0 error:nil];
-
-    BOOL anyTimestamp = NO;
-    for (NSString *line in rawLines) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (trimmed.length == 0) continue;
-        NSTextCheckingResult *match = [regex firstMatchInString:trimmed options:0 range:NSMakeRange(0, trimmed.length)];
-        if (match && match.numberOfRanges >= 5) {
-            int m = [[trimmed substringWithRange:[match rangeAtIndex:1]] intValue];
-            int s = [[trimmed substringWithRange:[match rangeAtIndex:2]] intValue];
+        for (NSUInteger mIdx = 0; mIdx < matches.count; mIdx++) {
+            NSTextCheckingResult *m = matches[mIdx];
+            int mins = [[cleanText substringWithRange:[m rangeAtIndex:1]] intValue];
+            int secs = [[cleanText substringWithRange:[m rangeAtIndex:2]] intValue];
             double ms = 0.0;
-            NSRange msRange = [match rangeAtIndex:3];
-            if (msRange.location != NSNotFound) {
-                NSString *msStr = [trimmed substringWithRange:msRange];
+            if ([m rangeAtIndex:3].location != NSNotFound) {
+                NSString *msStr = [cleanText substringWithRange:[m rangeAtIndex:3]];
                 ms = [msStr doubleValue] / (msStr.length == 3 ? 1000.0 : 100.0);
             }
-            double t = (m * 60.0) + s + ms;
-            NSString *content = [trimmed substringWithRange:[match rangeAtIndex:4]];
-            content = [content stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-            if (content.length > 0) {
-                AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
-                it.time = t;
-                it.text = content;
-                [items addObject:it];
-                anyTimestamp = YES;
+            double tagTime = (mins * 60.0) + secs + ms;
+
+            NSUInteger start = NSMaxRange(m.range);
+            NSUInteger end = (mIdx + 1 < matches.count) ? matches[mIdx + 1].range.location : cleanText.length;
+            if (end > start) {
+                NSString *chunk = [cleanText substringWithRange:NSMakeRange(start, end - start)];
+                NSArray *chunkLines = [chunk componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+                for (NSString *cl in chunkLines) {
+                    NSString *trimmed = [cl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    if (trimmed.length > 0) {
+                        AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
+                        it.time = tagTime;
+                        it.text = trimmed;
+                        [items addObject:it];
+                    }
+                }
             }
-        } else {
-            // Текст без таймкода
-            AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
-            it.time = -1.0;
-            it.text = trimmed;
-            [items addObject:it];
+        }
+    } else {
+        NSArray *rawLines = [cleanText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        for (NSString *line in rawLines) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (trimmed.length > 0) {
+                AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
+                it.time = -1.0;
+                it.text = trimmed;
+                [items addObject:it];
+            }
+        }
+
+        if (items.count > 0) {
+            double dur = duration > 10.0 ? duration : 180.0;
+            double intro = MIN(5.0, dur * 0.04);
+            double outro = MAX(dur - 8.0, dur * 0.94);
+            double span = MAX(10.0, outro - intro);
+            double totalChars = 0;
+            for (AntiCensorLyricItem *it in items) {
+                totalChars += MAX(10, it.text.length);
+            }
+            double accum = 0;
+            for (NSUInteger i = 0; i < items.count; i++) {
+                items[i].time = intro + (span * (accum / totalChars));
+                accum += MAX(10, items[i].text.length);
+            }
         }
     }
 
     if (items.count == 0) return nil;
-
-    if (!anyTimestamp) {
-        // Нет таймкодов — равномерно распределяем по длительности трека
-        double dur = duration > 10.0 ? duration : 180.0;
-        double intro = MIN(8.0, dur * 0.05);
-        double outro = MAX(dur - 10.0, dur * 0.92);
-        double span = MAX(10.0, outro - intro);
-        double totalChars = 0;
-        for (AntiCensorLyricItem *it in items) {
-            totalChars += MAX(10, it.text.length);
-        }
-        double accum = 0;
-        for (NSUInteger i = 0; i < items.count; i++) {
-            items[i].time = intro + (span * (accum / totalChars));
-            accum += MAX(10, items[i].text.length);
-        }
-    }
 
     [items sortUsingComparator:^NSComparisonResult(AntiCensorLyricItem *a, AntiCensorLyricItem *b) {
         if (a.time < b.time) return NSOrderedAscending;
@@ -1343,83 +1338,167 @@ static UILabel *findUnsyncedLyricsIndicatorLabel(UIView *root) {
     return nil;
 }
 
+// Проверка: относится ли view к экрану плеера (Now Playing) с большой обложкой
+static BOOL isViewPartOfNowPlayingPlayer(UIView *view) {
+    if (!view) return NO;
+
+    // Рекурсивный поиск большой обложки альбома (>= 150x150)
+    // Экран слов НИКОГДА не имеет большой обложки альбома! На плеере она всегда есть!
+    NSMutableArray *q = [NSMutableArray arrayWithObject:view];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIImageView class]]) {
+            CGSize sz = v.bounds.size;
+            if (sz.width >= 150.0 && sz.height >= 150.0) {
+                return YES;
+            }
+        }
+        [q addObjectsFromArray:v.subviews];
+    }
+    return NO;
+}
+
+// Проверка: является ли scroll view полноэкранным экраном слов песни
+static BOOL isFullScreenLyricsScrollView(UIScrollView *sv) {
+    if (!sv || sv.hidden || sv.alpha < 0.05 || sv.window == nil) return NO;
+    if (sv.tag == KARAOKE_CONTAINER_TAG) return NO;
+
+    CGSize sz = sv.bounds.size;
+    // Полноэкранный экран слов всегда крупный (высота > 300, ширина > 250)
+    if (sz.height < 300.0 || sz.width < 250.0) return NO;
+
+    // Должен быть виден на экране прямо сейчас
+    CGRect rInWin = [sv convertRect:sv.bounds toView:nil];
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    if (!CGRectIntersectsRect(rInWin, screenBounds)) return NO;
+    if (rInWin.size.height < 250.0) return NO;
+
+    // СТРОЖАЙШЕ: если внутри есть большая обложка альбома — это плеер, а НЕ экран слов!
+    if (isViewPartOfNowPlayingPlayer(sv)) {
+        return NO;
+    }
+
+    // Исключаем главные вкладки (Главная, Поиск, Медиатека)
+    UIResponder *resp = sv;
+    while (resp) {
+        if ([resp isKindOfClass:[UITabBarController class]]) {
+            UITabBarController *tbc = (UITabBarController *)resp;
+            if (!tbc.presentedViewController) return NO;
+        }
+        resp = resp.nextResponder;
+    }
+
+    // Проверяем: либо класс VC содержит "lyrics", либо класс view содержит "lyrics",
+    // либо внутри scroll view есть текст текущей песни / индикатор "синхронизация текста"
+    BOOL hasLyricsIndicator = (findUnsyncedLyricsIndicatorLabel(sv) != nil);
+    if (!hasLyricsIndicator && sv.superview) {
+        hasLyricsIndicator = (findUnsyncedLyricsIndicatorLabel(sv.superview) != nil);
+    }
+
+    NSString *svCls = [NSStringFromClass([sv class]) lowercaseString];
+    NSString *pCls = sv.superview ? [NSStringFromClass([sv.superview class]) lowercaseString] : @"";
+    BOOL classMentionsLyrics = ([svCls containsString:@"lyrics"] || [pCls containsString:@"lyrics"]);
+
+    BOOL vcMentionsLyrics = NO;
+    UIResponder *res = sv;
+    while (res) {
+        if ([res isKindOfClass:[UIViewController class]]) {
+            NSString *cName = [NSStringFromClass([res class]) lowercaseString];
+            if ([cName containsString:@"lyrics"]) {
+                vcMentionsLyrics = YES;
+                break;
+            }
+        }
+        res = res.nextResponder;
+    }
+
+    if (classMentionsLyrics || vcMentionsLyrics || hasLyricsIndicator) {
+        return YES;
+    }
+
+    // Либо содержит минимум 3 строки текста
+    int lineCount = 0;
+    NSMutableArray *chkQueue = [NSMutableArray arrayWithObject:sv];
+    while (chkQueue.count > 0 && lineCount < 3) {
+        UIView *v = chkQueue.firstObject;
+        [chkQueue removeObjectAtIndex:0];
+        if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+        if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
+            NSString *t = nil;
+            if ([v isKindOfClass:[UILabel class]]) t = ((UILabel *)v).text;
+            else t = ((UITextView *)v).text;
+            if (t && t.length > 5) {
+                lineCount++;
+            }
+        }
+        [chkQueue addObjectsFromArray:v.subviews];
+    }
+
+    if (lineCount >= 3) {
+        return YES;
+    }
+
+    return NO;
+}
+
 static UIScrollView *findLyricsScrollViewInView(UIView *win) {
     if (!win || win.hidden || win.alpha < 0.05) return nil;
     if (win.tag == KARAOKE_CONTAINER_TAG) return nil;
 
-    // 1. Быстрый возврат, если контейнер караоке уже смонтирован в активном видимом скролле.
-    // НО только если этот scroll view действительно виден на экране прямо сейчас!
+    // 1. Быстрый возврат, если контейнер караоке уже смонтирован в активном валидном скролле
     UIView *existing = [win viewWithTag:KARAOKE_CONTAINER_TAG];
     if (existing && [existing.superview isKindOfClass:[UIScrollView class]]) {
         UIScrollView *p = (UIScrollView *)existing.superview;
-        if (!p.hidden && p.alpha > 0.05 && p.window != nil) {
-            // Дополнительная проверка: убеждаемся, что scroll view виден на экране (не скрыт за другим VC)
-            CGRect svRectInWindow = [p convertRect:p.bounds toView:nil];
-            CGRect screenBounds = [UIScreen mainScreen].bounds;
-            if (CGRectIntersectsRect(svRectInWindow, screenBounds) && svRectInWindow.size.height > 100) {
-                return p;
+        if (isFullScreenLyricsScrollView(p)) {
+            return p;
+        } else {
+            // Контейнер на невалидном скролле (например на плеере) — восстанавливаем и удаляем!
+            for (UIView *sub in p.subviews) {
+                if (sub != existing && sub.tag != KARAOKE_CONTAINER_TAG) {
+                    sub.hidden = NO;
+                    sub.userInteractionEnabled = YES;
+                }
             }
+            [existing removeFromSuperview];
         }
-        // Если scroll view уже не виден — удаляем контейнер, чтобы не было phantom overlay
-        [existing removeFromSuperview];
     }
 
-    // 2. СТРОГИЙ ГЕЙТ: возвращаем nil, если индикатора "Синхронизация текста" нет на экране.
-    // Это означает, что полноэкранный экран текста НЕ открыт → никакой инъекции.
-    UILabel *indicator = findUnsyncedLyricsIndicatorLabel(win);
-    if (!indicator || indicator.hidden || indicator.alpha < 0.05 || indicator.window == nil) {
-        return nil;
+    // 2. Ищем полноэкранный экран слов среди представленных view controller'ов
+    UIViewController *topVC = getKeyAppWindow().rootViewController;
+    while (topVC.presentedViewController) {
+        topVC = topVC.presentedViewController;
     }
-
-    // Убеждаемся что индикатор реально виден (не обрезан / за краем экрана)
-    CGRect indicatorRect = [indicator convertRect:indicator.bounds toView:nil];
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    if (!CGRectIntersectsRect(indicatorRect, screenBounds)) {
-        return nil;
-    }
-
-    // 3. Индикатор виден — ищем UIScrollView в том же view-controller что и индикатор.
-    // Поднимаемся по цепочке родителей индикатора, ища UIScrollView-сиблинг
-    UIView *cur = indicator.superview;
-    while (cur && cur != win) {
-        for (UIView *sub in cur.subviews) {
-            if ([sub isKindOfClass:[UIScrollView class]] && sub.tag != KARAOKE_CONTAINER_TAG) {
-                UIScrollView *sv = (UIScrollView *)sub;
-                if (sv.bounds.size.height > 200.0 && sv.bounds.size.width > 150.0) {
+    if (topVC && topVC.view && !topVC.view.hidden) {
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:topVC.view];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
+                UIScrollView *sv = (UIScrollView *)v;
+                if (isFullScreenLyricsScrollView(sv)) {
                     return sv;
                 }
             }
+            [queue addObjectsFromArray:v.subviews];
         }
-        cur = cur.superview;
     }
 
-    // 4. Если не нашли сиблинга — BFS по всему окну, но ТОЛЬКО среди scroll views
-    // без большой квадратной обложки (чтобы не поймать экран плеера)
-    UIWindow *w = indicator.window ?: (UIWindow *)win;
-    NSMutableArray *queue = [NSMutableArray arrayWithObject:w];
-    UIScrollView *bestSV = nil;
-    CGFloat maxH = 0;
+    // 3. Поиск по всему окну
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
     while (queue.count > 0) {
         UIView *v = queue.firstObject;
         [queue removeObjectAtIndex:0];
         if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
             UIScrollView *sv = (UIScrollView *)v;
-            BOOL hasLargeArt = NO;
-            for (UIView *s in sv.subviews) {
-                if ([s isKindOfClass:[UIImageView class]] && s.bounds.size.width > 200.0) {
-                    hasLargeArt = YES; break;
-                }
-            }
-            if (!hasLargeArt && sv.bounds.size.height > 200.0 && sv.bounds.size.width > 150.0) {
-                if (sv.bounds.size.height > maxH) {
-                    maxH = sv.bounds.size.height;
-                    bestSV = sv;
-                }
+            if (isFullScreenLyricsScrollView(sv)) {
+                return sv;
             }
         }
         [queue addObjectsFromArray:v.subviews];
     }
-    return bestSV;
+
+    return nil;
 }
 
 static void collectAllLyricsLines(UIView *root, NSMutableArray<NSString *> *outLines) {
@@ -1526,17 +1605,25 @@ static void checkAndSyncLyricsOnScreen(void) {
         UIView *existingContainer = [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
         if (existingContainer) {
             [scrollView bringSubviewToFront:existingContainer];
-            // НЕ скрываем другие subviews — иначе кнопка закрытия экрана пропадает
+            // Скрываем нативные subviews scroll view чтобы не было двойного текста.
+            // Кнопка закрытия ("v") находится вне scroll view — в nav bar родительского VC — поэтому она не пострадает.
+            for (UIView *sub in scrollView.subviews) {
+                if (sub != existingContainer && sub.tag != KARAOKE_CONTAINER_TAG) {
+                    sub.hidden = YES;
+                    sub.userInteractionEnabled = NO;
+                }
+            }
         }
 
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
             NSString *lyricsStr = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
             if (!lyricsStr || lyricsStr.length == 0) {
+                // Читаем нативный текст из scroll view ДО создания нашего контейнера
+                // (existingContainer == nil в этой ветке, так что наших меток там нет)
                 NSMutableArray<NSString *> *lines = [NSMutableArray array];
                 collectAllLyricsLines(scrollView, lines);
                 if (lines.count > 0) {
                     lyricsStr = [lines componentsJoinedByString:@"\n"];
-                    // НЕ сохраняем автоматически в постоянную базу saveLyricsForTrack
                 }
             }
 
@@ -1548,66 +1635,78 @@ static void checkAndSyncLyricsOnScreen(void) {
                 g_lastActiveKaraokeIdx = -1;
                 g_currentKaraokeItems = parseLyricsForTrack(lyricsStr, duration);
 
-                if (existingContainer) {
-                    [existingContainer removeFromSuperview];
+                if (!g_currentKaraokeItems || g_currentKaraokeItems.count == 0) {
+                    // Нет строк — ничего не делаем
+                } else {
+                    if (existingContainer) {
+                        [existingContainer removeFromSuperview];
+                        existingContainer = nil;
+                    }
+
+                    CGFloat viewW = scrollView.bounds.size.width;
+                    if (viewW < 200) viewW = [UIScreen mainScreen].bounds.size.width;
+                    CGFloat padX = 24.0;
+                    CGFloat contentW = viewW - (padX * 2);
+                    CGFloat curY = 32.0;
+
+                    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, viewW, 1000)];
+                    container.tag = KARAOKE_CONTAINER_TAG;
+                    container.backgroundColor = [UIColor clearColor];
+                    container.userInteractionEnabled = YES;
+
+                    UITapGestureRecognizer *contTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeContainerTapped:)];
+                    contTap.delegate = [AntiCensorTapHandler sharedHandler];
+                    contTap.cancelsTouchesInView = NO;
+                    [container addGestureRecognizer:contTap];
+
+                    g_currentKaraokeLabels = [NSMutableArray array];
+
+                    for (NSUInteger i = 0; i < g_currentKaraokeItems.count; i++) {
+                        AntiCensorLyricItem *it = g_currentKaraokeItems[i];
+                        UILabel *lbl = [[UILabel alloc] init];
+                        lbl.numberOfLines = 0;
+                        lbl.font = [UIFont systemFontOfSize:25.0 weight:UIFontWeightHeavy];
+                        lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
+                        lbl.alpha = 1.0f;
+                        lbl.text = it.text;
+                        lbl.userInteractionEnabled = YES;
+                        lbl.tag = i;
+
+                        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeLineTapped:)];
+                        tap.delegate = [AntiCensorTapHandler sharedHandler];
+                        tap.cancelsTouchesInView = NO;
+                        [lbl addGestureRecognizer:tap];
+
+                        CGSize maxS = CGSizeMake(contentW, CGFLOAT_MAX);
+                        CGRect b = [it.text boundingRectWithSize:maxS
+                                                         options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                                      attributes:@{NSFontAttributeName: lbl.font}
+                                                         context:nil];
+                        CGFloat lineH = MAX(30.0, ceil(b.size.height));
+                        lbl.frame = CGRectMake(padX, curY, contentW, lineH);
+                        [container addSubview:lbl];
+                        [g_currentKaraokeLabels addObject:lbl];
+
+                        curY += lineH + 24.0;
+                    }
+
+                    curY += 280.0;
+                    container.frame = CGRectMake(0, 0, viewW, curY);
+
+                    // Скрываем нативные subviews перед добавлением нашего контейнера
+                    for (UIView *sub in scrollView.subviews) {
+                        if (sub.tag != KARAOKE_CONTAINER_TAG) {
+                            sub.hidden = YES;
+                            sub.userInteractionEnabled = NO;
+                        }
+                    }
+
+                    [scrollView addSubview:container];
+                    [scrollView bringSubviewToFront:container];
+                    scrollView.delaysContentTouches = NO;
+                    scrollView.canCancelContentTouches = YES;
+                    scrollView.contentSize = CGSizeMake(viewW, curY);
                 }
-
-                CGFloat viewW = scrollView.bounds.size.width;
-                if (viewW < 200) viewW = [UIScreen mainScreen].bounds.size.width;
-                CGFloat padX = 24.0;
-                CGFloat contentW = viewW - (padX * 2);
-                CGFloat curY = 32.0;
-
-                UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, viewW, 1000)];
-                container.tag = KARAOKE_CONTAINER_TAG;
-                container.backgroundColor = [UIColor clearColor];
-                container.userInteractionEnabled = YES;
-
-                UITapGestureRecognizer *contTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeContainerTapped:)];
-                contTap.delegate = [AntiCensorTapHandler sharedHandler];
-                contTap.cancelsTouchesInView = NO;
-                [container addGestureRecognizer:contTap];
-
-                g_currentKaraokeLabels = [NSMutableArray array];
-
-                for (NSUInteger i = 0; i < g_currentKaraokeItems.count; i++) {
-                    AntiCensorLyricItem *it = g_currentKaraokeItems[i];
-                    UILabel *lbl = [[UILabel alloc] init];
-                    lbl.numberOfLines = 0;
-                    // Шрифт 25pt Heavy — как нативное Spotify
-                    lbl.font = [UIFont systemFontOfSize:25.0 weight:UIFontWeightHeavy];
-                    // Неактивные строки — тёмно-серые (хорошо видны на любом фоне)
-                    lbl.textColor = [UIColor colorWithWhite:0.3 alpha:0.7];
-                    lbl.alpha = 1.0f;
-                    lbl.text = it.text;
-                    lbl.userInteractionEnabled = YES;
-                    lbl.tag = i;
-
-                    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeLineTapped:)];
-                    tap.delegate = [AntiCensorTapHandler sharedHandler];
-                    tap.cancelsTouchesInView = NO;
-                    [lbl addGestureRecognizer:tap];
-
-                    CGSize maxS = CGSizeMake(contentW, CGFLOAT_MAX);
-                    CGRect b = [it.text boundingRectWithSize:maxS
-                                                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                                  attributes:@{NSFontAttributeName: lbl.font}
-                                                     context:nil];
-                    CGFloat lineH = ceil(b.size.height);
-                    lbl.frame = CGRectMake(padX, curY, contentW, lineH);
-                    [container addSubview:lbl];
-                    [g_currentKaraokeLabels addObject:lbl];
-
-                    curY += lineH + 24.0;
-                }
-
-                curY += 280.0; // отступ снизу для комфортного скролла последних строк
-                container.frame = CGRectMake(0, 0, viewW, curY);
-                [scrollView addSubview:container];
-                [scrollView bringSubviewToFront:container];
-                scrollView.delaysContentTouches = NO;
-                scrollView.canCancelContentTouches = YES;
-                scrollView.contentSize = CGSizeMake(viewW, curY);
             }
         }
 
@@ -1635,8 +1734,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
                         } else {
-                            // Неактивные — тёмно-серые (хорошо видны на голубом фоне Spotify)
-                            lbl.textColor = [UIColor colorWithWhite:0.3 alpha:0.7];
+                            // Неактивные — тёмно-черные (как в нативном Spotify караоке)
+                            lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
                         }
@@ -2603,6 +2702,22 @@ static void cleanupRogueBanners(void) {
         while (queue.count > 0) {
             UIView *v = queue.firstObject;
             [queue removeObjectAtIndex:0];
+            if (v.tag == KARAOKE_CONTAINER_TAG) {
+                if (![v.superview isKindOfClass:[UIScrollView class]] || !isFullScreenLyricsScrollView((UIScrollView *)v.superview)) {
+                    if ([v.superview isKindOfClass:[UIScrollView class]]) {
+                        UIScrollView *sv = (UIScrollView *)v.superview;
+                        for (UIView *sub in sv.subviews) {
+                            if (sub != v && sub.tag != KARAOKE_CONTAINER_TAG) {
+                                sub.hidden = NO;
+                                sub.userInteractionEnabled = YES;
+                            }
+                        }
+                    }
+                    [v removeFromSuperview];
+                    continue;
+                }
+            }
+
             if (v.tag == 778899) {
                 // Если этот баннер не внутри модально представленного контекстного контроллера — немедленно удаляем!
                 UIResponder *resp = v.nextResponder;
