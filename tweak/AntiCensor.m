@@ -1212,14 +1212,6 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     return YES;
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return NO;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return NO;
-}
-
 - (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view {
     if (@available(iOS 10.0, *)) {
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -1584,9 +1576,39 @@ static void hideOriginalLyricsViews(UIView *root) {
         UIView *v = q.firstObject;
         [q removeObjectAtIndex:0];
         if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+        if ([v isKindOfClass:[UICollectionViewCell class]]) {
+            UIView *cv = ((UICollectionViewCell *)v).contentView;
+            if (cv) {
+                cv.alpha = 0.0f;
+                [q addObjectsFromArray:cv.subviews];
+            }
+        }
         if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
             v.hidden = YES;
             v.alpha = 0.0f;
+        }
+        [q addObjectsFromArray:v.subviews];
+    }
+}
+
+// Рекурсивно восстанавливает нативный текст Spotify
+static void restoreOriginalLyricsViews(UIView *root) {
+    if (!root || root.tag == KARAOKE_CONTAINER_TAG) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if (v.tag == KARAOKE_CONTAINER_TAG) continue;
+        if ([v isKindOfClass:[UICollectionViewCell class]]) {
+            UIView *cv = ((UICollectionViewCell *)v).contentView;
+            if (cv) {
+                cv.alpha = 1.0f;
+                [q addObjectsFromArray:cv.subviews];
+            }
+        }
+        if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
+            v.hidden = NO;
+            v.alpha = 1.0f;
         }
         [q addObjectsFromArray:v.subviews];
     }
@@ -1786,8 +1808,9 @@ static void checkAndSyncLyricsOnScreen(void) {
             g_activeKaraokeContainer = nil;
             if (p) {
                 for (UIView *cur in p.subviews) {
-                    if (cur.hidden) { cur.hidden = NO; cur.alpha = 1.0f; }
+                    if (cur.hidden) { cur.hidden = NO; cur.alpha = 1.0f; cur.userInteractionEnabled = YES; }
                 }
+                restoreOriginalLyricsViews(p);
             }
         }
 
@@ -1797,13 +1820,13 @@ static void checkAndSyncLyricsOnScreen(void) {
             if (!win) continue;
             UIView *ex = [win viewWithTag:KARAOKE_CONTAINER_TAG];
             if (ex) {
-                if ([ex.superview isKindOfClass:[UIScrollView class]]) {
-                    UIScrollView *sv = (UIScrollView *)ex.superview;
-                    for (UIView *sub in sv.subviews) {
+                if (ex.superview) {
+                    for (UIView *sub in ex.superview.subviews) {
                         sub.hidden = NO;
                         sub.alpha = 1.0f;
                         sub.userInteractionEnabled = YES;
                     }
+                    restoreOriginalLyricsViews(ex.superview);
                 }
                 [ex removeFromSuperview];
             }
@@ -1886,8 +1909,6 @@ static void checkAndSyncLyricsOnScreen(void) {
                 }
             }
             [existingContainer.superview bringSubviewToFront:existingContainer];
-            scrollView.hidden = YES;
-            scrollView.userInteractionEnabled = NO;
             hideOriginalLyricsViews(scrollView);
             hideUnsyncedLyricsIndicator(win);
         }
@@ -1921,16 +1942,9 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.delaysContentTouches = NO;
                 containerScroll.canCancelContentTouches = YES;
                 containerScroll.showsVerticalScrollIndicator = YES;
-                containerScroll.directionalLockEnabled = YES;
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 // Большой нижний отступ (280pt), чтобы последние строчки можно было поднять над нижней панелью и нажать!
                 containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 280.0, 0);
-
-                // Назначаем делегатом AntiCensorTapHandler для ВСЕХ жестов скролла, чтобы родительские жесты не блокировали прокрутку
-                containerScroll.panGestureRecognizer.delegate = [AntiCensorTapHandler sharedHandler];
-                containerScroll.panGestureRecognizer.cancelsTouchesInView = NO;
-                containerScroll.panGestureRecognizer.delaysTouchesBegan = NO;
-                containerScroll.panGestureRecognizer.delaysTouchesEnded = NO;
 
                 // Единый жест нажатия на весь контейнер (не блокирует скроллирование!)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
@@ -1967,9 +1981,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 curY += 340.0;
                 containerScroll.contentSize = CGSizeMake(viewW, curY);
 
-                // Полностью скрываем и отключаем оригинальный нативный scroll view Spotify на экране слов
-                scrollView.hidden = YES;
-                scrollView.userInteractionEnabled = NO;
+                // Скрываем нативный текст Spotify на экране слов
                 hideOriginalLyricsViews(scrollView);
 
                 UIView *mountParent = scrollView.superview ?: scrollView;
@@ -3408,14 +3420,12 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
 
     NSString *clsName = NSStringFromClass([vcToPresent class]);
     if ([clsName containsString:@"Lyric"] || [clsName containsString:@"lyric"]) {
-        checkAndSyncLyricsOnScreen();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            checkAndSyncLyricsOnScreen();
-        });
+        NSString *userLyrics = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+        if (userLyrics && userLyrics.length > 0) {
+            hideOriginalLyricsViews(vcToPresent.view);
+            hideUnsyncedLyricsIndicator(vcToPresent.view);
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            checkAndSyncLyricsOnScreen();
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             checkAndSyncLyricsOnScreen();
         });
     }
