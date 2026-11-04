@@ -927,21 +927,36 @@ static void safeSeekPlayerToTime(double targetSeconds) {
     if (!ourAudioPlayer) return;
     if (isnan(targetSeconds) || targetSeconds < 0) return;
 
-    // Защита от заиканий и перегрузки: если плеер уже выполняет перемотку,
-    // просто запоминаем последнюю запрошенную точку и выполним её по окончании
+    if (ourAudioPlayer.currentItem) {
+        CMTime d = ourAudioPlayer.currentItem.duration;
+        if (CMTIME_IS_VALID(d) && !CMTIME_IS_INDEFINITE(d)) {
+            double dur = CMTimeGetSeconds(d);
+            if (dur > 2.0 && targetSeconds > dur - 1.0) {
+                targetSeconds = dur - 1.0;
+            }
+        }
+    }
+
+    g_pendingSeekTarget = targetSeconds;
+
     if (g_isPlayerSeeking) {
-        g_pendingSeekTarget = targetSeconds;
         return;
     }
 
     g_isPlayerSeeking = YES;
+    double toSeek = g_pendingSeekTarget;
     g_pendingSeekTarget = -1.0;
 
-    CMTime seekTime = CMTimeMakeWithSeconds(targetSeconds, NSEC_PER_SEC);
-    // Допуск 0.15 сек дает мгновенную, мягкую перемотку без треска и флуда декодера
-    CMTime tolerance = CMTimeMakeWithSeconds(0.15, NSEC_PER_SEC);
+    CMTime seekTime = CMTimeMakeWithSeconds(toSeek, NSEC_PER_SEC);
 
-    [ourAudioPlayer seekToTime:seekTime toleranceBefore:tolerance toleranceAfter:tolerance completionHandler:^(BOOL finished) {
+    // Сторожевой сброс флага перемотки через 0.6 сек на случай долгой буферизации удаленного потока
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (g_isPlayerSeeking) {
+            g_isPlayerSeeking = NO;
+        }
+    });
+
+    [ourAudioPlayer seekToTime:seekTime completionHandler:^(BOOL finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             g_isPlayerSeeking = NO;
             if (g_pendingSeekTarget >= 0) {
@@ -1147,6 +1162,7 @@ static NSInteger g_lastActiveKaraokeIdx = -1;
 
 static double g_currentTrackDuration = 180.0;
 static NSTimeInterval g_lastUserLyricsInteractionTime = 0;
+static NSTimeInterval g_lastUserManualLyricsSeekTimestamp = 0;
 
 static void seekSpotifyPlayback(double targetSeconds, double duration) {
     if (isnan(targetSeconds) || targetSeconds < 0) return;
@@ -1223,18 +1239,27 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     double seekTarget = g_currentKaraokeItems[idx].time;
     if (seekTarget < 0) return;
 
-    // Сразу фиксируем время взаимодействия, чтобы автоскролл не перебивал наш выбор
-    g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
+    // Сразу фиксируем время взаимодействия, чтобы автоскролл и сетевые события Spotify не перебивали наш выбор
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    g_lastUserManualLyricsSeekTimestamp = now;
+    g_lastUserLyricsInteractionTime = now;
     lastKnownSpotifyPosition = seekTarget;
-    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    lastSpotifyPositionTimestamp = now;
     g_spotifyLastReportedPosition = seekTarget;
-    g_spotifyLastReportedTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    g_spotifyLastReportedTimestamp = now;
 
     // 1. Перематываем наш аудиоплеер (если играет кастомный трек / файл с устройства)
     safeSeekPlayerToTime(seekTarget);
 
     // 2. Синхронно перематываем системный ползунок таймлайна и движок Spotify
     seekSpotifyPlayback(seekTarget, g_currentTrackDuration);
+
+    // 2.1 Гарантируем запуск воспроизведения после перемотки
+    if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
+        if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+            [ourAudioPlayer play];
+        }
+    }
 
     // 3. Мгновенная визуальная подсветка нажатой строки белым цветом
     g_lastActiveKaraokeIdx = idx;
@@ -1565,6 +1590,13 @@ static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
     if (indicator) {
         indicator.hidden = YES;
         indicator.alpha = 0.0f;
+        // Скрываем контейнер-плашку (серую полоску под заголовком), в которой лежит индикатор
+        UIView *p = indicator.superview;
+        while (p && p != win && p != win.rootViewController.view && p.bounds.size.height <= 80.0) {
+            p.hidden = YES;
+            p.alpha = 0.0f;
+            p = p.superview;
+        }
     }
 }
 
@@ -1609,6 +1641,12 @@ static void restoreOriginalLyricsViews(UIView *root) {
         if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UITextView class]]) {
             v.hidden = NO;
             v.alpha = 1.0f;
+            UIView *p = v.superview;
+            while (p && p != root && p.bounds.size.height <= 80.0) {
+                p.hidden = NO;
+                p.alpha = 1.0f;
+                p = p.superview;
+            }
         }
         [q addObjectsFromArray:v.subviews];
     }
@@ -1943,8 +1981,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.canCancelContentTouches = YES;
                 containerScroll.showsVerticalScrollIndicator = YES;
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                // Большой нижний отступ (280pt), чтобы последние строчки можно было поднять над нижней панелью и нажать!
-                containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 280.0, 0);
+                // Оптимальный нижний отступ (150pt), чтобы последние строчки поднимались над нижней панелью без пустой бездны
+                containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 150.0, 0);
 
                 // Единый жест нажатия на весь контейнер (не блокирует скроллирование!)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
@@ -1978,7 +2016,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     curY += lineH + 24.0;
                 }
 
-                curY += 340.0;
+                curY += 60.0;
                 containerScroll.contentSize = CGSizeMake(viewW, curY);
 
                 // Скрываем нативный текст Spotify на экране слов
@@ -2335,7 +2373,8 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         if (hasElapsed && ourAudioPlayer) {
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-            BOOL inCooldown = (now - g_lastForegroundOrScreenTransitionTimestamp < 3.5);
+            BOOL inCooldown = (now - g_lastForegroundOrScreenTransitionTimestamp < 3.5) ||
+                              (now - g_lastUserManualLyricsSeekTimestamp < 3.5);
             if (!inCooldown && !g_isPlayerSeeking) {
                 // Защита от отката на ~5 сек: Spotify при переходе экранов или возврате из фона
                 // сообщает устаревшую позицию, отставшую на несколько секунд.
