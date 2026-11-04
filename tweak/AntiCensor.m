@@ -1392,6 +1392,15 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
 }
 @end
 
+static UIFont *getSpotifyBoldFont(CGFloat size) {
+    UIFont *f = [UIFont fontWithName:@"SpotifyMix-Bold" size:size];
+    if (!f) f = [UIFont fontWithName:@"SpotifyMixUI-Bold" size:size];
+    if (!f) f = [UIFont fontWithName:@"CircularSpUI-Bold" size:size];
+    if (!f) f = [UIFont fontWithName:@"CircularSp-Bold" size:size];
+    if (!f) f = [UIFont systemFontOfSize:size weight:UIFontWeightHeavy];
+    return f;
+}
+
 static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrText, double duration) {
     if (!rawLrcOrText || rawLrcOrText.length == 0) return nil;
     NSMutableArray<AntiCensorLyricItem *> *items = [NSMutableArray array];
@@ -1975,7 +1984,7 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
 
         UIColor *color = (k == activeIdx) ? [UIColor whiteColor] : [UIColor blackColor];
         NSDictionary *attrs = @{
-            NSFontAttributeName: [UIFont systemFontOfSize:19.0 weight:UIFontWeightHeavy],
+            NSFontAttributeName: getSpotifyBoldFont(19.0),
             NSForegroundColorAttributeName: color,
             NSParagraphStyleAttributeName: paraStyle
         };
@@ -2206,38 +2215,44 @@ static void checkAndSyncLyricsOnScreen(void) {
         UIScrollView *scrollView = findLyricsScrollViewInView(win);
         if (!scrollView) continue;
 
-        // 4. Полноэкранный караоке вид во всю ширину экрана (Скриншот 4)
+        // 4. Полноэкранный караоке вид точь-в-точь по дизайну Spotify (Скриншот 4)
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-
-        // Позиционируем оверлей ровно по нативному скроллу Spotify
-        CGFloat topY = scrollView.frame.origin.y;
-        if (topY < 60.0 || topY > 160.0) topY = 120.0;
-        CGFloat bottomControlsY = screenH - 240.0;
-        CGFloat height = bottomControlsY - topY;
-        if (height < 250.0) height = screenH - topY - 100.0;
-
-        CGRect targetFrame = CGRectMake(0, topY, screenW, height);
 
         UIViewController *topVC = win.rootViewController;
         while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
             topVC = topVC.presentedViewController;
         }
+        if (!topVC || !topVC.view) continue;
 
-        UIView *existingContainer = [scrollView.superview viewWithTag:KARAOKE_CONTAINER_TAG] ?: [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
+        // В системе координат topVC.view:
+        // Шапка (chevron '⌵', название, артист) занимает верхние ~115pt.
+        // Нижняя панель плеера (Share, Slider, Play/Pause) занимает нижние ~240pt.
+        CGFloat topY = 115.0;
+        CGFloat bottomControlsY = screenH - 240.0;
+        CGFloat height = bottomControlsY - topY;
+        if (height < 250.0) height = 350.0;
+
+        CGRect targetFrame = CGRectMake(0, topY, screenW, height);
+
+        UIView *existingContainer = [topVC.view viewWithTag:KARAOKE_CONTAINER_TAG];
         if (!existingContainer && g_activeKaraokeContainer && g_activeKaraokeContainer.window != nil) {
             existingContainer = g_activeKaraokeContainer;
         }
 
         if (existingContainer) {
-            if (!CGRectEqualToRect(existingContainer.frame, targetFrame)) {
-                existingContainer.frame = targetFrame;
-            }
-            existingContainer.clipsToBounds = YES;
-            [existingContainer.superview bringSubviewToFront:existingContainer];
-            hideOriginalLyricsViews(scrollView);
-            hideUnsyncedLyricsIndicator(win);
-            if (topVC) {
+            if (existingContainer.superview != topVC.view) {
+                [existingContainer removeFromSuperview];
+                existingContainer = nil;
+                g_activeKaraokeContainer = nil;
+            } else {
+                if (!CGRectEqualToRect(existingContainer.frame, targetFrame)) {
+                    existingContainer.frame = targetFrame;
+                }
+                existingContainer.clipsToBounds = YES;
+                [topVC.view bringSubviewToFront:existingContainer];
+                hideOriginalLyricsViews(scrollView);
+                hideUnsyncedLyricsIndicator(win);
                 ensureHeaderAndChevronVisible(topVC);
             }
         }
@@ -2256,7 +2271,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 CGFloat contentW = viewW - (padX * 2);
                 CGFloat curY = 8.0;
 
-                // Создаем собственный UIScrollView оверлей
+                // Создаем собственный UIScrollView оверлей прямо в topVC.view между шапкой и панелью плеера
                 UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:targetFrame];
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
                 containerScroll.backgroundColor = [UIColor clearColor];
@@ -2268,14 +2283,12 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.canCancelContentTouches = YES;
                 containerScroll.showsVerticalScrollIndicator = YES;
                 containerScroll.clipsToBounds = YES;
-                // СТРОЖАЙШЕ: отключаем автоматический сдвиг контента iOS (иначе текст съезжает вниз на 134px!)
                 if (@available(iOS 11.0, *)) {
                     containerScroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
                 }
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 80.0, 0);
+                containerScroll.contentInset = UIEdgeInsetsMake(0, 0, 60.0, 0);
 
-                // Единый жест нажатия на весь контейнер (не блокирует скроллирование и быстро перематывает трек)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
                 lyricsTap.delegate = [AntiCensorTapHandler sharedHandler];
                 lyricsTap.cancelsTouchesInView = NO;
@@ -2288,7 +2301,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     UILabel *lbl = [[UILabel alloc] init];
                     lbl.numberOfLines = 0;
                     lbl.lineBreakMode = NSLineBreakByWordWrapping;
-                    lbl.font = [UIFont systemFontOfSize:24.0 weight:UIFontWeightHeavy];
+                    lbl.font = getSpotifyBoldFont(24.0);
                     lbl.textColor = [UIColor blackColor];
                     lbl.alpha = 1.0f;
                     lbl.transform = CGAffineTransformIdentity;
@@ -2311,18 +2324,16 @@ static void checkAndSyncLyricsOnScreen(void) {
                     [containerScroll addSubview:lbl];
                     [g_currentKaraokeLabels addObject:lbl];
 
-                    curY += lineH + 18.0;
+                    curY += lineH + 16.0;
                 }
 
                 curY += 60.0;
                 containerScroll.contentSize = CGSizeMake(viewW, curY);
 
-                // Скрываем нативный текст Spotify на экране слов
                 hideOriginalLyricsViews(scrollView);
 
-                UIView *mountParent = scrollView.superview ?: scrollView;
-                [mountParent addSubview:containerScroll];
-                [mountParent bringSubviewToFront:containerScroll];
+                [topVC.view addSubview:containerScroll];
+                [topVC.view bringSubviewToFront:containerScroll];
                 g_activeKaraokeContainer = containerScroll;
 
                 if (topVC) {
