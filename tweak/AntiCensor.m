@@ -25,6 +25,7 @@
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
 #define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
+#define NOWPLAYING_LYRICS_CARD_TAG 0xAC999
 
 static void setupFloatingBadge(void);
 static void checkAndInjectProfileDrawerButton(void);
@@ -1221,7 +1222,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
             } else {
-                lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
+                lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformIdentity;
             }
@@ -1566,20 +1567,9 @@ static void hideOriginalLyricsViews(UIView *root) {
     }
 }
 
-#define NOWPLAYING_LYRICS_CARD_TAG 0xAC999
-
 // Обновление карточки "Текст" в лайв-режиме на экране плеера (в точности то, что обвёл пользователь)
 static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
     if (!g_currentKaraokeItems || g_currentKaraokeItems.count == 0) return;
-
-    // Проверяем, что окно содержит плеер Now Playing
-    if (!isViewPartOfNowPlayingPlayer(win)) {
-        BOOL hasPlayer = NO;
-        for (UIView *sub in win.subviews) {
-            if (isViewPartOfNowPlayingPlayer(sub)) { hasPlayer = YES; break; }
-        }
-        if (!hasPlayer) return;
-    }
 
     NSInteger activeIdx = 0;
     for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
@@ -1590,7 +1580,7 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
         }
     }
 
-    // Собираем 3 строчки в лайв-формате: активная — яркая белая, следующие — затухающие
+    // Собираем 3 строчки в лайв-формате: активная — яркая белая, следующие — плавно затухающие
     NSMutableAttributedString *attrStr = [[NSMutableAttributedString alloc] init];
     NSMutableString *plainStr = [NSMutableString string];
     for (NSInteger k = activeIdx; k < (NSInteger)g_currentKaraokeItems.count && k < activeIdx + 3; k++) {
@@ -1625,6 +1615,8 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
     }
     if (plainStr.length == 0) return;
 
+    CGFloat maxCardH = [UIScreen mainScreen].bounds.size.height * 0.65;
+
     NSMutableArray *cQueue = [NSMutableArray arrayWithObject:win];
     while (cQueue.count > 0) {
         UIView *v = cQueue.firstObject;
@@ -1634,24 +1626,27 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
             NSString *t = [l.text lowercaseString];
             if ([t isEqualToString:@"текст"] || [t isEqualToString:@"lyrics"]) {
                 UIView *card = l.superview;
-                while (card && card != win && card.bounds.size.height < 100.0) {
+                while (card && card != win && card != win.rootViewController.view && card.bounds.size.height < 100.0) {
                     card = card.superview;
                 }
-                // Проверяем, что это действительно небольшая карточка плеера, а не весь экран
-                if (card && card != win && card.bounds.size.height <= 350.0 && card.bounds.size.height >= 70.0) {
-                    // Создаем или обновляем наш собственный лейбл лайв-текста внутри карточки
+                // Проверяем, что это действительно карточка плеера, а не корневой экран приложения
+                if (card && card != win && card != win.rootViewController.view &&
+                    card.bounds.size.height >= 70.0 && card.bounds.size.height <= maxCardH) {
+
+                    CGRect lInCard = [l convertRect:l.bounds toView:card];
+                    CGFloat padX = (lInCard.origin.x > 0 && lInCard.origin.x < 50.0) ? lInCard.origin.x : 16.0;
+                    CGFloat topY = CGRectGetMaxY(lInCard) + 8.0;
+                    CGFloat cardW = card.bounds.size.width;
+                    if (cardW < 100.0) cardW = [UIScreen mainScreen].bounds.size.width - 32.0;
+                    CGFloat cardH = card.bounds.size.height;
+                    if (cardH < 100.0) cardH = 240.0;
+                    CGFloat w = cardW - (padX * 2.0);
+                    CGFloat h = cardH - topY - 12.0;
+                    if (h < 60.0) h = 160.0;
+
+                    // Создаем или находим наш собственный лейбл лайв-текста внутри карточки
                     UILabel *cardLbl = [card viewWithTag:NOWPLAYING_LYRICS_CARD_TAG];
                     if (!cardLbl) {
-                        CGFloat padX = (l.frame.origin.x > 0 && l.frame.origin.x < 50.0) ? l.frame.origin.x : 16.0;
-                        CGFloat topY = CGRectGetMaxY(l.frame) + 10.0;
-                        CGFloat cardW = card.bounds.size.width;
-                        if (cardW < 100.0) cardW = [UIScreen mainScreen].bounds.size.width - 32.0;
-                        CGFloat cardH = card.bounds.size.height;
-                        if (cardH < 100.0) cardH = 220.0;
-                        CGFloat w = cardW - (padX * 2.0);
-                        CGFloat h = cardH - topY - 14.0;
-                        if (h < 60.0) h = 160.0;
-
                         cardLbl = [[UILabel alloc] initWithFrame:CGRectMake(padX, topY, w, h)];
                         cardLbl.tag = NOWPLAYING_LYRICS_CARD_TAG;
                         cardLbl.numberOfLines = 0;
@@ -1661,18 +1656,28 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime) {
                         [card addSubview:cardLbl];
                     }
 
+                    // ВСЕГДА актуализируем фрейм и атрибутированный текст
+                    cardLbl.frame = CGRectMake(padX, topY, w, h);
                     cardLbl.hidden = NO;
                     cardLbl.alpha = 1.0f;
                     cardLbl.attributedText = attrStr;
                     [card bringSubviewToFront:cardLbl];
 
                     // Скрываем ТОЛЬКО нативные текстовые лейблы Spotify внутри карточки,
-                    // НЕ трогая контейнеры, жесты и кнопки перехода в полноэкранный режим!
-                    for (UIView *sub in card.subviews) {
-                        if (sub == cardLbl || sub == l) continue;
-                        if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UITextView class]]) {
-                            sub.hidden = YES;
-                            sub.alpha = 0.0f;
+                    // НЕ трогая кнопки действий (поделиться, развернуть), жесты и контейнеры!
+                    NSMutableArray *cardQueue = [NSMutableArray arrayWithObject:card];
+                    while (cardQueue.count > 0) {
+                        UIView *cur = cardQueue.firstObject;
+                        [cardQueue removeObjectAtIndex:0];
+                        if (cur == cardLbl || cur == l) continue;
+                        if ([cur isKindOfClass:[UIButton class]] || [cur isKindOfClass:[UIControl class]]) {
+                            continue; // Кнопки шаринга и перехода в полноэкранный режим не трогаем!
+                        }
+                        if ([cur isKindOfClass:[UILabel class]] || [cur isKindOfClass:[UITextView class]]) {
+                            cur.hidden = YES;
+                            cur.alpha = 0.0f;
+                        } else {
+                            [cardQueue addObjectsFromArray:cur.subviews];
                         }
                     }
                     return;
@@ -1821,7 +1826,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     UILabel *lbl = [[UILabel alloc] init];
                     lbl.numberOfLines = 0;
                     lbl.font = [UIFont systemFontOfSize:25.0 weight:UIFontWeightHeavy];
-                    lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
+                    lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
                     lbl.alpha = 1.0f;
                     lbl.text = it.text;
                     lbl.userInteractionEnabled = YES;
@@ -1882,7 +1887,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformMakeScale(1.02f, 1.02f);
                         } else {
-                            lbl.textColor = [UIColor colorWithWhite:0.0 alpha:0.75];
+                            lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
                         }
@@ -2984,50 +2989,52 @@ static void checkAndInjectProfileDrawerButton(void) {
 }
 
 static UIView *createContextMenuActionRow(CGRect frame, NSString *uri, NSString *title, NSString *artist, UIViewController *sheetVC) {
-    CGFloat rowH = 54.0;
-    CGFloat rowW = (frame.size.width > 50) ? frame.size.width : [UIScreen mainScreen].bounds.size.width;
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(frame.origin.x, frame.origin.y, rowW, rowH)];
-    row.tag = 778899;
-    row.backgroundColor = [UIColor colorWithRed:0.11 green:0.11 blue:0.11 alpha:1.0];
-    row.clipsToBounds = YES;
-    row.userInteractionEnabled = YES;
+    CGFloat rowH = 46.0;
+    CGFloat containerW = (frame.size.width > 50) ? frame.size.width : [UIScreen mainScreen].bounds.size.width;
+    CGFloat padX = 14.0;
+    CGFloat pillW = containerW - (padX * 2);
 
+    UIView *wrapper = [[UIView alloc] initWithFrame:CGRectMake(frame.origin.x, frame.origin.y, containerW, rowH + 8.0)];
+    wrapper.tag = 778899;
+    wrapper.backgroundColor = [UIColor clearColor];
+    wrapper.clipsToBounds = NO;
+    wrapper.userInteractionEnabled = YES;
+
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(padX, 4.0, pillW, rowH)];
+    pill.backgroundColor = [UIColor colorWithRed:0.11 green:0.73 blue:0.33 alpha:1.0];
+    pill.layer.cornerRadius = 23.0; // 46 / 2
+    pill.clipsToBounds = YES;
+    pill.userInteractionEnabled = YES;
+    pill.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    // Bolt icon + text
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = row.bounds;
-    btn.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    btn.frame = CGRectMake(0, 0, pillW - 44.0, rowH);
+    [btn setTitle:@"⚡ AntiCensor (Замена / Текст)" forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+    btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    btn.titleEdgeInsets = UIEdgeInsetsMake(0, 16.0, 0, 0);
     [btn addTarget:sheetVC action:@selector(anticensor_onContextMenuButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+    [pill addSubview:btn];
 
-    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(18, (rowH - 24) / 2.0, 24, 24)];
-    iconView.contentMode = UIViewContentModeScaleAspectFit;
-    iconView.tintColor = [UIColor colorWithRed:0.18 green:0.85 blue:0.42 alpha:1.0];
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightMedium];
-        iconView.image = [UIImage systemImageNamed:@"bolt.fill" withConfiguration:cfg];
-    }
+    // Close 'X' button
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    closeBtn.frame = CGRectMake(pillW - 44.0, 0, 44.0, rowH);
+    closeBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.85] forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightBold];
+    [closeBtn addTarget:sheetVC action:@selector(anticensor_bannerCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [pill addSubview:closeBtn];
 
-    CGFloat textLeft = 56.0;
-    CGFloat textWidth = rowW - textLeft - 16.0;
-
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 8, textWidth, 22)];
-    titleLabel.text = @"⚡ AntiCensor (Замена / Текст)";
-    titleLabel.textColor = [UIColor whiteColor];
-    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-
-    UILabel *subLabel = [[UILabel alloc] initWithFrame:CGRectMake(textLeft, 30, textWidth, 16)];
-    subLabel.text = @"Выбрать версию или текст песни";
-    subLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
-    subLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-
-    [row addSubview:iconView];
-    [row addSubview:titleLabel];
-    [row addSubview:subLabel];
-    [row addSubview:btn];
+    [wrapper addSubview:pill];
 
     if (uri) objc_setAssociatedObject(btn, &kAntiCensorUriKey, uri, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (title) objc_setAssociatedObject(btn, &kAntiCensorTitleKey, title, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (artist) objc_setAssociatedObject(btn, &kAntiCensorArtistKey, artist, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    return row;
+    return wrapper;
 }
 
 static void addAntiCensorRowToContextMenu(UIViewController *sheetVC) {
