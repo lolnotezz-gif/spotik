@@ -1132,6 +1132,7 @@ static void updateNowPlayingCenter(void) {
 @interface AntiCensorTapHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedHandler;
 - (void)onKaraokeLineTapped:(UITapGestureRecognizer *)gesture;
+- (void)onLyricsContainerTapped:(UITapGestureRecognizer *)gesture;
 - (void)onNowPlayingCardTapped:(UITapGestureRecognizer *)gesture;
 - (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view;
 @end
@@ -1272,6 +1273,19 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     UIView *view = gesture.view;
     NSInteger idx = view.tag;
     [self handleSeekToLyricIndex:idx inView:view];
+}
+
+- (void)onLyricsContainerTapped:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
+    CGPoint pt = [gesture locationInView:gesture.view];
+    for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
+        UILabel *lbl = g_currentKaraokeLabels[i];
+        if (pt.y >= lbl.frame.origin.y - 14.0 && pt.y <= CGRectGetMaxY(lbl.frame) + 14.0) {
+            [self handleSeekToLyricIndex:i inView:lbl];
+            return;
+        }
+    }
 }
 
 - (void)onNowPlayingCardTapped:(UITapGestureRecognizer *)gesture {
@@ -1742,20 +1756,15 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
 }
 
 static void checkAndSyncLyricsOnScreen(void) {
-    // 0. Защита от вмешательства во время анимации перехода между экранами
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (now - g_lastForegroundOrScreenTransitionTimestamp < 0.7) {
-        return; // Активный переход экрана — даем UIKit спокойно завершить анимацию без краша!
-    }
-
+    // 0. Если экран закрывается (dismiss), даем ему спокойно закрыться
     UIViewController *top = getKeyAppWindow().rootViewController;
     while (top.presentedViewController) {
-        if (top.isBeingPresented || top.isBeingDismissed || top.transitionCoordinator != nil) {
+        if (top.isBeingDismissed) {
             return;
         }
         top = top.presentedViewController;
     }
-    if (top && (top.isBeingPresented || top.isBeingDismissed || top.transitionCoordinator != nil)) {
+    if (top && top.isBeingDismissed) {
         return;
     }
 
@@ -1870,6 +1879,7 @@ static void checkAndSyncLyricsOnScreen(void) {
         UIView *existingContainer = [scrollView.superview viewWithTag:KARAOKE_CONTAINER_TAG] ?: [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
         if (existingContainer) {
             [existingContainer.superview bringSubviewToFront:existingContainer];
+            hideOriginalLyricsViews(scrollView);
         }
 
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
@@ -1892,11 +1902,21 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
                 containerScroll.backgroundColor = [UIColor clearColor];
                 containerScroll.userInteractionEnabled = YES;
+                containerScroll.scrollEnabled = YES;
+                containerScroll.bounces = YES;
+                containerScroll.alwaysBounceVertical = YES;
                 containerScroll.delaysContentTouches = NO;
                 containerScroll.canCancelContentTouches = YES;
-                containerScroll.showsVerticalScrollIndicator = NO;
+                containerScroll.showsVerticalScrollIndicator = YES;
+                containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 // Большой нижний отступ (260pt), чтобы последние строчки можно было поднять над нижней панелью и нажать!
                 containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 260.0, 0);
+
+                // Единый жест нажатия на весь контейнер (не блокирует нативное скроллирование!)
+                UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
+                lyricsTap.delegate = [AntiCensorTapHandler sharedHandler];
+                lyricsTap.cancelsTouchesInView = NO;
+                [containerScroll addGestureRecognizer:lyricsTap];
 
                 g_currentKaraokeLabels = [NSMutableArray array];
 
@@ -1908,12 +1928,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                     lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
                     lbl.alpha = 1.0f;
                     lbl.text = it.text;
-                    lbl.userInteractionEnabled = YES;
+                    lbl.userInteractionEnabled = NO; // Пропускаем касания в скролл для идеальной прокрутки!
                     lbl.tag = i;
-
-                    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onKaraokeLineTapped:)];
-                    tap.cancelsTouchesInView = NO;
-                    [lbl addGestureRecognizer:tap];
 
                     CGSize maxS = CGSizeMake(contentW, CGFLOAT_MAX);
                     CGRect b = [it.text boundingRectWithSize:maxS
@@ -3358,6 +3374,13 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
 
     if (orig_presentViewController) {
         orig_presentViewController(callerVC, _cmd, vcToPresent, animated, completion);
+    }
+
+    NSString *clsName = NSStringFromClass([vcToPresent class]);
+    if ([clsName containsString:@"Lyric"] || [clsName containsString:@"lyric"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            checkAndSyncLyricsOnScreen();
+        });
     }
 }
 
