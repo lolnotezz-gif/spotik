@@ -1697,8 +1697,7 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
                         cardLbl.tag = NOWPLAYING_LYRICS_CARD_TAG;
                         cardLbl.numberOfLines = 0;
                         cardLbl.lineBreakMode = NSLineBreakByWordWrapping;
-                        // Непрозрачный фоновый цвет карточки, чтобы не просвечивал оригинальный текст Spotify!
-                        cardLbl.backgroundColor = card.backgroundColor ?: [UIColor colorWithRed:0.25 green:0.20 blue:0.35 alpha:1.0];
+                        cardLbl.backgroundColor = [UIColor clearColor];
                         cardLbl.userInteractionEnabled = YES;
 
                         UITapGestureRecognizer *cardTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onNowPlayingCardTapped:)];
@@ -1708,8 +1707,9 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
                         [card addSubview:cardLbl];
                     }
 
-                    // ВСЕГДА актуализируем фрейм и атрибутированный текст
+                    // ВСЕГДА актуализируем фрейм, полностью прозрачный фон (без серого квадрата!) и атрибутированный текст
                     cardLbl.frame = CGRectMake(padX, topY, w, h);
+                    cardLbl.backgroundColor = [UIColor clearColor];
                     cardLbl.hidden = NO;
                     cardLbl.alpha = 1.0f;
                     cardLbl.attributedText = attrStr;
@@ -1890,11 +1890,13 @@ static void checkAndSyncLyricsOnScreen(void) {
                 // Создаем собственный UIScrollView оверлей поверх экрана слов (БЕЗ краша UICollectionView!)
                 UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:scrollView.frame];
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
-                containerScroll.backgroundColor = scrollView.backgroundColor ?: [UIColor colorWithRed:0.09 green:0.09 blue:0.09 alpha:1.0];
+                containerScroll.backgroundColor = [UIColor clearColor];
                 containerScroll.userInteractionEnabled = YES;
                 containerScroll.delaysContentTouches = NO;
                 containerScroll.canCancelContentTouches = YES;
                 containerScroll.showsVerticalScrollIndicator = NO;
+                // Большой нижний отступ (260pt), чтобы последние строчки можно было поднять над нижней панелью и нажать!
+                containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 260.0, 0);
 
                 g_currentKaraokeLabels = [NSMutableArray array];
 
@@ -1926,7 +1928,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     curY += lineH + 24.0;
                 }
 
-                curY += 280.0;
+                curY += 320.0;
                 containerScroll.contentSize = CGSizeMake(viewW, curY);
 
                 // Рекурсивно скрываем оригинальный нативный текст Spotify на экране слов
@@ -1950,6 +1952,12 @@ static void checkAndSyncLyricsOnScreen(void) {
                 }
             }
 
+            UIScrollView *activeScroll = [g_activeKaraokeContainer isKindOfClass:[UIScrollView class]] ? (UIScrollView *)g_activeKaraokeContainer : scrollView;
+            if (activeScroll.isDragging || activeScroll.isDecelerating) {
+                g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
+            }
+
+            // СКРОЛЛИМ И ОБНОВЛЯЕМ ТОЛЬКО ПРИ РЕАЛЬНОЙ СМЕНЕ СТРОКИ! (Исключает вечный ролл!)
             if (activeIdx != g_lastActiveKaraokeIdx) {
                 g_lastActiveKaraokeIdx = activeIdx;
                 [UIView animateWithDuration:0.25 animations:^{
@@ -1966,27 +1974,19 @@ static void checkAndSyncLyricsOnScreen(void) {
                         }
                     }
                 }];
-            }
 
-            // Отслеживаем скролл контейнера
-            UIScrollView *activeScroll = [g_activeKaraokeContainer isKindOfClass:[UIScrollView class]] ? (UIScrollView *)g_activeKaraokeContainer : scrollView;
-            if (activeScroll.isDragging || activeScroll.isDecelerating) {
-                g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
-            }
+                NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+                BOOL userRecentlyInteracted = (now - g_lastUserLyricsInteractionTime < 4.5);
 
-            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-            BOOL userRecentlyInteracted = (now - g_lastUserLyricsInteractionTime < 4.5);
-
-            // Плавное следование скролла за активной строкой
-            if (!userRecentlyInteracted && !activeScroll.isDragging && !activeScroll.isDecelerating
-                && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
-                UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
-                CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.35);
-                if (targetY < 0) targetY = 0;
-                CGFloat maxY = activeScroll.contentSize.height - activeScroll.bounds.size.height;
-                if (maxY < 0) maxY = 0;
-                if (targetY > maxY) targetY = maxY;
-                if (fabs(activeScroll.contentOffset.y - targetY) > 10.0) {
+                // Плавное следование скролла за активной строкой (только один раз при смене строки)
+                if (!userRecentlyInteracted && !activeScroll.isDragging && !activeScroll.isDecelerating
+                    && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
+                    UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
+                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.35);
+                    if (targetY < 0) targetY = 0;
+                    CGFloat maxY = activeScroll.contentSize.height - activeScroll.bounds.size.height + activeScroll.contentInset.bottom;
+                    if (maxY < 0) maxY = 0;
+                    if (targetY > maxY) targetY = maxY;
                     [activeScroll setContentOffset:CGPointMake(0, targetY) animated:YES];
                 }
             }
