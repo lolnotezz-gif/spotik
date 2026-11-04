@@ -1953,15 +1953,6 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
 
     if (!g_currentKaraokeItems || g_currentKaraokeItems.count == 0) return;
 
-    NSInteger activeIdx = 0;
-    for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
-        if (g_currentKaraokeItems[i].time >= 0 && currentTime >= g_currentKaraokeItems[i].time) {
-            activeIdx = i;
-        } else if (g_currentKaraokeItems[i].time >= 0) {
-            break;
-        }
-    }
-
     // Собираем 4 строчки в лайв-формате в точности по дизайну карточки Spotify (Скриншот 3)
     NSInteger activeIdx = -1;
     for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
