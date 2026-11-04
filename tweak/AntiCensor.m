@@ -1336,7 +1336,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
         sv = (UIScrollView *)view.superview;
     }
     if ([sv isKindOfClass:[UIScrollView class]]) {
-        CGFloat targetY = view.frame.origin.y - (sv.bounds.size.height * 0.35);
+        CGFloat targetY = view.frame.origin.y - (sv.bounds.size.height * 0.25);
         if (targetY < 0) targetY = 0;
         CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
         if (maxY < 0) maxY = 0;
@@ -1692,6 +1692,13 @@ static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
 static BOOL isRogueLyricsOrStreamElement(UIView *v) {
     if (!v || v.tag == KARAOKE_CONTAINER_TAG) return NO;
 
+    // Слайдер таймлайна и компоненты прогресс-бара НИКОГДА не являются rogue-элементами!
+    if ([v isKindOfClass:[UISlider class]]) return NO;
+    NSString *clsName = NSStringFromClass([v class]);
+    if ([clsName containsString:@"Slider"] || [clsName containsString:@"Progress"] || [clsName containsString:@"Track"]) {
+        return NO;
+    }
+
     NSString *acc = @"";
     if ([v isKindOfClass:[UIButton class]]) {
         UIButton *b = (UIButton *)v;
@@ -1704,31 +1711,25 @@ static BOOL isRogueLyricsOrStreamElement(UIView *v) {
         acc = [NSString stringWithFormat:@"%@ %@ %@",
             v.accessibilityLabel ?: @"",
             v.accessibilityIdentifier ?: @"",
-            NSStringFromClass([v class])];
+            clsName];
     }
     acc = [acc lowercaseString];
 
-    if ([acc containsString:@"трансляц"] ||
-        [acc containsString:@"прямая"] ||
-        [acc containsString:@"live stream"] ||
-        [acc containsString:@"live broadcast"] ||
-        [acc containsString:@"livestream"] ||
-        [acc containsString:@"livebadge"] ||
-        [acc containsString:@"live_badge"] ||
-        [acc containsString:@"broadcast"] ||
-        [acc containsString:@"stream"] ||
-        [acc containsString:@"sing"] ||
+    // Глушим микрофон караоке и кнопку перевода
+    if ([acc containsString:@"sing"] ||
         [acc containsString:@"vocal"] ||
         [acc containsString:@"karaoke"] ||
         [acc containsString:@"караоке"] ||
         [acc containsString:@"translat"] ||
-        [acc containsString:@"перевод"] ||
-        [acc containsString:@"connect"] ||
-        [acc containsString:@"устройств"] ||
-        [acc containsString:@"speaker"] ||
-        [acc containsString:@"device"] ||
-        [acc containsString:@"синхронизац"] ||
-        [acc containsString:@"synced"]) {
+        [acc containsString:@"перевод"]) {
+        return YES;
+    }
+
+    // Глушим плашку "прямая трансляция"
+    if ([acc containsString:@"трансляц"] ||
+        [acc containsString:@"прямая"] ||
+        [acc containsString:@"live broadcast"] ||
+        [acc containsString:@"live stream"]) {
         return YES;
     }
 
@@ -1736,28 +1737,22 @@ static BOOL isRogueLyricsOrStreamElement(UIView *v) {
         NSString *txt = [((UILabel *)v).text lowercaseString] ?: @"";
         if ([txt containsString:@"трансляц"] ||
             [txt containsString:@"прямая"] ||
-            [txt containsString:@"live stream"] ||
             [txt containsString:@"live broadcast"] ||
-            [txt containsString:@"livestream"] ||
-            [txt containsString:@"broadcast"] ||
+            [txt containsString:@"live stream"] ||
             [txt containsString:@"синхронизац"] ||
-            [txt containsString:@"не синхронизирован"] ||
-            [txt containsString:@"synced"] ||
-            [txt containsString:@"not synced"]) {
+            [txt containsString:@"не синхронизирован"]) {
             return YES;
         }
     }
 
-    // Рекурсивно проверяем текст дочерних меток внутри контейнера
+    // Рекурсивно проверяем текст дочерних меток внутри контейнера на наличие "прямая трансляция"
     for (UIView *sub in v.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
             NSString *st = [((UILabel *)sub).text lowercaseString] ?: @"";
             if ([st containsString:@"трансляц"] ||
                 [st containsString:@"прямая"] ||
-                [st containsString:@"live stream"] ||
                 [st containsString:@"live broadcast"] ||
-                [st containsString:@"livestream"] ||
-                [st containsString:@"broadcast"]) {
+                [st containsString:@"live stream"]) {
                 return YES;
             }
         }
@@ -1779,23 +1774,37 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
 
         CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
 
-        // 0. Строго глушим любые элементы "прямая трансляция", микрофон караоке, перевод и нежелательные плашки
+        // 0. Строго глушим элементы "прямая трансляция", микрофон караоке и перевод
         if (isRogueLyricsOrStreamElement(v)) {
             v.hidden = YES;
             v.alpha = 0.0f;
             v.userInteractionEnabled = NO;
-            UIView *parent = v.superview;
-            while (parent && parent != topVC.view && parent != topVC.view.window && parent.bounds.size.height < 60.0) {
-                parent.hidden = YES;
-                parent.alpha = 0.0f;
-                parent.userInteractionEnabled = NO;
-                parent = parent.superview;
+            if (v.superview && v.superview != topVC.view && v.superview != topVC.view.window && v.superview.bounds.size.height < 50.0) {
+                BOOL isSafeToHideParent = YES;
+                for (UIView *sibling in v.superview.subviews) {
+                    if ([sibling isKindOfClass:[UISlider class]] ||
+                        [NSStringFromClass([sibling class]) containsString:@"Slider"] ||
+                        [NSStringFromClass([sibling class]) containsString:@"Progress"]) {
+                        isSafeToHideParent = NO;
+                        break;
+                    }
+                }
+                if (isSafeToHideParent) {
+                    v.superview.hidden = YES;
+                    v.superview.alpha = 0.0f;
+                    v.superview.userInteractionEnabled = NO;
+                }
             }
             continue;
         }
 
-        // 1. Ползунок таймлайна UISlider — ВСЕГДА ВИДИМ И АКТИВЕН!
-        if ([v isKindOfClass:[UISlider class]]) {
+        // 1. Ползунок таймлайна UISlider / ProgressBar — ВСЕГДА ВИДИМ И АКТИВЕН!
+        NSString *clsName = NSStringFromClass([v class]);
+        BOOL isSliderOrProgress = ([v isKindOfClass:[UISlider class]] ||
+                                   [clsName containsString:@"Slider"] ||
+                                   [clsName containsString:@"Progress"] ||
+                                   [clsName containsString:@"Track"]);
+        if (isSliderOrProgress) {
             v.hidden = NO;
             v.alpha = 1.0f;
             v.userInteractionEnabled = YES;
@@ -1803,6 +1812,7 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
             while (p && p != topVC.view && p != topVC.view.window) {
                 p.hidden = NO;
                 p.alpha = 1.0f;
+                p.userInteractionEnabled = YES;
                 p = p.superview;
             }
             if (v.superview) {
@@ -1842,8 +1852,8 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
         if ([v isKindOfClass:[UILabel class]]) {
             UILabel *lbl = (UILabel *)v;
             BOOL isTopLabel = (ptInWin.y < 140.0 && lbl.font.pointSize < 24.0);
-            // Ниже экрана (панель плеера) разрешаем показывать ТОЛЬКО таймкоды трека! (например "0:04", "-2:13", "1:25")
-            BOOL isBottomTimestamp = (ptInWin.y > screenH - 240.0 && [lbl.text containsString:@":"] && lbl.text.length <= 8);
+            // Ниже экрана (панель плеера) таймкоды трека (например "0:15", "-1:31")
+            BOOL isBottomTimestamp = (ptInWin.y > screenH - 240.0 && [lbl.text containsString:@":"]);
 
             if (isTopLabel || isBottomTimestamp) {
                 lbl.hidden = NO;
@@ -1853,18 +1863,6 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
                     p.hidden = NO;
                     p.alpha = 1.0f;
                     p = p.superview;
-                }
-            } else if (ptInWin.y > screenH - 240.0) {
-                // Любой другой лейбл внизу, не являющийся таймкодом (включая надписи бейджей) — СКРЫВАЕМ!
-                lbl.hidden = YES;
-                lbl.alpha = 0.0f;
-                lbl.userInteractionEnabled = NO;
-                UIView *badgeParent = lbl.superview;
-                while (badgeParent && badgeParent != topVC.view && badgeParent != topVC.view.window && badgeParent.bounds.size.height < 60.0) {
-                    badgeParent.hidden = YES;
-                    badgeParent.alpha = 0.0f;
-                    badgeParent.userInteractionEnabled = NO;
-                    badgeParent = badgeParent.superview;
                 }
             }
         }
@@ -1884,6 +1882,12 @@ static void hideOriginalLyricsViews(UIView *root) {
 
         // Никогда не скрываем кнопки и интерактивные элементы
         if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
+            continue;
+        }
+
+        // Никогда не скрываем слайдер и элементы таймлайна
+        NSString *clsName = NSStringFromClass([v class]);
+        if ([v isKindOfClass:[UISlider class]] || [clsName containsString:@"Slider"] || [clsName containsString:@"Progress"]) {
             continue;
         }
 
@@ -1958,10 +1962,10 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
         }
     }
 
-    // Собираем 3 строчки в лайв-формате: активная — яркая белая, следующие — плавно затухающие
+    // Собираем 4 строчки в лайв-формате по нативному стилю Spotify (Скриншот 3): активная — белая, остальные — черные, единый жирный шрифт
     NSMutableAttributedString *attrStr = [[NSMutableAttributedString alloc] init];
     NSMutableString *plainStr = [NSMutableString string];
-    for (NSInteger k = activeIdx; k < (NSInteger)g_currentKaraokeItems.count && k < activeIdx + 3; k++) {
+    for (NSInteger k = activeIdx; k < (NSInteger)g_currentKaraokeItems.count && k < activeIdx + 4; k++) {
         NSString *line = g_currentKaraokeItems[k].text;
         if (!line || line.length == 0) continue;
 
@@ -1971,18 +1975,13 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
         NSDictionary *attrs = nil;
         if (k == activeIdx) {
             attrs = @{
-                NSFontAttributeName: [UIFont systemFontOfSize:20.0 weight:UIFontWeightHeavy],
+                NSFontAttributeName: [UIFont systemFontOfSize:18.5 weight:UIFontWeightHeavy],
                 NSForegroundColorAttributeName: [UIColor whiteColor]
-            };
-        } else if (k == activeIdx + 1) {
-            attrs = @{
-                NSFontAttributeName: [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold],
-                NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.65]
             };
         } else {
             attrs = @{
-                NSFontAttributeName: [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold],
-                NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.40]
+                NSFontAttributeName: [UIFont systemFontOfSize:18.5 weight:UIFontWeightHeavy],
+                NSForegroundColorAttributeName: [UIColor blackColor]
             };
         }
 
@@ -2212,10 +2211,12 @@ static void checkAndSyncLyricsOnScreen(void) {
         UIScrollView *scrollView = findLyricsScrollViewInView(win);
         if (!scrollView) continue;
 
-        // 4. Полноэкранный караоке вид
-        CGRect targetFrame = scrollView.frame;
-        if (targetFrame.size.width < 200.0) targetFrame.size.width = [UIScreen mainScreen].bounds.size.width;
-        if (targetFrame.size.height < 300.0) targetFrame.size.height = [UIScreen mainScreen].bounds.size.height - targetFrame.origin.y;
+        // 4. Полноэкранный караоке вид во всю ширину экрана (Скриншот 4)
+        CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+        CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+        CGFloat topY = scrollView.frame.origin.y;
+        if (topY < 60.0 || topY > 160.0) topY = 100.0;
+        CGRect targetFrame = CGRectMake(0, topY, screenW, screenH - topY);
 
         UIViewController *topVC = win.rootViewController;
         while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
@@ -2248,8 +2249,8 @@ static void checkAndSyncLyricsOnScreen(void) {
                     existingContainer = nil;
                 }
 
-                CGFloat viewW = targetFrame.size.width;
-                CGFloat padX = 24.0;
+                CGFloat viewW = screenW;
+                CGFloat padX = 20.0;
                 CGFloat contentW = viewW - (padX * 2);
                 CGFloat curY = 16.0;
 
@@ -2281,7 +2282,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     UILabel *lbl = [[UILabel alloc] init];
                     lbl.numberOfLines = 0;
                     lbl.lineBreakMode = NSLineBreakByWordWrapping;
-                    lbl.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightHeavy];
+                    lbl.font = [UIFont systemFontOfSize:24.0 weight:UIFontWeightHeavy];
                     lbl.textColor = [UIColor blackColor];
                     lbl.alpha = 1.0f;
                     lbl.transform = CGAffineTransformIdentity;
@@ -2299,12 +2300,12 @@ static void checkAndSyncLyricsOnScreen(void) {
                                                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                                   attributes:@{NSFontAttributeName: lbl.font}
                                                      context:nil];
-                    CGFloat lineH = MAX(32.0, ceil(b.size.height));
+                    CGFloat lineH = MAX(28.0, ceil(b.size.height));
                     lbl.frame = CGRectMake(padX, curY, contentW, lineH);
                     [containerScroll addSubview:lbl];
                     [g_currentKaraokeLabels addObject:lbl];
 
-                    curY += lineH + 26.0;
+                    curY += lineH + 18.0;
                 }
 
                 curY += 60.0;
@@ -2365,7 +2366,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 if (!userRecentlyInteracted && !activeScroll.isDragging && !activeScroll.isDecelerating
                     && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
                     UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
-                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.35);
+                    CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.25);
                     if (targetY < 0) targetY = 0;
                     CGFloat maxY = activeScroll.contentSize.height - activeScroll.bounds.size.height + activeScroll.contentInset.bottom;
                     if (maxY < 0) maxY = 0;
