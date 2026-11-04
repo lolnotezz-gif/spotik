@@ -1212,6 +1212,14 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     return YES;
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
 - (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view {
     if (@available(iOS 10.0, *)) {
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -1450,19 +1458,15 @@ static BOOL isFullScreenLyricsScrollView(UIScrollView *sv) {
     if (!CGRectIntersectsRect(rInWin, screenBounds)) return NO;
     if (rInWin.size.height < 250.0) return NO;
 
-    // СТРОЖАЙШЕ: если внутри или в супервью есть большая обложка альбома — это плеер, а НЕ экран слов!
-    if (isViewPartOfNowPlayingPlayer(sv) || (sv.superview && isViewPartOfNowPlayingPlayer(sv.superview))) {
+    // СТРОЖАЙШЕ: если сам скролл содержит большую обложку альбома — это плеер Now Playing, а НЕ экран слов!
+    if (isViewPartOfNowPlayingPlayer(sv)) {
         return NO;
     }
 
-    // СТРОЖАЙШЕ: если скролл содержит ползунок таймлайна UISlider или в супервью есть UISlider — это плеер Now Playing!
+    // СТРОЖАЙШЕ: если сам скролл содержит ползунок таймлайна UISlider — это плеер Now Playing!
+    // (На экране слов UISlider находится внизу экрана в панели управления, а НЕ внутри списка строк)
     for (UIView *sub in sv.subviews) {
         if ([sub isKindOfClass:[UISlider class]]) return NO;
-    }
-    if (sv.superview) {
-        for (UIView *sub in sv.superview.subviews) {
-            if ([sub isKindOfClass:[UISlider class]]) return NO;
-        }
     }
 
     // СТРОЖАЙШЕ: проверяем, содержит ли этот скролл карточки плеера ("Сведения", "Credits", "Текст")
@@ -1536,14 +1540,7 @@ static UIScrollView *findLyricsScrollViewInView(UIView *win) {
     if (!win || win.hidden || win.alpha < 0.05) return nil;
     if (win.tag == KARAOKE_CONTAINER_TAG) return nil;
 
-    // 1. Быстрый возврат, если контейнер караоке уже смонтирован
-    if (g_activeKaraokeContainer && g_activeKaraokeContainer.window != nil) {
-        if ([g_activeKaraokeContainer isKindOfClass:[UIScrollView class]]) {
-            return (UIScrollView *)g_activeKaraokeContainer;
-        }
-    }
-
-    // 2. Ищем полноэкранный экран слов ТОЛЬКО среди представленных view controller'ов (modal / presented)
+    // Ищем полноэкранный экран слов ТОЛЬКО среди представленных view controller'ов (modal / presented)
     UIViewController *topVC = getKeyAppWindow().rootViewController;
     while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
         topVC = topVC.presentedViewController;
@@ -1877,9 +1874,22 @@ static void checkAndSyncLyricsOnScreen(void) {
 
         // 4. Полноэкранный караоке вид
         UIView *existingContainer = [scrollView.superview viewWithTag:KARAOKE_CONTAINER_TAG] ?: [scrollView viewWithTag:KARAOKE_CONTAINER_TAG];
+        if (!existingContainer && g_activeKaraokeContainer && g_activeKaraokeContainer.window != nil) {
+            existingContainer = g_activeKaraokeContainer;
+        }
+
         if (existingContainer) {
+            CGRect sFrame = scrollView.frame;
+            if (sFrame.size.height > 100.0 && sFrame.size.width > 100.0) {
+                if (!CGRectEqualToRect(existingContainer.frame, sFrame)) {
+                    existingContainer.frame = sFrame;
+                }
+            }
             [existingContainer.superview bringSubviewToFront:existingContainer];
+            scrollView.hidden = YES;
+            scrollView.userInteractionEnabled = NO;
             hideOriginalLyricsViews(scrollView);
+            hideUnsyncedLyricsIndicator(win);
         }
 
         if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
@@ -1891,14 +1901,17 @@ static void checkAndSyncLyricsOnScreen(void) {
                     existingContainer = nil;
                 }
 
-                CGFloat viewW = scrollView.bounds.size.width;
-                if (viewW < 200) viewW = [UIScreen mainScreen].bounds.size.width;
+                CGRect targetFrame = scrollView.frame;
+                if (targetFrame.size.width < 200.0) targetFrame.size.width = [UIScreen mainScreen].bounds.size.width;
+                if (targetFrame.size.height < 300.0) targetFrame.size.height = [UIScreen mainScreen].bounds.size.height;
+
+                CGFloat viewW = targetFrame.size.width;
                 CGFloat padX = 24.0;
                 CGFloat contentW = viewW - (padX * 2);
                 CGFloat curY = 32.0;
 
-                // Создаем собственный UIScrollView оверлей поверх экрана слов (БЕЗ краша UICollectionView!)
-                UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:scrollView.frame];
+                // Создаем собственный UIScrollView оверлей поверх экрана слов
+                UIScrollView *containerScroll = [[UIScrollView alloc] initWithFrame:targetFrame];
                 containerScroll.tag = KARAOKE_CONTAINER_TAG;
                 containerScroll.backgroundColor = [UIColor clearColor];
                 containerScroll.userInteractionEnabled = YES;
@@ -1908,11 +1921,18 @@ static void checkAndSyncLyricsOnScreen(void) {
                 containerScroll.delaysContentTouches = NO;
                 containerScroll.canCancelContentTouches = YES;
                 containerScroll.showsVerticalScrollIndicator = YES;
+                containerScroll.directionalLockEnabled = YES;
                 containerScroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                // Большой нижний отступ (260pt), чтобы последние строчки можно было поднять над нижней панелью и нажать!
-                containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 260.0, 0);
+                // Большой нижний отступ (280pt), чтобы последние строчки можно было поднять над нижней панелью и нажать!
+                containerScroll.contentInset = UIEdgeInsetsMake(20.0, 0, 280.0, 0);
 
-                // Единый жест нажатия на весь контейнер (не блокирует нативное скроллирование!)
+                // Назначаем делегатом AntiCensorTapHandler для ВСЕХ жестов скролла, чтобы родительские жесты не блокировали прокрутку
+                containerScroll.panGestureRecognizer.delegate = [AntiCensorTapHandler sharedHandler];
+                containerScroll.panGestureRecognizer.cancelsTouchesInView = NO;
+                containerScroll.panGestureRecognizer.delaysTouchesBegan = NO;
+                containerScroll.panGestureRecognizer.delaysTouchesEnded = NO;
+
+                // Единый жест нажатия на весь контейнер (не блокирует скроллирование!)
                 UITapGestureRecognizer *lyricsTap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onLyricsContainerTapped:)];
                 lyricsTap.delegate = [AntiCensorTapHandler sharedHandler];
                 lyricsTap.cancelsTouchesInView = NO;
@@ -1944,10 +1964,12 @@ static void checkAndSyncLyricsOnScreen(void) {
                     curY += lineH + 24.0;
                 }
 
-                curY += 320.0;
+                curY += 340.0;
                 containerScroll.contentSize = CGSizeMake(viewW, curY);
 
-                // Рекурсивно скрываем оригинальный нативный текст Spotify на экране слов
+                // Полностью скрываем и отключаем оригинальный нативный scroll view Spotify на экране слов
+                scrollView.hidden = YES;
+                scrollView.userInteractionEnabled = NO;
                 hideOriginalLyricsViews(scrollView);
 
                 UIView *mountParent = scrollView.superview ?: scrollView;
@@ -3045,6 +3067,9 @@ static UILabel *findDrawerLabel(UIView *root) {
 }
 
 static void cleanupRogueBanners(void) {
+    NSString *userLyrics = getLyricsForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+    BOOL hasUserLyrics = (userLyrics && userLyrics.length > 0);
+
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *win in windows) {
         if (!win) continue;
@@ -3052,25 +3077,25 @@ static void cleanupRogueBanners(void) {
         while (queue.count > 0) {
             UIView *v = queue.firstObject;
             [queue removeObjectAtIndex:0];
+
             if (v.tag == KARAOKE_CONTAINER_TAG) {
-                if (![v.superview isKindOfClass:[UIScrollView class]] || !isFullScreenLyricsScrollView((UIScrollView *)v.superview)) {
-                    if ([v.superview isKindOfClass:[UIScrollView class]]) {
-                        UIScrollView *sv = (UIScrollView *)v.superview;
-                        for (UIView *sub in sv.subviews) {
-                            if (sub != v && sub.tag != KARAOKE_CONTAINER_TAG) {
-                                sub.hidden = NO;
-                                sub.userInteractionEnabled = YES;
-                            }
-                        }
-                    }
+                // Если пользователь НЕ отмечал этот трек кастомным текстом, или оверлей оторван от экрана — удаляем его
+                if (!hasUserLyrics || (v != g_activeKaraokeContainer && !v.window)) {
                     [v removeFromSuperview];
                     continue;
                 }
+                // Активный контейнер караоке НИ В КОЕМ СЛУЧАЕ НЕ УДАЛЯЕМ!
+                continue;
             }
 
-            // Восстанавливаем лейблы в ячейках списков на Главной и Поиске, если они были случайно скрыты
+            // Восстанавливаем лейблы в ячейках списков на Главной и Поиске (включая contentView!), если они были скрыты
             if ([v isKindOfClass:[UICollectionViewCell class]] || [v isKindOfClass:[UITableViewCell class]]) {
-                for (UIView *sub in v.subviews) {
+                UIView *contentView = [v respondsToSelector:@selector(contentView)] ? ((id)v).contentView : v;
+                NSMutableArray *cellSubviews = [NSMutableArray arrayWithArray:v.subviews];
+                if (contentView && contentView != v) {
+                    [cellSubviews addObjectsFromArray:contentView.subviews];
+                }
+                for (UIView *sub in cellSubviews) {
                     if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UITextView class]]) {
                         if (sub.hidden || sub.alpha < 0.05f) {
                             sub.hidden = NO;
@@ -3378,7 +3403,14 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
 
     NSString *clsName = NSStringFromClass([vcToPresent class]);
     if ([clsName containsString:@"Lyric"] || [clsName containsString:@"lyric"]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        checkAndSyncLyricsOnScreen();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            checkAndSyncLyricsOnScreen();
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            checkAndSyncLyricsOnScreen();
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             checkAndSyncLyricsOnScreen();
         });
     }
