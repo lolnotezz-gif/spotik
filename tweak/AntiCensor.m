@@ -3090,7 +3090,12 @@ static void cleanupRogueBanners(void) {
 
             // Восстанавливаем лейблы в ячейках списков на Главной и Поиске (включая contentView!), если они были скрыты
             if ([v isKindOfClass:[UICollectionViewCell class]] || [v isKindOfClass:[UITableViewCell class]]) {
-                UIView *contentView = [v respondsToSelector:@selector(contentView)] ? ((id)v).contentView : v;
+                UIView *contentView = nil;
+                if ([v isKindOfClass:[UITableViewCell class]]) {
+                    contentView = ((UITableViewCell *)v).contentView;
+                } else if ([v isKindOfClass:[UICollectionViewCell class]]) {
+                    contentView = ((UICollectionViewCell *)v).contentView;
+                }
                 NSMutableArray *cellSubviews = [NSMutableArray arrayWithArray:v.subviews];
                 if (contentView && contentView != v) {
                     [cellSubviews addObjectsFromArray:contentView.subviews];
