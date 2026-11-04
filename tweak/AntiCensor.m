@@ -1282,8 +1282,17 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
         }
     }
 
-    // Сразу фиксируем время взаимодействия, чтобы автоскролл и сетевые события Spotify не перебивали наш выбор
+    // Защита от дребезга контактов: не запускаем перемотку на тот же таймкод повторно в течение 0.35 сек
+    static double s_lastSeekTarget = -1.0;
+    static NSTimeInterval s_lastSeekTime = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (fabs(seekTarget - s_lastSeekTarget) < 0.2 && (now - s_lastSeekTime < 0.35)) {
+        return;
+    }
+    s_lastSeekTarget = seekTarget;
+    s_lastSeekTime = now;
+
+    // Сразу фиксируем время взаимодействия, чтобы автоскролл и сетевые события Spotify не перебивали наш выбор
     g_lastUserManualLyricsSeekTimestamp = now;
     g_lastUserLyricsInteractionTime = now;
     lastKnownSpotifyPosition = seekTarget;
@@ -1679,48 +1688,83 @@ static void hideUnsyncedLyricsIndicator(UIView *viewOrWin) {
     }
 }
 
-// Гарантирует, что верхняя шапка (кнопка '⌵' для скрытия текста, название трека и имя артиста) всегда видны и доступны!
+// Гарантирует, что верхняя шапка (кнопка '⌵', название, артист) и нижняя панель управления плеером (Play/Pause, слайдер, Share, More) всегда видны и доступны!
 static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
     if (!topVC || !topVC.view) return;
+    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+
     NSMutableArray *q = [NSMutableArray arrayWithObject:topVC.view];
     while (q.count > 0) {
         UIView *v = q.firstObject;
         [q removeObjectAtIndex:0];
         if (v.tag == KARAOKE_CONTAINER_TAG) continue;
 
-        // 1. Кнопки (только верхняя кнопка-шеврон '⌵' для скрытия текста!)
-        if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
-            CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
-            if (ptInWin.y < 140.0) {
-                // Верхняя навигация: кнопка-шеврон '⌵' для закрытия экрана слов
-                v.hidden = NO;
-                v.alpha = 1.0f;
-                v.userInteractionEnabled = YES;
+        CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
 
-                if ([v isKindOfClass:[UIButton class]]) {
-                    UIButton *btn = (UIButton *)v;
-                    [btn addTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onChevronDismissTapped:) forControlEvents:UIControlEventTouchUpInside];
-                }
-
-                UIView *p = v.superview;
-                while (p && p != topVC.view && p != topVC.view.window) {
-                    p.hidden = NO;
-                    p.alpha = 1.0f;
-                    p.userInteractionEnabled = YES;
-                    p = p.superview;
-                }
-                if (v.superview) {
-                    [v.superview bringSubviewToFront:v];
-                }
-            } else {
-                // Все нижние кнопки (караоке-микрофон, перевод, шеринг и т.д.) — ПОЛНОСТЬЮ СКРЫВАЕМ!
-                v.hidden = YES;
-                v.alpha = 0.0f;
-                v.userInteractionEnabled = NO;
+        // 1. Ползунок таймлайна UISlider — ВСЕГДА ВИДИМ И АКТИВЕН!
+        if ([v isKindOfClass:[UISlider class]]) {
+            v.hidden = NO;
+            v.alpha = 1.0f;
+            v.userInteractionEnabled = YES;
+            UIView *p = v.superview;
+            while (p && p != topVC.view && p != topVC.view.window) {
+                p.hidden = NO;
+                p.alpha = 1.0f;
+                p = p.superview;
+            }
+            if (v.superview) {
+                [v.superview bringSubviewToFront:v];
             }
         }
 
-        // 2. Название трека и артист в верхней шапке (y < 140 pt)
+        // 2. Кнопки: верхняя навигация ('⌵') и нижние элементы плеера (Play/Pause, Share, More)
+        if ([v isKindOfClass:[UIButton class]] || [v isKindOfClass:[UIControl class]]) {
+            UIButton *btn = [v isKindOfClass:[UIButton class]] ? (UIButton *)v : nil;
+            NSString *acc = @"";
+            if (btn) {
+                acc = [[btn.accessibilityLabel ?: (btn.accessibilityIdentifier ?: @"") stringByAppendingString:btn.titleLabel.text ?: @""] lowercaseString];
+            }
+
+            // Исключаем ТОЛЬКО микрофон караоке и перевод, которые торчали посреди текста
+            BOOL isMicOrTranslate = ([acc containsString:@"sing"] ||
+                                     [acc containsString:@"vocal"] ||
+                                     [acc containsString:@"karaoke"] ||
+                                     [acc containsString:@"караоке"] ||
+                                     [acc containsString:@"translat"] ||
+                                     [acc containsString:@"перевод"]);
+
+            if (isMicOrTranslate) {
+                v.hidden = YES;
+                v.alpha = 0.0f;
+                v.userInteractionEnabled = NO;
+            } else {
+                BOOL isTopHeader = (ptInWin.y < 140.0);
+                BOOL isBottomControls = (ptInWin.y > screenH - 240.0);
+
+                if (isTopHeader || isBottomControls) {
+                    v.hidden = NO;
+                    v.alpha = 1.0f;
+                    v.userInteractionEnabled = YES;
+
+                    if (isTopHeader && ptInWin.x < 120.0 && btn) {
+                        [btn addTarget:[AntiCensorTapHandler sharedHandler] action:@selector(onChevronDismissTapped:) forControlEvents:UIControlEventTouchUpInside];
+                    }
+
+                    UIView *p = v.superview;
+                    while (p && p != topVC.view && p != topVC.view.window) {
+                        p.hidden = NO;
+                        p.alpha = 1.0f;
+                        p.userInteractionEnabled = YES;
+                        p = p.superview;
+                    }
+                    if (v.superview) {
+                        [v.superview bringSubviewToFront:v];
+                    }
+                }
+            }
+        }
+
+        // 3. Текстовые метки: шапка и нижние таймкоды
         if ([v isKindOfClass:[UILabel class]]) {
             UILabel *lbl = (UILabel *)v;
             NSString *txt = [lbl.text lowercaseString];
@@ -1729,8 +1773,7 @@ static void ensureHeaderAndChevronVisible(UIViewController *topVC) {
                                     [txt containsString:@"synced"] ||
                                     [txt containsString:@"not synced"]);
             if (!isSyncIndicator) {
-                CGPoint ptInWin = [v convertPoint:CGPointZero toView:nil];
-                if (ptInWin.y < 140.0 && lbl.font.pointSize < 24.0) {
+                if ((ptInWin.y < 140.0 && lbl.font.pointSize < 24.0) || ptInWin.y > screenH - 240.0) {
                     lbl.hidden = NO;
                     lbl.alpha = 1.0f;
                     UIView *p = lbl.superview;
@@ -2540,20 +2583,14 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         if (hasElapsed && ourAudioPlayer) {
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-            BOOL inCooldown = (now - g_lastForegroundOrScreenTransitionTimestamp < 3.5) ||
-                              (now - g_lastUserManualLyricsSeekTimestamp < 3.5);
-            if (!inCooldown && !g_isPlayerSeeking) {
-                // Защита от отката на ~5 сек: Spotify при переходе экранов или возврате из фона
-                // сообщает устаревшую позицию, отставшую на несколько секунд.
-                // Поэтому отставание позиции Spotify менее чем на 12.0 секунд полностью игнорируется!
-                BOOL isRealUserForwardSeek = (position - ourPos > 6.0);
-                BOOL isRealUserBackwardSeek = (ourPos - position > 12.0);
-                if (isRealUserForwardSeek || isRealUserBackwardSeek) {
-                    static NSTimeInterval s_lastManualSeek = 0;
-                    if (now - s_lastManualSeek > 2.0) {
-                        s_lastManualSeek = now;
-                        safeSeekPlayerToTime(position);
-                    }
+            // Игнорируем сетевые эхо-события только в первые 0.6 сек сразу после нашего ручного поиска
+            BOOL isOurOwnEcho = (now - g_lastUserManualLyricsSeekTimestamp < 0.6);
+            if (!isOurOwnEcho && !g_isPlayerSeeking) {
+                double diff = fabs(position - ourPos);
+                // Если позиция Spotify изменилась более чем на 0.8 сек (нажатие на строку текста или сдвиг ползунка):
+                // МГНОВЕННО перематываем наш аудиоплеер на нужный таймкод!
+                if (diff > 0.8) {
+                    safeSeekPlayerToTime(position);
                 }
             }
         }
