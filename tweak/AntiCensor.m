@@ -351,418 +351,75 @@ static NSDictionary *getBuiltinDefaultOverrides(void) {
         builtin = @{
             @"spotify:track:0bzO2aZbO7RN0tl50wsCJz": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
             @"0bzO2aZbO7RN0tl50wsCJz": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
-            @"one week record": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
             @"m1raontheblock - one week record": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
 
             @"spotify:track:0uWNvKc0B1OZsLMzlUzbpD": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
             @"0uWNvKc0B1OZsLMzlUzbpD": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-            @"needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
             @"m1raontheblock - needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+            @"m1raontheblock, vixi - needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
 
             @"spotify:track:4YsCP1lZbeMlCaUT0ONML1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
             @"4YsCP1lZbeMlCaUT0ONML1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"$enpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"senpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+            @"m1raontheblock - senpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+            @"m1raontheblock - $enpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
 
             @"spotify:track:6DlxijdnCniTi2jRL7xfIO": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
             @"6DlxijdnCniTi2jRL7xfIO": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"дейти": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
             @"m1raontheblock - дейти": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+            @"m1raontheblock - хулиёу": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
 
             @"spotify:track:49Aozh4YVr0sYx0rkCmNNU": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
             @"49Aozh4YVr0sYx0rkCmNNU": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-            @"крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
             @"m1raontheblock - крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+            @"m1raontheblock, vixi - крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
 
             @"spotify:track:22m03tWYBVctgdByCu2ohS": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
             @"22m03tWYBVctgdByCu2ohS": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"фантастические твари": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+            @"m1raontheblock - фантастические твари": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
             @"m1raontheblock - фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+            @"m1raontheblock, vixi, wzcqq - фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
 
             @"spotify:track:0efigJN3XSbD3xvjDLSCYY": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
             @"0efigJN3XSbD3xvjDLSCYY": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"я не виноват что больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"я не виноват что... больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+            @"m1raontheblock - я не виноват что больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+            @"m1raontheblock - я не виноват что... больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
 
             @"spotify:track:5JsbDzwDiKjCuNGh7KE2Ja": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
             @"5JsbDzwDiKjCuNGh7KE2Ja": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-            @"fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
             @"m1raontheblock - fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+            @"m1raontheblock, vixi - fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
 
             @"spotify:track:1PbTwCZ4vihqw5bZc42Suj": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
             @"1PbTwCZ4vihqw5bZc42Suj": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"$hake your a$$": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"shake your ass": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+            @"m1raontheblock - $hake your a$$": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+            @"m1raontheblock - shake your ass": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
 
             @"spotify:track:02NrEHtVoV0QOGxsQHJ0id": @"https://spotik-in4b.onrender.com/audio/son.mp3",
             @"02NrEHtVoV0QOGxsQHJ0id": @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"сон": @"https://spotik-in4b.onrender.com/audio/son.mp3",
             @"m1raontheblock - сон": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+            @"m1raontheblock - мразотик": @"https://spotik-in4b.onrender.com/audio/son.mp3",
 
             @"spotify:track:035FY0eysDZd9akX73iKok": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
             @"035FY0eysDZd9akX73iKok": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
-            @"notime": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
             @"m1raontheblock - notime": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
 
             @"spotify:track:0qitLkJ4pa1MkHQ1sCoJh1": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
             @"0qitLkJ4pa1MkHQ1sCoJh1": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"эйфория": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"эйфория - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
             @"m1raontheblock - эйфория": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-
-            @"spotify:track:2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
-            @"flip phone twerk": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
-            @"spotify:track:1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
-            @"стеклянный": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
-            @"хулиёу": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"m1raontheblock - хулиёу": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"мразотик": @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"m1raontheblock - мразотик": @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"чётный": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"чётный - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"m1raontheblock - чётный": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
             @"m1raontheblock - чётный - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
 
+            @"spotify:track:2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+            @"2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+            @"flip phone twerk": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+
+            @"spotify:track:1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+            @"1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+            @"стеклянный": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf"
         };
     });
     return builtin;
-}
-
-static NSMutableDictionary *loadAllOverrides(void) {
-    NSMutableDictionary *cleaned = [NSMutableDictionary dictionaryWithDictionary:getBuiltinDefaultOverrides()];
-    NSString *path = getStorageFilePath();
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    NSDictionary *rawDict = nil;
-    if (data) {
-        rawDict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    }
-    if (!rawDict || ![rawDict isKindOfClass:[NSDictionary class]]) {
-        rawDict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_OVERRIDES_KEY];
-    }
-    if (rawDict && [rawDict isKindOfClass:[NSDictionary class]]) {
-        for (NSString *k in rawDict) {
-            if (![k isKindOfClass:[NSString class]]) continue;
-            NSString *normK = normalizeKey(k);
-            if (normK.length >= 3 &&
-                ![normK isEqualToString:@"текущий трек spotify"] &&
-                ![normK isEqualToString:@"выбранный трек"] &&
-                ![normK isEqualToString:@"текущий трек"] &&
-                ![normK isEqualToString:@"spotify:track:"] &&
-                ![normK isEqualToString:@"spotify:"]) {
-                NSString *val = [rawDict[k] description];
-                if (val && val.length > 5 && ([val containsString:@"soundcloud"] || [val containsString:@"http"] || [val containsString:@"local://"] || [val containsString:@"file://"])) {
-                    cleaned[normK] = val;
-                }
-            }
-        }
-    }
-    return cleaned;
-}
-
-static void persistOverrides(NSDictionary *dict) {
-    if (!dict) return;
-    NSError *err = nil;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:&err];
-    if (data) {
-        [data writeToFile:getStorageFilePath() atomically:YES];
-    }
-    [[NSUserDefaults standardUserDefaults] setObject:dict forKey:DEFAULTS_OVERRIDES_KEY];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
-
-static NSString *cleanTrackID(NSString *rawUri) {
-    if (!rawUri || ![rawUri isKindOfClass:[NSString class]]) return nil;
-    return [rawUri componentsSeparatedByString:@"?"].firstObject;
-}
-
-static NSString *getServerURL(void) {
-    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:DEFAULTS_SERVER_KEY];
-    if (!url || url.length == 0) {
-        return DEFAULT_SERVER_URL;
-    }
-    return [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
-}
-
-static NSString *getLyricsFilePath(void) {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *docDir = paths.firstObject;
-    return [docDir stringByAppendingPathComponent:@"AntiCensor_Lyrics.json"];
-}
-
-static NSMutableDictionary *loadAllLyrics(void) {
-    NSString *path = getLyricsFilePath();
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    NSDictionary *rawDict = nil;
-    if (data) {
-        rawDict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    }
-    if (!rawDict || ![rawDict isKindOfClass:[NSDictionary class]]) {
-        rawDict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_LYRICS_KEY];
-    }
-    NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
-    BOOL needsPersist = NO;
-    if (rawDict && [rawDict isKindOfClass:[NSDictionary class]]) {
-        for (NSString *k in rawDict) {
-            NSString *normK = normalizeKey(k);
-            if (normK.length < 3 ||
-                [normK isEqualToString:@"текущий трек spotify"] ||
-                [normK isEqualToString:@"выбранный трек"] ||
-                [normK isEqualToString:@"текущий трек"] ||
-                [normK isEqualToString:@"spotify:track:"] ||
-                [normK isEqualToString:@"spotify:"]) {
-                needsPersist = YES;
-                continue;
-            }
-            NSString *val = [rawDict[k] description];
-            if (val && val.length > 0) {
-                // Очистка любых фантомных строк для трека USB
-                if ([normK containsString:@"usb"] && ([val containsString:@"разлюблю"] || [val containsString:@"кончатся"])) {
-                    needsPersist = YES;
-                    continue;
-                }
-                cleaned[normK] = val;
-            }
-        }
-    }
-    if (needsPersist) {
-        persistLyrics(cleaned);
-    }
-    return cleaned;
-}
-
-static void persistLyrics(NSDictionary *dict) {
-    if (!dict) return;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil];
-    if (data) {
-        [data writeToFile:getLyricsFilePath() atomically:YES];
-    }
-    [[NSUserDefaults standardUserDefaults] setObject:dict forKey:DEFAULTS_LYRICS_KEY];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
-
-static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
-    if (!key || key.length == 0) return;
-    NSString *server = getServerURL();
-    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
-    if (!syncUrl) return;
-
-    NSMutableDictionary *payload = [NSMutableDictionary dictionary];
-    if (isLyrics) {
-        payload[@"lyrics"] = @{ key: value ?: @"" };
-    } else {
-        payload[@"overrides"] = @{ key: value ?: @"" };
-    }
-
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    if (!bodyData) return;
-
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
-    req.HTTPMethod = @"POST";
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    req.HTTPBody = bodyData;
-    req.timeoutInterval = 7.0;
-
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (!err) {
-            NSLog(@"[AntiCensor] Cloud sync push SUCCESS for key: %@", key);
-        } else {
-            NSLog(@"[AntiCensor] Cloud sync push failed: %@", err);
-        }
-    }] resume];
-}
-
-static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count)) {
-    NSString *server = getServerURL();
-    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
-    if (!syncUrl) {
-        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
-        return;
-    }
-
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
-    req.HTTPMethod = @"GET";
-    // 35 секунд таймаут для гарантированного холодного старта Render.com контейнера
-    req.timeoutInterval = 35.0;
-    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
-
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (!data || err) {
-            NSLog(@"[AntiCensor] Cloud sync pull failed or timed out: %@", err);
-            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
-            return;
-        }
-
-        @try {
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
-                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
-                return;
-            }
-
-            __block NSUInteger updatedCount = 0;
-            __block NSUInteger totalCount = 0;
-
-            // 1. Оверрайды треков с ПК
-            NSDictionary *remoteOverrides = json[@"overrides"];
-            if (remoteOverrides && [remoteOverrides isKindOfClass:[NSDictionary class]]) {
-                NSMutableDictionary *localOverrides = loadAllOverrides();
-                for (NSString *k in remoteOverrides) {
-                    NSString *normK = normalizeKey(k);
-                    NSString *remoteVal = [remoteOverrides[k] description];
-                    if (remoteVal.length > 0) {
-                        totalCount++;
-                        NSString *curr = localOverrides[normK];
-                        if (!curr || ![curr hasPrefix:@"local://"]) {
-                            if (![curr isEqualToString:remoteVal]) {
-                                localOverrides[normK] = remoteVal;
-                                updatedCount++;
-                            }
-                        }
-                    }
-                }
-                persistOverrides(localOverrides);
-            }
-
-            // 2. Тексты песен с ПК
-            NSDictionary *remoteLyrics = json[@"lyrics"];
-            if (remoteLyrics && [remoteLyrics isKindOfClass:[NSDictionary class]]) {
-                NSMutableDictionary *localLyrics = loadAllLyrics();
-                for (NSString *k in remoteLyrics) {
-                    NSString *normK = normalizeKey(k);
-                    NSString *remoteTxt = [remoteLyrics[k] description];
-                    if (remoteTxt.length > 0) {
-                        totalCount++;
-                        NSString *currTxt = localLyrics[normK];
-                        if (![currTxt isEqualToString:remoteTxt]) {
-                            localLyrics[normK] = remoteTxt;
-                            updatedCount++;
-                        }
-                    }
-                }
-                persistLyrics(localLyrics);
-            }
-
-            NSLog(@"[AntiCensor] Cloud sync pull SUCCESS, updated: %lu, total items: %lu", (unsigned long)updatedCount, (unsigned long)totalCount);
-            if (completion) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(YES, (updatedCount > 0) ? updatedCount : totalCount);
-                });
-            }
-        } @catch (id ex) {
-            if (completion) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(NO, 0);
-                });
-            }
-        }
-    }] resume];
-}
-
-static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics) {
-    if (!trackKey) return;
-    NSString *normKey = normalizeKey(trackKey);
-    if (normKey.length < 3) return;
-
-    NSMutableDictionary *dict = loadAllLyrics();
-    if (lyrics && lyrics.length > 0) {
-        dict[normKey] = lyrics;
-        syncPushToCloud(normKey, lyrics, YES);
-    } else {
-        [dict removeObjectForKey:normKey];
-        syncPushToCloud(normKey, @"", YES);
-    }
-    persistLyrics(dict);
-}
-
-static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist) {
-    if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
-        return nil;
-    }
-    NSDictionary *dict = loadAllLyrics();
-    if (!dict || dict.count == 0) return nil;
-
-    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
-        NSString *val = dict[normalizeKey(uri)];
-        if (val && val.length > 0) return val;
-    }
-
-    if (title && title.length > 1 && artist && artist.length > 1) {
-        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
-        NSString *val = dict[normalizeKey(combined)];
-        if (val && val.length > 0) return val;
-
-        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
-        NSString *val2 = dict[normalizeKey(combined2)];
-        if (val2 && val2.length > 0) return val2;
-    }
-
-    if (title && title.length > 3) {
-        NSString *val = dict[normalizeKey(title)];
-        if (val && val.length > 0) return val;
-    }
-
-    return nil;
-}
-
-static void saveOverride(NSString *trackKey, NSString *scUrl) {
-    if (!trackKey) return;
-    NSString *normKey = normalizeKey(trackKey);
-    if (normKey.length < 3 ||
-        [normKey isEqualToString:@"текущий трек spotify"] ||
-        [normKey isEqualToString:@"выбранный трек"] ||
-        [normKey isEqualToString:@"текущий трек"]) {
-        return;
-    }
-
-    NSMutableDictionary *dict = loadAllOverrides();
-    if (scUrl && scUrl.length > 0) {
-        NSString *cleanVal = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        dict[normKey] = cleanVal;
-        syncPushToCloud(normKey, cleanVal, NO);
-    } else {
-        [dict removeObjectForKey:normKey];
-        syncPushToCloud(normKey, @"", NO);
-    }
-    persistOverrides(dict);
-}
-
-static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *artist) {
-    if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
-        return nil;
-    }
-
-    NSDictionary *dict = loadAllOverrides();
-    if (!dict || dict.count == 0) return nil;
-
-    // 1. Поиск по точному Spotify URI (например spotify:track:6wLq5...)
-    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
-        NSString *normUri = normalizeKey(uri);
-        NSString *val = dict[normUri];
-        if (val && val.length > 5) return val;
-    }
-
-    // 2. Поиск по «Артист - Название» (гарантирует уникальность трека в альбоме!)
-    if (title && title.length > 1 && artist && artist.length > 1) {
-        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
-        NSString *val = dict[normalizeKey(combined)];
-        if (val && val.length > 5) return val;
-
-        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
-        NSString *val2 = dict[normalizeKey(combined2)];
-        if (val2 && val2.length > 5) return val2;
-    }
-
-    // 3. Точное название песни
-    if (title && title.length > 2) {
-        NSString *normTitle = normalizeKey(title);
-        NSString *val = dict[normTitle];
-        if (val && val.length > 5) return val;
-    }
-
-    return nil;
-}
-
-#pragma mark - Direct Stream Cache & Resolution Engine (Zero Cooldown!)
+}#pragma mark - Direct Stream Cache & Resolution Engine (Zero Cooldown!)
 
 static NSMutableDictionary<NSString *, NSURL *> *g_streamCache = nil;
 static NSMutableDictionary<NSString *, NSNumber *> *g_streamCacheTimestamps = nil;
@@ -1183,6 +840,24 @@ static void stopReplacementAudio(void) {
 
     isMutingSpotify = NO;
     applyMuteStateToAllUnits(); // Spotify возвращает свой звук на 100%!
+
+    // СТРОГАЯ ОЧИСТКА: Удаляем инжектированную обложку и альбом Coll. of $hiTт, чтобы у других треков Spotify отображалась ИХ родная обложка!
+    @try {
+        MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+        NSDictionary *curr = center.nowPlayingInfo;
+        if (curr) {
+            NSMutableDictionary *info = [curr mutableCopy];
+            if ([info[MPMediaItemPropertyAlbumTitle] isEqualToString:@"Coll. of $hiTт (vol. 0.5)"]) {
+                [info removeObjectForKey:MPMediaItemPropertyAlbumTitle];
+                [info removeObjectForKey:MPMediaItemPropertyArtwork];
+                if (orig_setNowPlayingInfo) {
+                    orig_setNowPlayingInfo(center, @selector(setNowPlayingInfo:), info);
+                } else {
+                    center.nowPlayingInfo = info;
+                }
+            }
+        }
+    } @catch (id ex) {}
 }
 
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate);
@@ -1236,6 +911,29 @@ static UIImage *getAlbumArtworkImage(void) {
 
 static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *);
 
+static BOOL isCurrentTrackFromAlbum(NSString *uri, NSString *title, NSString *artist, NSString *streamUrl) {
+    if (streamUrl && [streamUrl containsString:@"spotik-in4b.onrender.com/audio/"]) {
+        return YES;
+    }
+    if (uri && [uri containsString:@"1f1OCxkJ43A1qy9qqFNfuX"]) {
+        return YES;
+    }
+    NSArray *albumIds = @[
+        @"0bzO2aZbO7RN0tl50wsCJz", @"0uWNvKc0B1OZsLMzlUzbpD", @"4YsCP1lZbeMlCaUT0ONML1",
+        @"6DlxijdnCniTi2jRL7xfIO", @"49Aozh4YVr0sYx0rkCmNNU", @"22m03tWYBVctgdByCu2ohS",
+        @"0efigJN3XSbD3xvjDLSCYY", @"5JsbDzwDiKjCuNGh7KE2Ja", @"1PbTwCZ4vihqw5bZc42Suj",
+        @"02NrEHtVoV0QOGxsQHJ0id", @"035FY0eysDZd9akX73iKok", @"0qitLkJ4pa1MkHQ1sCoJh1"
+    ];
+    for (NSString *trackId in albumIds) {
+        if (uri && [uri containsString:trackId]) return YES;
+    }
+    NSString *aLower = artist.lowercaseString ?: @"";
+    if ([aLower containsString:@"m1raontheblock"]) {
+        return YES;
+    }
+    return NO;
+}
+
 static void updateNowPlayingCenter(void) {
     if (!ourAudioPlayer) return;
     if (g_isUpdatingNowPlaying) return; // СТРОГАЯ ЗАЩИТА ОТ РЕКУРСИИ!
@@ -1253,22 +951,26 @@ static void updateNowPlayingCenter(void) {
             info[MPMediaItemPropertyArtist] = currentActiveSpotifyTrackArtist;
         }
 
-        info[MPMediaItemPropertyAlbumTitle] = @"Coll. of $hiTт (vol. 0.5)";
+        // СТРОГАЯ ИЗОЛЯЦИЯ: Обложка и альбом Coll. of $hiTт устанавливаются ТОЛЬКО если сейчас действительно играет трек из этого альбома!
+        BOOL isAlbum = isCurrentTrackFromAlbum(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist, currentPlayingUrl);
+        if (isAlbum) {
+            info[MPMediaItemPropertyAlbumTitle] = @"Coll. of $hiTт (vol. 0.5)";
 
-        static MPMediaItemArtwork *s_cachedArtwork = nil;
-        static dispatch_once_t artToken;
-        dispatch_once(&artToken, ^{
-            UIImage *coverImg = getAlbumArtworkImage();
-            if (coverImg) {
-                if (@available(iOS 10.0, *)) {
-                    s_cachedArtwork = [[MPMediaItemArtwork alloc] initWithBoundsSize:coverImg.size requestHandler:^UIImage * _Nonnull(CGSize size) {
-                        return coverImg;
-                    }];
+            static MPMediaItemArtwork *s_cachedArtwork = nil;
+            static dispatch_once_t artToken;
+            dispatch_once(&artToken, ^{
+                UIImage *coverImg = getAlbumArtworkImage();
+                if (coverImg) {
+                    if (@available(iOS 10.0, *)) {
+                        s_cachedArtwork = [[MPMediaItemArtwork alloc] initWithBoundsSize:coverImg.size requestHandler:^UIImage * _Nonnull(CGSize size) {
+                            return coverImg;
+                        }];
+                    }
                 }
+            });
+            if (s_cachedArtwork) {
+                info[MPMediaItemPropertyArtwork] = s_cachedArtwork;
             }
-        });
-        if (s_cachedArtwork) {
-            info[MPMediaItemPropertyArtwork] = s_cachedArtwork;
         }
 
         double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
@@ -1450,16 +1152,16 @@ static void unGreyAndEnableCell(UIView *cell) {
                     [lower containsString:@"$enpa1"] ||
                     [lower containsString:@"хулиёу"] ||
                     [lower containsString:@"дейти"] ||
-                    [lower containsString:@"крыша"] ||
+                    ([lower isEqualToString:@"крыша"] || [lower containsString:@"крыша ("] || [lower containsString:@"крыша -"]) ||
                     [lower containsString:@"фантастические твари"] ||
                     [lower containsString:@"я не виноват"] ||
-                    [lower containsString:@"fuck it"] ||
+                    ([lower isEqualToString:@"fuck it"] || [lower containsString:@"fuck it ("] || [lower containsString:@"fuck it -"]) ||
                     [lower containsString:@"shake your a"] ||
                     [lower containsString:@"мразотик"] ||
-                    [lower containsString:@"сон"] ||
+                    ([lower isEqualToString:@"сон"] || [lower containsString:@"сон ("] || [lower containsString:@"сон -"]) ||
                     [lower containsString:@"notime"] ||
                     [lower containsString:@"чётный"] ||
-                    [lower containsString:@"эйфория"] ||
+                    ([lower isEqualToString:@"эйфория"] || [lower containsString:@"эйфория ("] || [lower containsString:@"эйфория -"]) ||
                     [lower containsString:@"coll. of $hit"] ||
                     [lower containsString:@"m1raontheblock"]) {
                     isTargetCell = YES;
@@ -4659,6 +4361,9 @@ __attribute__((constructor)) static void initAntiCensor(void) {
 
     [commandCenter.nextTrackCommand setEnabled:YES];
     [commandCenter.nextTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+        if (!ourAudioPlayer || !isCurrentTrackFromAlbum(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist, currentPlayingUrl)) {
+            return MPRemoteCommandHandlerStatusCommandFailed;
+        }
         NSArray *urls = @[
             @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
             @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
@@ -4692,6 +4397,9 @@ __attribute__((constructor)) static void initAntiCensor(void) {
 
     [commandCenter.previousTrackCommand setEnabled:YES];
     [commandCenter.previousTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+        if (!ourAudioPlayer || !isCurrentTrackFromAlbum(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist, currentPlayingUrl)) {
+            return MPRemoteCommandHandlerStatusCommandFailed;
+        }
         if (ourAudioPlayer && CMTimeGetSeconds(ourAudioPlayer.currentTime) > 3.0) {
             safeSeekPlayerToTime(0.0);
             updateNowPlayingCenter();
