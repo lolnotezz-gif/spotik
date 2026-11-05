@@ -1090,7 +1090,8 @@ static void safeSeekPlayerToTime(double targetSeconds) {
                 if (targetSeconds > 2.0) {
                     safeSeekPlayerToTime(targetSeconds);
                 } else {
-                    if (isSpotifyCurrentlyPlaying && ourAudioPlayer) {
+                    if (ourAudioPlayer) {
+                        isSpotifyCurrentlyPlaying = YES;
                         [ourAudioPlayer play];
                     }
                 }
@@ -1237,6 +1238,234 @@ static void updateNowPlayingCenter(void) {
 
 @implementation AntiCensorLyricItem
 @end
+
+
+@interface AntiCensorCellTapHandler : NSObject
++ (instancetype)sharedHandler;
+- (void)handleCellTap:(UITapGestureRecognizer *)gesture;
+@end
+
+static void unGreyAndEnableCell(UIView *cell);
+static void (*orig_UITableViewCell_layoutSubviews)(id, SEL) = NULL;
+static void custom_UITableViewCell_layoutSubviews(UITableViewCell *self, SEL _cmd);
+static void (*orig_UICollectionViewCell_layoutSubviews)(id, SEL) = NULL;
+static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *self, SEL _cmd);
+
+@implementation AntiCensorCellTapHandler
+
++ (instancetype)sharedHandler {
+    static AntiCensorCellTapHandler *s = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s = [[AntiCensorCellTapHandler alloc] init];
+    });
+    return s;
+}
+
+- (void)handleCellTap:(UITapGestureRecognizer *)gesture {
+    UIView *cell = gesture.view;
+    if (!cell) return;
+
+    NSMutableArray *views = [NSMutableArray arrayWithObject:cell];
+    NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+    while (views.count > 0) {
+        UIView *v = views.firstObject;
+        [views removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            [labels addObject:(UILabel *)v];
+        }
+        [views addObjectsFromArray:v.subviews];
+    }
+
+    NSString *matchedTitle = nil;
+    NSString *matchedUrl = nil;
+    NSDictionary *builtins = getBuiltinDefaultOverrides();
+
+    for (UILabel *lbl in labels) {
+        NSString *txt = lbl.text;
+        if (!txt || txt.length == 0) continue;
+        NSString *clean = normalizeKey(txt);
+        if (clean.length == 0) continue;
+
+        if (builtins[clean]) {
+            matchedTitle = txt;
+            matchedUrl = builtins[clean];
+            break;
+        }
+        NSString *withArtist = [NSString stringWithFormat:@"m1raontheblock - %@", clean];
+        if (builtins[withArtist]) {
+            matchedTitle = txt;
+            matchedUrl = builtins[withArtist];
+            break;
+        }
+    }
+
+    if (!matchedUrl) {
+        for (UILabel *lbl in labels) {
+            NSString *clean = normalizeKey(lbl.text ?: @"");
+            if (clean.length < 3) continue;
+            for (NSString *k in builtins) {
+                if (k.length > 3 && ([k containsString:clean] || [clean containsString:k])) {
+                    matchedTitle = lbl.text;
+                    matchedUrl = builtins[k];
+                    break;
+                }
+            }
+            if (matchedUrl) break;
+        }
+    }
+
+    if (matchedUrl) {
+        NSLog(@"[AntiCensor iOS] Cell tap matched track '%@' -> %@", matchedTitle, matchedUrl);
+
+        if (ourAudioPlayer != nil && currentPlayingKey && matchedTitle && [currentPlayingKey.lowercaseString containsString:matchedTitle.lowercaseString]) {
+            if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+                [ourAudioPlayer pause];
+                isSpotifyCurrentlyPlaying = NO;
+                updateNowPlayingCenter();
+                return;
+            } else {
+                [ourAudioPlayer play];
+                isSpotifyCurrentlyPlaying = YES;
+                updateNowPlayingCenter();
+                return;
+            }
+        }
+
+        isMutingSpotify = YES;
+        applyMuteStateToAllUnits();
+
+        isSpotifyCurrentlyPlaying = YES;
+        currentActiveSpotifyTrackTitle = matchedTitle ?: @"Track";
+        currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+        currentActiveSpotifyTrackURI = [NSString stringWithFormat:@"spotify:track:%@", matchedTitle];
+
+        MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+        NSMutableDictionary *info = [NSMutableDictionary dictionary];
+        info[MPMediaItemPropertyTitle] = currentActiveSpotifyTrackTitle;
+        info[MPMediaItemPropertyArtist] = currentActiveSpotifyTrackArtist;
+        info[MPMediaItemPropertyAlbumTitle] = @"Coll. of $hiTт (vol. 0.5)";
+        info[MPNowPlayingInfoPropertyPlaybackRate] = @(1.0);
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(0.0);
+        info[MPMediaItemPropertyPlaybackDuration] = @(150.0);
+        g_isUpdatingNowPlaying = YES;
+        center.nowPlayingInfo = info;
+        g_isUpdatingNowPlaying = NO;
+
+        startReplacementAudio(currentActiveSpotifyTrackTitle, matchedUrl, 0.0);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (UILabel *lbl in labels) {
+                if (matchedTitle && [lbl.text isEqualToString:matchedTitle]) {
+                    lbl.textColor = [UIColor colorWithRed:0x1D/255.0 green:0xB9/255.0 blue:0x54/255.0 alpha:1.0];
+                }
+            }
+        });
+    }
+}
+
+@end
+
+static void unGreyAndEnableCell(UIView *cell) {
+    if (!cell) return;
+
+    BOOL isTargetCell = NO;
+    NSString *foundTrackTitle = nil;
+
+    NSMutableArray *views = [NSMutableArray arrayWithObject:cell];
+    NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+    while (views.count > 0) {
+        UIView *v = views.firstObject;
+        [views removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)v;
+            [labels addObject:lbl];
+            NSString *t = lbl.text;
+            if (t && t.length > 0) {
+                NSString *lower = t.lowercaseString;
+                if ([lower containsString:@"one week record"] ||
+                    [lower containsString:@"needforspeed"] ||
+                    [lower containsString:@"senpa1"] ||
+                    [lower containsString:@"$enpa1"] ||
+                    [lower containsString:@"хулиёу"] ||
+                    [lower containsString:@"дейти"] ||
+                    [lower containsString:@"крыша"] ||
+                    [lower containsString:@"фантастические твари"] ||
+                    [lower containsString:@"я не виноват"] ||
+                    [lower containsString:@"fuck it"] ||
+                    [lower containsString:@"shake your a"] ||
+                    [lower containsString:@"мразотик"] ||
+                    [lower containsString:@"сон"] ||
+                    [lower containsString:@"notime"] ||
+                    [lower containsString:@"чётный"] ||
+                    [lower containsString:@"эйфория"] ||
+                    [lower containsString:@"coll. of $hit"] ||
+                    [lower containsString:@"m1raontheblock"]) {
+                    isTargetCell = YES;
+                    foundTrackTitle = t;
+                }
+            }
+        }
+        [views addObjectsFromArray:v.subviews];
+    }
+
+    if (isTargetCell) {
+        cell.userInteractionEnabled = YES;
+        cell.alpha = 1.0f;
+        if ([cell isKindOfClass:[UITableViewCell class]]) {
+            ((UITableViewCell *)cell).contentView.userInteractionEnabled = YES;
+            ((UITableViewCell *)cell).contentView.alpha = 1.0f;
+        } else if ([cell isKindOfClass:[UICollectionViewCell class]]) {
+            ((UICollectionViewCell *)cell).contentView.userInteractionEnabled = YES;
+            ((UICollectionViewCell *)cell).contentView.alpha = 1.0f;
+        }
+
+        for (UILabel *lbl in labels) {
+            lbl.alpha = 1.0f;
+            lbl.hidden = NO;
+            if (currentPlayingKey && foundTrackTitle && [currentPlayingKey.lowercaseString containsString:foundTrackTitle.lowercaseString]) {
+                lbl.textColor = [UIColor colorWithRed:0x1D/255.0 green:0xB9/255.0 blue:0x54/255.0 alpha:1.0];
+            } else {
+                CGFloat a = 1.0;
+                [lbl.textColor getWhite:nil alpha:&a];
+                if (a < 0.9f) {
+                    lbl.textColor = [UIColor whiteColor];
+                } else {
+                    CGFloat r = 0, g = 0, b = 0;
+                    if ([lbl.textColor getRed:&r green:&g blue:&b alpha:nil]) {
+                        if (r < 0.65f && g < 0.65f && b < 0.65f) {
+                            lbl.textColor = [UIColor whiteColor];
+                        }
+                    }
+                }
+            }
+        }
+
+        BOOL hasTap = NO;
+        for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
+            if ([gr.name isEqualToString:@"AntiCensorTap"]) {
+                hasTap = YES;
+                break;
+            }
+        }
+        if (!hasTap) {
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorCellTapHandler sharedHandler] action:@selector(handleCellTap:)];
+            tap.name = @"AntiCensorTap";
+            tap.cancelsTouchesInView = NO;
+            [cell addGestureRecognizer:tap];
+        }
+    }
+}
+
+static void custom_UITableViewCell_layoutSubviews(UITableViewCell *self, SEL _cmd) {
+    if (orig_UITableViewCell_layoutSubviews) orig_UITableViewCell_layoutSubviews(self, _cmd);
+    unGreyAndEnableCell(self);
+}
+
+static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *self, SEL _cmd) {
+    if (orig_UICollectionViewCell_layoutSubviews) orig_UICollectionViewCell_layoutSubviews(self, _cmd);
+    unGreyAndEnableCell(self);
+}
 
 @interface AntiCensorTapHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedHandler;
@@ -2623,10 +2852,10 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         [ourAudioPlayer seekToTime:CMTimeMakeWithSeconds(initialPosition, NSEC_PER_SEC)];
     }
 
-    if (isSpotifyCurrentlyPlaying) {
-        fadeInPlayer(ourAudioPlayer, 1.2);
-        updateNowPlayingCenter();
-    }
+    isSpotifyCurrentlyPlaying = YES;
+    fadeInPlayer(ourAudioPlayer, 0.5);
+    [ourAudioPlayer play];
+    updateNowPlayingCenter();
 }
 
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
@@ -3651,6 +3880,7 @@ static void cleanupRogueBanners(void) {
 
             // Восстанавливаем лейблы в ячейках списков на Главной и Поиске (включая contentView!), если они были скрыты
             if ([v isKindOfClass:[UICollectionViewCell class]] || [v isKindOfClass:[UITableViewCell class]]) {
+                unGreyAndEnableCell(v);
                 UIView *contentView = nil;
                 if ([v isKindOfClass:[UITableViewCell class]]) {
                     contentView = ((UITableViewCell *)v).contentView;
@@ -4158,9 +4388,17 @@ __attribute__((constructor)) static void initAntiCensor(void) {
             if (currentPlayingUrl) {
                 NSUInteger idx = [albumUrls indexOfObject:currentPlayingUrl];
                 if (idx != NSNotFound && idx < albumUrls.count - 1) {
+                    NSArray *albumTitles = @[
+                        @"ONE WEEK RECORD", @"NeedForSpeed", @"$enpa1", @"ХУЛИЁУ",
+                        @"КРЫША", @"ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2", @"Я не виноват что... Больше",
+                        @"FUCK IT", @"$HAKE YOUR A$$", @"МРАЗОТИК", @"NOTIME", @"ЧЁТНЫЙ - Bonus Track"
+                    ];
                     NSString *nextUrl = albumUrls[idx + 1];
-                    NSLog(@"[AntiCensor] Auto-advancing to next album track: %@", nextUrl);
-                    startReplacementAudio([NSString stringWithFormat:@"AlbumTrack_%lu", (unsigned long)(idx + 2)], nextUrl, 0.0);
+                    NSString *nextTitle = (idx + 1 < albumTitles.count) ? albumTitles[idx + 1] : [NSString stringWithFormat:@"AlbumTrack_%lu", (unsigned long)(idx + 2)];
+                    NSLog(@"[AntiCensor] Auto-advancing to next album track: %@ (%@)", nextTitle, nextUrl);
+                    currentActiveSpotifyTrackTitle = nextTitle;
+                    currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+                    startReplacementAudio(nextTitle, nextUrl, 0.0);
                 }
             }
         }
@@ -4255,7 +4493,27 @@ __attribute__((constructor)) static void initAntiCensor(void) {
 
     ac_rebind_symbols(audioRebind, 4);
 
-    // 2. Хук контекстного меню и обработчики UI
+    // 1.5. Хуки UITableViewCell и UICollectionViewCell для разблокировки и воспроизведения серых треков
+    Class tblCellCls = [UITableViewCell class];
+    if (tblCellCls) {
+        Method mL = class_getInstanceMethod(tblCellCls, @selector(layoutSubviews));
+        if (mL) {
+            orig_UITableViewCell_layoutSubviews = (void (*)(id, SEL))method_getImplementation(mL);
+            method_setImplementation(mL, (IMP)custom_UITableViewCell_layoutSubviews);
+            NSLog(@"[AntiCensor] Successfully swizzled UITableViewCell layoutSubviews");
+        }
+    }
+    Class colCellCls = [UICollectionViewCell class];
+    if (colCellCls) {
+        Method mL = class_getInstanceMethod(colCellCls, @selector(layoutSubviews));
+        if (mL) {
+            orig_UICollectionViewCell_layoutSubviews = (void (*)(id, SEL))method_getImplementation(mL);
+            method_setImplementation(mL, (IMP)custom_UICollectionViewCell_layoutSubviews);
+            NSLog(@"[AntiCensor] Successfully swizzled UICollectionViewCell layoutSubviews");
+        }
+    }
+
+        // 2. Хук контекстного меню и обработчики UI
     Class respClass = objc_getClass("UIResponder");
     if (respClass) {
         class_addMethod(respClass, @selector(anticensor_drawerButtonTapped:), (IMP)anticensor_drawerButtonTapped, "v@:@");

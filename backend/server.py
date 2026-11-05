@@ -398,7 +398,8 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.send_cors()
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps(db).encode('utf-8'))
+                if not is_head:
+                    self.wfile.write(json.dumps(db).encode('utf-8'))
                 return
             except Exception as e:
                 self.send_response(400)
@@ -412,7 +413,13 @@ class AudioHandler(BaseHTTPRequestHandler):
         self.send_cors()
         self.end_headers()
 
+    def do_HEAD(self):
+        self.handle_get_or_head(is_head=True)
+
     def do_GET(self):
+        self.handle_get_or_head(is_head=False)
+
+    def handle_get_or_head(self, is_head=False):
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
@@ -422,7 +429,8 @@ class AudioHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps(db).encode('utf-8'))
+            if not is_head:
+                    self.wfile.write(json.dumps(db).encode('utf-8'))
             return
 
         if parsed.path == '/health' or parsed.path == '/':
@@ -430,7 +438,8 @@ class AudioHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.send_header('Content-Type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b"AntiCensor Cloud Bridge: OK")
+            if not is_head:
+                self.wfile.write(b"AntiCensor Cloud Bridge: OK")
             return
 
         if parsed.path == '/preload' and 'url' in params:
@@ -440,7 +449,8 @@ class AudioHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(b'{"status":"started"}')
+            if not is_head:
+                self.wfile.write(b'{"status":"started"}')
             return
 
         if parsed.path == '/status' and 'url' in params:
@@ -452,7 +462,8 @@ class AudioHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"ready": bool(is_ready)}).encode('utf-8'))
+            if not is_head:
+                self.wfile.write(json.dumps({"ready": bool(is_ready)}).encode('utf-8'))
             return
 
         file_to_stream = None
@@ -497,9 +508,10 @@ class AudioHandler(BaseHTTPRequestHandler):
                     self.send_header('Accept-Ranges', 'bytes')
                     self.end_headers()
 
-                    with open(file_to_stream, 'rb') as f:
-                        f.seek(start)
-                        self.wfile.write(f.read(length))
+                    if not is_head:
+                        with open(file_to_stream, 'rb') as f:
+                            f.seek(start)
+                            self.wfile.write(f.read(length))
                     return
 
             self.send_response(200)
@@ -509,8 +521,9 @@ class AudioHandler(BaseHTTPRequestHandler):
             self.send_header('Accept-Ranges', 'bytes')
             self.end_headers()
 
-            with open(file_to_stream, 'rb') as f:
-                self.wfile.write(f.read())
+            if not is_head:
+                with open(file_to_stream, 'rb') as f:
+                    self.wfile.write(f.read())
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
 
