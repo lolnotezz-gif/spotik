@@ -44,6 +44,9 @@ static void persistLyrics(NSDictionary *dict);
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition);
 static void stopReplacementAudio(void);
 static void safeSeekPlayerToTime(double targetSeconds);
+static NSURLSessionDataTask *(*orig_dataTaskWithRequest_completionHandler)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
+static NSURLSessionDataTask *custom_dataTaskWithRequest_completionHandler(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *));
+
 
 static double g_spotifyLastReportedPosition = 0.0;
 static CFTimeInterval g_spotifyLastReportedTimestamp = 0;
@@ -2455,24 +2458,7 @@ static void checkAndSyncLyricsOnScreen(void) {
         }
 
         
-    // Hook NSURLSession for GraphQL Uncensoring
-    Class sessionClass = objc_getClass("__NSURLSessionLocal") ?: [NSURLSession class];
-    if (sessionClass) {
-        Method mTask = class_getInstanceMethod(sessionClass, @selector(dataTaskWithRequest:completionHandler:));
-        if (mTask) {
-            orig_dataTaskWithRequest_completionHandler = (void *)method_getImplementation(mTask);
-            method_setImplementation(mTask, (IMP)custom_dataTaskWithRequest_completionHandler);
-            NSLog(@"[AntiCensor] Successfully hooked dataTaskWithRequest:completionHandler: on %@", NSStringFromClass(sessionClass));
-        }
-    }
-    Class baseSessionClass = [NSURLSession class];
-    if (baseSessionClass && baseSessionClass != sessionClass) {
-        Method mBase = class_getInstanceMethod(baseSessionClass, @selector(dataTaskWithRequest:completionHandler:));
-        if (mBase && !orig_dataTaskWithRequest_completionHandler) {
-            orig_dataTaskWithRequest_completionHandler = (void *)method_getImplementation(mBase);
-            method_setImplementation(mBase, (IMP)custom_dataTaskWithRequest_completionHandler);
-        }
-    }
+
 
 // 5. Актуализация активной строки в реальном времени
         if (g_currentKaraokeItems && g_currentKaraokeLabels.count == g_currentKaraokeItems.count) {
@@ -4306,6 +4292,26 @@ __attribute__((constructor)) static void initAntiCensor(void) {
 
     // 5. Первоначальный Cloud Sync с ПК при старте
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+    // Hook NSURLSession for GraphQL Uncensoring
+    Class sessionClass = objc_getClass("__NSURLSessionLocal") ?: [NSURLSession class];
+    if (sessionClass) {
+        Method mTask = class_getInstanceMethod(sessionClass, @selector(dataTaskWithRequest:completionHandler:));
+        if (mTask) {
+            orig_dataTaskWithRequest_completionHandler = (void *)method_getImplementation(mTask);
+            method_setImplementation(mTask, (IMP)custom_dataTaskWithRequest_completionHandler);
+            NSLog(@"[AntiCensor] Successfully hooked dataTaskWithRequest:completionHandler: on %@", NSStringFromClass(sessionClass));
+        }
+    }
+    Class baseSessionClass = [NSURLSession class];
+    if (baseSessionClass && baseSessionClass != sessionClass) {
+        Method mBase = class_getInstanceMethod(baseSessionClass, @selector(dataTaskWithRequest:completionHandler:));
+        if (mBase && !orig_dataTaskWithRequest_completionHandler) {
+            orig_dataTaskWithRequest_completionHandler = (void *)method_getImplementation(mBase);
+            method_setImplementation(mBase, (IMP)custom_dataTaskWithRequest_completionHandler);
+        }
+    }
+
         syncPullFromCloud(nil);
     });
 
