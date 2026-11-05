@@ -126,15 +126,85 @@ import time
 SYNC_DB_FILE = os.path.join(CACHE_DIR, "sync_database.json")
 sync_lock = threading.Lock()
 
+DEFAULT_OVERRIDES = {
+    # Coll. of $hiTт (vol. 0.5)
+    "spotify:track:49Aozh4YVr0sYx0rkCmNNU": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "spotify:track:49aozh4yvr0syx0rkcmnnu": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "49Aozh4YVr0sYx0rkCmNNU": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "m1raontheblock - крыша": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "m1raontheblock, vixi - крыша": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) - крыша": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) — крыша": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    "крыша": "https://spotik-in4b.onrender.com/audio/krysha.mp3",
+
+    "spotify:track:22m03tWYBVctgdByCu2ohS": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "spotify:track:22m03twybvctgdbycu2ohs": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "22m03tWYBVctgdByCu2ohS": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "m1raontheblock - фантастические твари": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "m1raontheblock - фантастические твари ver 2": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "m1raontheblock - фантастические твари - ver.2": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "m1raontheblock, vixi, wzcqq - фантастические твари (ver.2)": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) - фантастические твари - ver.2": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) — фантастические твари - ver.2": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "фантастические твари (ver.2)": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    "фантастические твари - ver.2": "https://spotik-in4b.onrender.com/audio/tvari.mp3",
+
+    "spotify:track:0uWNvKc0B1OZsLMzlUzbpD": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "spotify:track:0uwnvkc0b1ozslmzluzbpd": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "0uWNvKc0B1OZsLMzlUzbpD": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "m1raontheblock - needforspeed": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "m1raontheblock, vixi - needforspeed": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) - needforspeed": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) — needforspeed": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    "needforspeed": "https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+
+    "spotify:track:5JsbDzwDiKjCuNGh7KE2Ja": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "spotify:track:5jsbdzwdikjcungh7ke2ja": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "5JsbDzwDiKjCuNGh7KE2Ja": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "m1raontheblock - fuck it": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "m1raontheblock, vixi - fuck it": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) - fuck it": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) — fuck it": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    "fuck it": "https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+
+    "spotify:track:0efigJN3XSbD3xvjDLSCYY": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "spotify:track:0efigjn3xsbd3xvjdlscyy": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "0efigJN3XSbD3xvjDLSCYY": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "m1raontheblock - я не виноват что больше": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "m1raontheblock - я не виноват что... больше": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) - я не виноват что больше": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "m1raontheblock • coll. of $hitт (vol. 0.5) — я не виноват что больше": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    "я не виноват что больше": "https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+
+    # Big Baby Tape - Flip Phone Twerk
+    "spotify:track:2nryvrkn55a0leqvd2eduq": "https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+    "big baby tape • dragonborn — flip phone twerk": "https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+    "big baby tape • dragonborn - flip phone twerk": "https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+    "flip phone twerk": "https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+
+    # 163onmyneck - Сакура
+    "spotify:track:1vqfh4jra1tfndlhuan5ne": "https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+    "сакура": "https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+    "163onmyneck • grow guide 3 — сакура": "https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+    "163onmyneck • grow guide 3 - сакура": "https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+}
+
 def load_sync_db():
     with sync_lock:
+        db = {"overrides": dict(DEFAULT_OVERRIDES), "lyrics": {}, "updated_at": 0}
         if os.path.exists(SYNC_DB_FILE):
             try:
                 with open(SYNC_DB_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    disk_db = json.load(f)
+                    if "overrides" in disk_db and isinstance(disk_db["overrides"], dict):
+                        db["overrides"].update(disk_db["overrides"])
+                    if "lyrics" in disk_db and isinstance(disk_db["lyrics"], dict):
+                        db["lyrics"].update(disk_db["lyrics"])
+                    if "updated_at" in disk_db:
+                        db["updated_at"] = disk_db["updated_at"]
             except Exception:
                 pass
-        return {"overrides": {}, "lyrics": {}, "updated_at": 0}
+        return db
 
 def save_sync_db(db):
     with sync_lock:
