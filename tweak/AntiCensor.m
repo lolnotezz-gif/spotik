@@ -3934,7 +3934,7 @@ static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, voi
 
 #pragma mark - Network Hook (Uncensor Unplayable Album Tracks)
 
-static NSURLSessionDataTask *(*orig_dataTaskWithRequest_completionHandler)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
+
 
 static NSURLSessionDataTask *custom_dataTaskWithRequest_completionHandler(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
     if (!completionHandler) {
