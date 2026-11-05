@@ -340,8 +340,85 @@ static NSString *getLocalAudioDirectoryPath(void) {
     return audioDir;
 }
 
+
+static NSDictionary *getBuiltinDefaultOverrides(void) {
+    static NSDictionary *builtin = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        builtin = @{
+            @"spotify:track:0bzO2aZbO7RN0tl50wsCJz": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+            @"0bzO2aZbO7RN0tl50wsCJz": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+            @"one week record": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+            @"m1raontheblock - one week record": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+
+            @"spotify:track:0uWNvKc0B1OZsLMzlUzbpD": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+            @"0uWNvKc0B1OZsLMzlUzbpD": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+            @"needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+            @"m1raontheblock - needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+
+            @"spotify:track:4YsCP1lZbeMlCaUT0ONML1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+            @"4YsCP1lZbeMlCaUT0ONML1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+            @"$enpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+            @"senpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+
+            @"spotify:track:6DlxijdnCniTi2jRL7xfIO": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+            @"6DlxijdnCniTi2jRL7xfIO": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+            @"дейти": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+            @"m1raontheblock - дейти": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+
+            @"spotify:track:49Aozh4YVr0sYx0rkCmNNU": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+            @"49Aozh4YVr0sYx0rkCmNNU": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+            @"крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+            @"m1raontheblock - крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+
+            @"spotify:track:22m03tWYBVctgdByCu2ohS": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+            @"22m03tWYBVctgdByCu2ohS": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+            @"фантастические твари": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+            @"фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+            @"m1raontheblock - фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+
+            @"spotify:track:0efigJN3XSbD3xvjDLSCYY": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+            @"0efigJN3XSbD3xvjDLSCYY": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+            @"я не виноват что больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+            @"я не виноват что... больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+
+            @"spotify:track:5JsbDzwDiKjCuNGh7KE2Ja": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+            @"5JsbDzwDiKjCuNGh7KE2Ja": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+            @"fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+            @"m1raontheblock - fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+
+            @"spotify:track:1PbTwCZ4vihqw5bZc42Suj": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+            @"1PbTwCZ4vihqw5bZc42Suj": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+            @"$hake your a$$": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+            @"shake your ass": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+
+            @"spotify:track:02NrEHtVoV0QOGxsQHJ0id": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+            @"02NrEHtVoV0QOGxsQHJ0id": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+            @"сон": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+            @"m1raontheblock - сон": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+
+            @"spotify:track:035FY0eysDZd9akX73iKok": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+            @"035FY0eysDZd9akX73iKok": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+            @"notime": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+            @"m1raontheblock - notime": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+
+            @"spotify:track:0qitLkJ4pa1MkHQ1sCoJh1": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"0qitLkJ4pa1MkHQ1sCoJh1": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"эйфория": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"эйфория - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"m1raontheblock - эйфория": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+
+            @"spotify:track:2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+            @"flip phone twerk": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+            @"spotify:track:1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+            @"стеклянный": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf"
+        };
+    });
+    return builtin;
+}
+
 static NSMutableDictionary *loadAllOverrides(void) {
-    NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
+    NSMutableDictionary *cleaned = [NSMutableDictionary dictionaryWithDictionary:getBuiltinDefaultOverrides()];
     NSString *path = getStorageFilePath();
     NSData *data = [NSData dataWithContentsOfFile:path];
     NSDictionary *rawDict = nil;
@@ -2369,7 +2446,27 @@ static void checkAndSyncLyricsOnScreen(void) {
             }
         }
 
-        // 5. Актуализация активной строки в реальном времени
+        
+    // Hook NSURLSession for GraphQL Uncensoring
+    Class sessionClass = objc_getClass("__NSURLSessionLocal") ?: [NSURLSession class];
+    if (sessionClass) {
+        Method mTask = class_getInstanceMethod(sessionClass, @selector(dataTaskWithRequest:completionHandler:));
+        if (mTask) {
+            orig_dataTaskWithRequest_completionHandler = (void *)method_getImplementation(mTask);
+            method_setImplementation(mTask, (IMP)custom_dataTaskWithRequest_completionHandler);
+            NSLog(@"[AntiCensor] Successfully hooked dataTaskWithRequest:completionHandler: on %@", NSStringFromClass(sessionClass));
+        }
+    }
+    Class baseSessionClass = [NSURLSession class];
+    if (baseSessionClass && baseSessionClass != sessionClass) {
+        Method mBase = class_getInstanceMethod(baseSessionClass, @selector(dataTaskWithRequest:completionHandler:));
+        if (mBase && !orig_dataTaskWithRequest_completionHandler) {
+            orig_dataTaskWithRequest_completionHandler = (void *)method_getImplementation(mBase);
+            method_setImplementation(mBase, (IMP)custom_dataTaskWithRequest_completionHandler);
+        }
+    }
+
+// 5. Актуализация активной строки в реальном времени
         if (g_currentKaraokeItems && g_currentKaraokeLabels.count == g_currentKaraokeItems.count) {
             NSInteger activeIdx = -1;
             for (NSInteger i = 0; i < (NSInteger)g_currentKaraokeItems.count; i++) {
@@ -3834,7 +3931,68 @@ static void anticensor_onContextMenuButtonTap(UIViewController *callerVC, SEL _c
 #pragma mark - Method Swizzling
 
 static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void));
+
+#pragma mark - Network Hook (Uncensor Unplayable Album Tracks)
+
+static NSURLSessionDataTask *(*orig_dataTaskWithRequest_completionHandler)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
+
+static NSURLSessionDataTask *custom_dataTaskWithRequest_completionHandler(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
+    if (!completionHandler) {
+        if (orig_dataTaskWithRequest_completionHandler) {
+            return orig_dataTaskWithRequest_completionHandler(self, _cmd, request, completionHandler);
+        }
+        return nil;
+    }
+
+    NSString *urlStr = request.URL.absoluteString;
+    BOOL isPathfinder = [urlStr containsString:@"api-partner.spotify.com"] ||
+                        [urlStr containsString:@"pathfinder"] ||
+                        [urlStr containsString:@"/query"] ||
+                        [urlStr containsString:@"/album"];
+
+    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (isPathfinder && data && data.length > 0 && !error) {
+            NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (jsonStr && ([jsonStr containsString:@"\"playable\":false"] ||
+                            [jsonStr containsString:@"\"is_playable\":false"] ||
+                            [jsonStr containsString:@"COUNTRY_RESTRICTED"] ||
+                            [jsonStr containsString:@"1f1OCxkJ43A1qy9qqFNfuX"])) {
+                NSString *mod = [jsonStr stringByReplacingOccurrencesOfString:@"\"playable\":false" withString:@"\"playable\":true"];
+                mod = [mod stringByReplacingOccurrencesOfString:@"\"is_playable\":false" withString:@"\"is_playable\":true"];
+                mod = [mod stringByReplacingOccurrencesOfString:@"\"reason\":\"COUNTRY_RESTRICTED\"" withString:@"\"reason\":\"PLAYABLE\""];
+                mod = [mod stringByReplacingOccurrencesOfString:@"\"reason\":\"NOT_IN_CATALOG\"" withString:@"\"reason\":\"PLAYABLE\""];
+                NSData *modData = [mod dataUsingEncoding:NSUTF8StringEncoding];
+                if (modData) {
+                    completionHandler(modData, response, error);
+                    return;
+                }
+            }
+        }
+        completionHandler(data, response, error);
+    };
+
+    if (orig_dataTaskWithRequest_completionHandler) {
+        return orig_dataTaskWithRequest_completionHandler(self, _cmd, request, wrappedHandler);
+    }
+    return nil;
+}
+
 static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, UIViewController *vcToPresent, BOOL animated, void (^completion)(void)) {
+    if ([vcToPresent isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)vcToPresent;
+        NSString *alertTitle = (alert.title ?: @"").lowercaseString;
+        NSString *alertMsg = (alert.message ?: @"").lowercaseString;
+        if ([alertTitle containsString:@"unavailable"] || [alertTitle containsString:@"недоступен"] ||
+            [alertMsg containsString:@"unavailable"] || [alertMsg containsString:@"недоступен"] ||
+            [alertMsg containsString:@"region"] || [alertMsg containsString:@"регион"]) {
+            if (ourAudioPlayer != nil || isReplacementLoading || currentPlayingKey != nil) {
+                NSLog(@"[AntiCensor] Suppressed unavailable track alert: %@", alert.title);
+                if (completion) completion();
+                return;
+            }
+        }
+    }
+
     g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         checkAndInjectProfileDrawerButton();
