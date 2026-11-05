@@ -113,7 +113,7 @@
         opacity: 1 !important;
       }
 
-      /* 5. HOVER EFFECTS ON ROW: Highlight background and show play button */
+      /* 5. HOVER EFFECTS ON ROW */
       .xwwlUJUZLpjPnZByq04Y:hover,
       div[role="row"]:hover {
         background-color: hsla(0, 0%, 100%, 0.1) !important;
@@ -256,6 +256,12 @@
     return (parts[0] === "spotify" && parts[1] === "track" && parts[2]) ? parts[2] : clean;
   }
 
+  function pauseAllSpotifyPlayback() {
+    try { Spicetify.Player?.pause(); } catch (_) {}
+    try { Spicetify.Platform?.PlayerAPI?.pause(); } catch (_) {}
+    try { Spicetify.PlaybackControl?.pause(); } catch (_) {}
+  }
+
   // --- PLAYER STATE ---
   let ourAudio = null;
   let isAntiCensorPlaying = false;
@@ -355,7 +361,7 @@
     }
   }
 
-  // --- BOTTOM PLAYER BAR UI INJECTION ---
+  // --- BOTTOM PLAYER BAR UI INJECTION & ISOLATION ---
   function getNowPlayingBarContainers() {
     const bar = document.querySelector('.main-nowPlayingBar-container, [data-testid="now-playing-bar"], .hoqvQKg_ytpgc8RtcA5G, .XvuTwlgQRqJ5NnVLN9ZH, aside');
     if (!bar) return { bar: null, left: null, center: null, right: null };
@@ -371,23 +377,24 @@
     const { bar, left, center } = getNowPlayingBarContainers();
     if (!bar) return;
 
-    // 1. Left Container (Cover, Title, Artist, Like)
+    const hasOurAudio = !!ourAudio;
+
+    // 1. Left Container: Isolate completely so NO native track overlays!
     if (left) {
-      const nativeNowPlaying = left.querySelector('.now-playing, [data-testid="now-playing-widget"]');
       let customLeft = document.getElementById("anticensor-nowplaying-left");
       if (!customLeft) {
         customLeft = document.createElement("div");
         customLeft.id = "anticensor-nowplaying-left";
-        customLeft.style.cssText = "display: flex; align-items: center; min-width: 180px; width: 100%; height: 100%; padding-left: 8px;";
+        customLeft.style.cssText = "display: flex; align-items: center; width: auto; height: 56px;";
         customLeft.innerHTML = `
-          <div style="width: 56px; height: 56px; border-radius: 4px; overflow: hidden; margin-right: 14px; flex-shrink: 0; box-shadow: 0 0 10px rgba(0,0,0,0.3); cursor: pointer;">
+          <div style="width: 56px; height: 56px; border-radius: 4px; overflow: hidden; margin-right: 12px; flex-shrink: 0; box-shadow: 0 0 10px rgba(0,0,0,0.3);">
             <img id="anticensor-cover-img" src="${ALBUM_COVER_URL}" style="width: 100%; height: 100%; object-fit: cover; display: block;" />
           </div>
-          <div style="display: flex; flex-direction: column; justify-content: center; overflow: hidden; margin-right: 14px; max-width: 220px;">
-            <div id="anticensor-track-title" style="color: #ffffff; font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-family, sans-serif); cursor: pointer;"></div>
-            <div id="anticensor-track-artist" style="color: #b3b3b3; font-size: 11px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-family, sans-serif); cursor: pointer;">m1raOnTheBlock</div>
+          <div style="display: flex; flex-direction: column; justify-content: center; overflow: hidden; margin-right: 12px; max-width: 250px;">
+            <div id="anticensor-track-title" style="color: #ffffff; font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-family, sans-serif); line-height: 1.2;"></div>
+            <div id="anticensor-track-artist" style="color: #b3b3b3; font-size: 11px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-family, sans-serif); line-height: 1.2;">m1raOnTheBlock</div>
           </div>
-          <button id="anticensor-like-btn" title="Сохранить в Любимые" style="background: none; border: none; color: #1ed760; cursor: pointer; padding: 8px; display: flex; align-items: center; margin-left: auto;">
+          <button id="anticensor-like-btn" title="Сохранить в Любимые" style="background: none; border: none; color: #1ed760; cursor: pointer; padding: 4px; display: flex; align-items: center; flex-shrink: 0;">
             <svg role="img" height="16" width="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M15.724 4.22A4.313 4.313 0 0 0 12.192.814a4.269 4.269 0 0 0-3.622 1.13.837.837 0 0 1-1.14 0 4.272 4.272 0 0 0-3.62-1.13A4.315 4.315 0 0 0 .276 4.22c-.6 2.404.303 4.908 2.712 7.457 2.015 2.133 4.417 3.659 4.623 3.788a.72.72 0 0 0 .778 0c.206-.129 2.608-1.655 4.623-3.788 2.409-2.549 3.313-5.053 2.712-7.457z"></path>
             </svg>
@@ -396,27 +403,36 @@
         left.appendChild(customLeft);
       }
 
-      if (isAntiCensorPlaying || ourAudio) {
+      if (hasOurAudio) {
         customLeft.style.display = "flex";
-        if (nativeNowPlaying && nativeNowPlaying !== customLeft) {
-          nativeNowPlaying.style.display = "none";
+        // Hide every other child in left column with !important
+        for (let i = 0; i < left.children.length; i++) {
+          const c = left.children[i];
+          if (c !== customLeft) {
+            c.style.setProperty("display", "none", "important");
+          }
         }
       } else {
         customLeft.style.display = "none";
-        if (nativeNowPlaying) {
-          nativeNowPlaying.style.display = "";
+        for (let i = 0; i < left.children.length; i++) {
+          const c = left.children[i];
+          if (c !== customLeft) {
+            c.style.removeProperty("display");
+          }
         }
       }
     }
 
-    // 2. Center Container Scrubber Bar
+    // 2. Center Container: Insert scrubber INSIDE player-controls so it occupies the exact playback-bar slot
     if (center) {
-      const nativePlaybackBar = center.querySelector('.playback-bar');
+      const controls = center.querySelector('[data-testid="player-controls"], ._b8eissBsp4_ca4mU_sz') || center;
+      const nativePlaybackBar = controls.querySelector('.playback-bar');
+
       let customBar = document.getElementById("anticensor-playback-bar");
       if (!customBar) {
         customBar = document.createElement("div");
         customBar.id = "anticensor-playback-bar";
-        customBar.style.cssText = "display: flex; align-items: center; width: 100%; max-width: 722px; gap: 8px; margin-top: 4px; user-select: none;";
+        customBar.style.cssText = "display: flex; align-items: center; width: 100%; max-width: 722px; gap: 8px; height: 24px; user-select: none;";
         customBar.innerHTML = `
           <div id="anticensor-time-pos" style="color: #a7a7a7; font-size: 11px; min-width: 40px; text-align: right; font-family: var(--font-family, sans-serif); font-variant-numeric: tabular-nums;">0:00</div>
           <div id="anticensor-progress-bg" style="position: relative; flex-grow: 1; height: 4px; background: hsla(0,0%,100%,.3); border-radius: 2px; cursor: pointer;">
@@ -425,19 +441,23 @@
           </div>
           <div id="anticensor-time-dur" style="color: #a7a7a7; font-size: 11px; min-width: 40px; text-align: left; font-family: var(--font-family, sans-serif); font-variant-numeric: tabular-nums;">0:00</div>
         `;
-        center.appendChild(customBar);
+        if (nativePlaybackBar && nativePlaybackBar.parentNode) {
+          nativePlaybackBar.parentNode.insertBefore(customBar, nativePlaybackBar.nextSibling);
+        } else {
+          controls.appendChild(customBar);
+        }
         setupScrubberListeners(customBar);
       }
 
-      if (isAntiCensorPlaying || ourAudio) {
+      if (hasOurAudio) {
         customBar.style.display = "flex";
-        if (nativePlaybackBar && nativePlaybackBar !== customBar) {
-          nativePlaybackBar.style.display = "none";
+        if (nativePlaybackBar) {
+          nativePlaybackBar.style.setProperty("display", "none", "important");
         }
       } else {
         customBar.style.display = "none";
         if (nativePlaybackBar) {
-          nativePlaybackBar.style.display = "";
+          nativePlaybackBar.style.removeProperty("display");
         }
       }
     }
@@ -452,12 +472,19 @@
 
     const { left, center } = getNowPlayingBarContainers();
     if (left) {
-      const nativeNowPlaying = left.querySelector('.now-playing, [data-testid="now-playing-widget"]');
-      if (nativeNowPlaying) nativeNowPlaying.style.display = "";
+      for (let i = 0; i < left.children.length; i++) {
+        const c = left.children[i];
+        if (c !== customLeft) {
+          c.style.removeProperty("display");
+        }
+      }
     }
     if (center) {
-      const nativePlaybackBar = center.querySelector('.playback-bar');
-      if (nativePlaybackBar) nativePlaybackBar.style.display = "";
+      const controls = center.querySelector('[data-testid="player-controls"], ._b8eissBsp4_ca4mU_sz') || center;
+      const nativePlaybackBar = controls.querySelector('.playback-bar');
+      if (nativePlaybackBar) {
+        nativePlaybackBar.style.removeProperty("display");
+      }
     }
   }
 
@@ -512,7 +539,6 @@
   }
 
   function updatePlayPauseButtonIcons(isPlaying) {
-    // 1. Bottom bar main play/pause button
     const playPauseBtns = document.querySelectorAll('[data-testid="control-button-playpause"], .player-controls__buttons button:nth-child(3)');
     playPauseBtns.forEach(btn => {
       btn.setAttribute("aria-label", isPlaying ? "Пауза" : "Играть");
@@ -526,7 +552,6 @@
       }
     });
 
-    // 2. Big green album play button
     const bigPlayBtns = document.querySelectorAll('button[data-testid="play-button"], button[data-testid="action-bar-button"], .action-bar-button');
     bigPlayBtns.forEach(btn => {
       const isAlbum = window.location.href.includes("1f1OCxkJ43A1qy9qqFNfuX") || document.title.includes("Coll. of $hiT") || document.querySelector('h1')?.textContent?.includes("Coll. of $hiT");
@@ -646,12 +671,8 @@
 
     console.log("[AntiCensor PC] Starting playback:", currentPlayingTrackTitle, "URL:", streamUrl);
 
-    // Pause native Spotify if playing
-    try {
-      if (Spicetify.Player.isPlaying()) {
-        Spicetify.Player.pause();
-      }
-    } catch (_) {}
+    // Stop and pause ALL native / remote Spotify playback!
+    pauseAllSpotifyPlayback();
 
     const audio = new Audio();
     audio.crossOrigin = "anonymous";
@@ -729,6 +750,7 @@
         evt.stopImmediatePropagation();
         if (ourAudio) {
           if (ourAudio.paused) {
+            pauseAllSpotifyPlayback();
             ourAudio.play().catch(() => {});
           } else {
             ourAudio.pause();
@@ -800,6 +822,7 @@
 
       if (ourAudio && (currentPlayingTrackId === (id || uri || title) || (rowIndex >= 0 && rowIndex === currentPlayingTrackIndex))) {
         if (ourAudio.paused) {
+          pauseAllSpotifyPlayback();
           ourAudio.play().catch(() => {});
         } else {
           ourAudio.pause();
@@ -828,6 +851,9 @@
 
     const observer = new MutationObserver(() => {
       cleanTracklistRows();
+      if (ourAudio) {
+        ensurePlayerBarElements();
+      }
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
@@ -860,6 +886,7 @@
         evt.preventDefault();
         evt.stopPropagation();
         if (ourAudio.paused) {
+          pauseAllSpotifyPlayback();
           ourAudio.play().catch(() => {});
         } else {
           ourAudio.pause();
@@ -873,6 +900,7 @@
         if (ourAudio) {
           evt.preventDefault();
           if (ourAudio.paused) {
+            pauseAllSpotifyPlayback();
             ourAudio.play().catch(() => {});
           } else {
             ourAudio.pause();
