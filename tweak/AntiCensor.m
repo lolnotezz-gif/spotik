@@ -411,7 +411,15 @@ static NSDictionary *getBuiltinDefaultOverrides(void) {
             @"spotify:track:2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
             @"flip phone twerk": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
             @"spotify:track:1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
-            @"стеклянный": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf"
+            @"стеклянный": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
+            @"хулиёу": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+            @"m1raontheblock - хулиёу": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+            @"мразотик": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+            @"m1raontheblock - мразотик": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+            @"чётный": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"чётный - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+            @"m1raontheblock - чётный - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+
         };
     });
     return builtin;
@@ -2788,7 +2796,18 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         return;
     }
 
-    // Если Spotify стоит на паузе
+    NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
+
+    // Заменённый трек обнаружен! Если этот трек ещё не играет — ВСЕГДА запускаем воспроизведение!
+    if (!ourAudioPlayer || ![trackKey isEqualToString:currentPlayingKey]) {
+        isMutingSpotify = YES;
+        applyMuteStateToAllUnits();
+        isSpotifyCurrentlyPlaying = YES;
+        startReplacementAudio(trackKey, repUrl, position);
+        return;
+    }
+
+    // Если трек уже играет — уважаем ручную паузу/воспроизведение пользователя
     if (!isSpotifyCurrentlyPlaying) {
         if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
             [ourAudioPlayer pause];
@@ -2801,12 +2820,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
 
-    NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
-
-    // Если плеер ещё не играет этот трек
-    if (!ourAudioPlayer || ![trackKey isEqualToString:currentPlayingKey]) {
-        startReplacementAudio(trackKey, repUrl, position);
-    } else {
+    if (ourAudioPlayer) {
         if (hasElapsed && ourAudioPlayer) {
             double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -4134,6 +4148,38 @@ static void cleanupPoisonedLyricsDatabase(void) {
 }
 
 __attribute__((constructor)) static void initAntiCensor(void) {
+    // Автопереход на следующий трек альбома при завершении текущего
+    [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        if (ourAudioPlayer && ourAudioPlayer.currentItem == note.object) {
+            NSLog(@"[AntiCensor] Replaced track ended, checking next album track...");
+            NSArray *albumUrls = @[
+                @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+                @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+                @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+                @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+                @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+                @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+                @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+                @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+                @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+                @"https://spotik-in4b.onrender.com/audio/son.mp3",
+                @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+                @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3"
+            ];
+            if (currentPlayingUrl) {
+                NSUInteger idx = [albumUrls indexOfObject:currentPlayingUrl];
+                if (idx != NSNotFound && idx < albumUrls.count - 1) {
+                    NSString *nextUrl = albumUrls[idx + 1];
+                    NSLog(@"[AntiCensor] Auto-advancing to next album track: %@", nextUrl);
+                    startReplacementAudio([NSString stringWithFormat:@"AlbumTrack_%lu", (unsigned long)(idx + 2)], nextUrl, 0.0);
+                }
+            }
+        }
+    }];
+
     cleanupPoisonedLyricsDatabase();
     NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v4.0 (Cloud Sync + Native Context Menu + Lyrics Karaoke)...");
 
