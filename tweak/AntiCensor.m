@@ -419,7 +419,343 @@ static NSDictionary *getBuiltinDefaultOverrides(void) {
         };
     });
     return builtin;
-}#pragma mark - Direct Stream Cache & Resolution Engine (Zero Cooldown!)
+}
+
+static NSMutableDictionary *loadAllOverrides(void) {
+    NSMutableDictionary *cleaned = [NSMutableDictionary dictionaryWithDictionary:getBuiltinDefaultOverrides()];
+    NSString *path = getStorageFilePath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSDictionary *rawDict = nil;
+    if (data) {
+        rawDict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    }
+    if (!rawDict || ![rawDict isKindOfClass:[NSDictionary class]]) {
+        rawDict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_OVERRIDES_KEY];
+    }
+    if (rawDict && [rawDict isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in rawDict) {
+            if (![k isKindOfClass:[NSString class]]) continue;
+            NSString *normK = normalizeKey(k);
+            if (normK.length >= 3 &&
+                ![normK isEqualToString:@"текущий трек spotify"] &&
+                ![normK isEqualToString:@"выбранный трек"] &&
+                ![normK isEqualToString:@"текущий трек"] &&
+                ![normK isEqualToString:@"spotify:track:"] &&
+                ![normK isEqualToString:@"spotify:"]) {
+                NSString *val = [rawDict[k] description];
+                if (val && val.length > 5 && ([val containsString:@"soundcloud"] || [val containsString:@"http"] || [val containsString:@"local://"] || [val containsString:@"file://"])) {
+                    cleaned[normK] = val;
+                }
+            }
+        }
+    }
+    return cleaned;
+}
+
+static void persistOverrides(NSDictionary *dict) {
+    if (!dict) return;
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:&err];
+    if (data) {
+        [data writeToFile:getStorageFilePath() atomically:YES];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:dict forKey:DEFAULTS_OVERRIDES_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static NSString *cleanTrackID(NSString *rawUri) {
+    if (!rawUri || ![rawUri isKindOfClass:[NSString class]]) return nil;
+    return [rawUri componentsSeparatedByString:@"?"].firstObject;
+}
+
+static NSString *getServerURL(void) {
+    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:DEFAULTS_SERVER_KEY];
+    if (!url || url.length == 0) {
+        return DEFAULT_SERVER_URL;
+    }
+    return [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
+}
+
+static NSString *getLyricsFilePath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    return [docDir stringByAppendingPathComponent:@"AntiCensor_Lyrics.json"];
+}
+
+static NSMutableDictionary *loadAllLyrics(void) {
+    NSString *path = getLyricsFilePath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSDictionary *rawDict = nil;
+    if (data) {
+        rawDict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    }
+    if (!rawDict || ![rawDict isKindOfClass:[NSDictionary class]]) {
+        rawDict = [[NSUserDefaults standardUserDefaults] dictionaryForKey:DEFAULTS_LYRICS_KEY];
+    }
+    NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
+    BOOL needsPersist = NO;
+    if (rawDict && [rawDict isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in rawDict) {
+            NSString *normK = normalizeKey(k);
+            if (normK.length < 3 ||
+                [normK isEqualToString:@"текущий трек spotify"] ||
+                [normK isEqualToString:@"выбранный трек"] ||
+                [normK isEqualToString:@"текущий трек"] ||
+                [normK isEqualToString:@"spotify:track:"] ||
+                [normK isEqualToString:@"spotify:"]) {
+                needsPersist = YES;
+                continue;
+            }
+            NSString *val = [rawDict[k] description];
+            if (val && val.length > 0) {
+                // Очистка любых фантомных строк для трека USB
+                if ([normK containsString:@"usb"] && ([val containsString:@"разлюблю"] || [val containsString:@"кончатся"])) {
+                    needsPersist = YES;
+                    continue;
+                }
+                cleaned[normK] = val;
+            }
+        }
+    }
+    if (needsPersist) {
+        persistLyrics(cleaned);
+    }
+    return cleaned;
+}
+
+static void persistLyrics(NSDictionary *dict) {
+    if (!dict) return;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil];
+    if (data) {
+        [data writeToFile:getLyricsFilePath() atomically:YES];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:dict forKey:DEFAULTS_LYRICS_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
+    if (!key || key.length == 0) return;
+    NSString *server = getServerURL();
+    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
+    if (!syncUrl) return;
+
+    NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+    if (isLyrics) {
+        payload[@"lyrics"] = @{ key: value ?: @"" };
+    } else {
+        payload[@"overrides"] = @{ key: value ?: @"" };
+    }
+
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!bodyData) return;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = bodyData;
+    req.timeoutInterval = 7.0;
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (!err) {
+            NSLog(@"[AntiCensor] Cloud sync push SUCCESS for key: %@", key);
+        } else {
+            NSLog(@"[AntiCensor] Cloud sync push failed: %@", err);
+        }
+    }] resume];
+}
+
+static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count)) {
+    NSString *server = getServerURL();
+    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
+    if (!syncUrl) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+        return;
+    }
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
+    req.HTTPMethod = @"GET";
+    // 35 секунд таймаут для гарантированного холодного старта Render.com контейнера
+    req.timeoutInterval = 35.0;
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (!data || err) {
+            NSLog(@"[AntiCensor] Cloud sync pull failed or timed out: %@", err);
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+            return;
+        }
+
+        @try {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+                return;
+            }
+
+            __block NSUInteger updatedCount = 0;
+            __block NSUInteger totalCount = 0;
+
+            // 1. Оверрайды треков с ПК
+            NSDictionary *remoteOverrides = json[@"overrides"];
+            if (remoteOverrides && [remoteOverrides isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *localOverrides = loadAllOverrides();
+                for (NSString *k in remoteOverrides) {
+                    NSString *normK = normalizeKey(k);
+                    NSString *remoteVal = [remoteOverrides[k] description];
+                    if (remoteVal.length > 0) {
+                        totalCount++;
+                        NSString *curr = localOverrides[normK];
+                        if (!curr || ![curr hasPrefix:@"local://"]) {
+                            if (![curr isEqualToString:remoteVal]) {
+                                localOverrides[normK] = remoteVal;
+                                updatedCount++;
+                            }
+                        }
+                    }
+                }
+                persistOverrides(localOverrides);
+            }
+
+            // 2. Тексты песен с ПК
+            NSDictionary *remoteLyrics = json[@"lyrics"];
+            if (remoteLyrics && [remoteLyrics isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *localLyrics = loadAllLyrics();
+                for (NSString *k in remoteLyrics) {
+                    NSString *normK = normalizeKey(k);
+                    NSString *remoteTxt = [remoteLyrics[k] description];
+                    if (remoteTxt.length > 0) {
+                        totalCount++;
+                        NSString *currTxt = localLyrics[normK];
+                        if (![currTxt isEqualToString:remoteTxt]) {
+                            localLyrics[normK] = remoteTxt;
+                            updatedCount++;
+                        }
+                    }
+                }
+                persistLyrics(localLyrics);
+            }
+
+            NSLog(@"[AntiCensor] Cloud sync pull SUCCESS, updated: %lu, total items: %lu", (unsigned long)updatedCount, (unsigned long)totalCount);
+            if (completion) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(YES, (updatedCount > 0) ? updatedCount : totalCount);
+                });
+            }
+        } @catch (id ex) {
+            if (completion) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(NO, 0);
+                });
+            }
+        }
+    }] resume];
+}
+
+static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics) {
+    if (!trackKey) return;
+    NSString *normKey = normalizeKey(trackKey);
+    if (normKey.length < 3) return;
+
+    NSMutableDictionary *dict = loadAllLyrics();
+    if (lyrics && lyrics.length > 0) {
+        dict[normKey] = lyrics;
+        syncPushToCloud(normKey, lyrics, YES);
+    } else {
+        [dict removeObjectForKey:normKey];
+        syncPushToCloud(normKey, @"", YES);
+    }
+    persistLyrics(dict);
+}
+
+static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist) {
+    if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
+        return nil;
+    }
+    NSDictionary *dict = loadAllLyrics();
+    if (!dict || dict.count == 0) return nil;
+
+    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
+        NSString *val = dict[normalizeKey(uri)];
+        if (val && val.length > 0) return val;
+    }
+
+    if (title && title.length > 1 && artist && artist.length > 1) {
+        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
+        NSString *val = dict[normalizeKey(combined)];
+        if (val && val.length > 0) return val;
+
+        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
+        NSString *val2 = dict[normalizeKey(combined2)];
+        if (val2 && val2.length > 0) return val2;
+    }
+
+    if (title && title.length > 3) {
+        NSString *val = dict[normalizeKey(title)];
+        if (val && val.length > 0) return val;
+    }
+
+    return nil;
+}
+
+static void saveOverride(NSString *trackKey, NSString *scUrl) {
+    if (!trackKey) return;
+    NSString *normKey = normalizeKey(trackKey);
+    if (normKey.length < 3 ||
+        [normKey isEqualToString:@"текущий трек spotify"] ||
+        [normKey isEqualToString:@"выбранный трек"] ||
+        [normKey isEqualToString:@"текущий трек"]) {
+        return;
+    }
+
+    NSMutableDictionary *dict = loadAllOverrides();
+    if (scUrl && scUrl.length > 0) {
+        NSString *cleanVal = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        dict[normKey] = cleanVal;
+        syncPushToCloud(normKey, cleanVal, NO);
+    } else {
+        [dict removeObjectForKey:normKey];
+        syncPushToCloud(normKey, @"", NO);
+    }
+    persistOverrides(dict);
+}
+
+static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *artist) {
+    if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
+        return nil;
+    }
+
+    NSDictionary *dict = loadAllOverrides();
+    if (!dict || dict.count == 0) return nil;
+
+    // 1. Поиск по точному Spotify URI (например spotify:track:6wLq5...)
+    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
+        NSString *normUri = normalizeKey(uri);
+        NSString *val = dict[normUri];
+        if (val && val.length > 5) return val;
+    }
+
+    // 2. Поиск по «Артист - Название» (гарантирует уникальность трека в альбоме!)
+    if (title && title.length > 1 && artist && artist.length > 1) {
+        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
+        NSString *val = dict[normalizeKey(combined)];
+        if (val && val.length > 5) return val;
+
+        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
+        NSString *val2 = dict[normalizeKey(combined2)];
+        if (val2 && val2.length > 5) return val2;
+    }
+
+    // 3. Точное название песни
+    if (title && title.length > 2) {
+        NSString *normTitle = normalizeKey(title);
+        NSString *val = dict[normTitle];
+        if (val && val.length > 5) return val;
+    }
+
+    return nil;
+}
+
+#pragma mark - Direct Stream Cache & Resolution Engine (Zero Cooldown!)
 
 static NSMutableDictionary<NSString *, NSURL *> *g_streamCache = nil;
 static NSMutableDictionary<NSString *, NSNumber *> *g_streamCacheTimestamps = nil;
