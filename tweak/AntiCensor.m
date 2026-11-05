@@ -46,6 +46,7 @@ static void stopReplacementAudio(void);
 static void safeSeekPlayerToTime(double targetSeconds);
 static NSURLSessionDataTask *(*orig_dataTaskWithRequest_completionHandler)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
 static NSURLSessionDataTask *custom_dataTaskWithRequest_completionHandler(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *));
+static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *) = NULL;
 
 
 static double g_spotifyLastReportedPosition = 0.0;
@@ -1245,7 +1246,6 @@ static UIImage *getAlbumArtworkImage(void) {
     return s_img;
 }
 
-static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *);
 
 static BOOL isCurrentTrackFromAlbum(NSString *uri, NSString *title, NSString *artist, NSString *streamUrl) {
     if (streamUrl && [streamUrl containsString:@"spotik-in4b.onrender.com/audio/"]) {
