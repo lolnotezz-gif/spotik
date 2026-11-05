@@ -1,7 +1,8 @@
 (function () {
   const DEFAULT_CLOUD_SERVER = "https://spotik-in4b.onrender.com";
   const LOCAL_BRIDGE = "http://127.0.0.1:8989";
-  let activeServerUrl = DEFAULT_CLOUD_SERVER; // Always default to working cloud server
+  let activeServerUrl = DEFAULT_CLOUD_SERVER;
+  const ALBUM_COVER_URL = `${DEFAULT_CLOUD_SERVER}/audio/cover.jpg`;
 
   const VOLUME_KEY = "anticensor_user_volume";
   const OVERRIDES_KEY = "anticensor_overrides";
@@ -39,18 +40,18 @@
 
   // --- BUILT-IN ALBUM & TRACK OVERRIDES ---
   const BUILTIN_ALBUM_TRACKS = [
-    { num: 1, id: "0bzO2aZbO7RN0tl50wsCJz", uri: "spotify:track:0bzO2aZbO7RN0tl50wsCJz", title: "ONE WEEK RECORD", file: "one_week_record.mp3", aliases: ["one week record"] },
-    { num: 2, id: "0uWNvKc0B1OZsLMzlUzbpD", uri: "spotify:track:0uWNvKc0B1OZsLMzlUzbpD", title: "NeedForSpeed", file: "needforspeed.mp3", aliases: ["needforspeed"] },
-    { num: 3, id: "4YsCP1lZbeMlCaUT0ONML1", uri: "spotify:track:4YsCP1lZbeMlCaUT0ONML1", title: "$enpa1", file: "senpa1.mp3", aliases: ["$enpa1", "senpa1"] },
-    { num: 4, id: "6DlxijdnCniTi2jRL7xfIO", uri: "spotify:track:6DlxijdnCniTi2jRL7xfIO", title: "ХУЛИЁУ", file: "deyti.mp3", aliases: ["хулиёу", "дейти"] },
-    { num: 5, id: "49Aozh4YVr0sYx0rkCmNNU", uri: "spotify:track:49Aozh4YVr0sYx0rkCmNNU", title: "КРЫША", file: "krysha.mp3", aliases: ["крыша"] },
-    { num: 6, id: "22m03tWYBVctgdByCu2ohS", uri: "spotify:track:22m03tWYBVctgdByCu2ohS", title: "ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2", file: "tvari.mp3", aliases: ["фантастические твари - ver.2", "фантастические твари", "фантастические твари ver 2"] },
-    { num: 7, id: "0efigJN3XSbD3xvjDLSCYY", uri: "spotify:track:0efigJN3XSbD3xvjDLSCYY", title: "Я не виноват что... Больше", file: "ya_ne_vinovat.mp3", aliases: ["я не виноват что больше", "я не виноват что... больше"] },
-    { num: 8, id: "5JsbDzwDiKjCuNGh7KE2Ja", uri: "spotify:track:5JsbDzwDiKjCuNGh7KE2Ja", title: "FUCK IT", file: "fuckit.mp3", aliases: ["fuck it"] },
-    { num: 9, id: "1PbTwCZ4vihqw5bZc42Suj", uri: "spotify:track:1PbTwCZ4vihqw5bZc42Suj", title: "$HAKE YOUR A$$", file: "shake_your_ass.mp3", aliases: ["$hake your a$$", "shake your ass"] },
-    { num: 10, id: "02NrEHtVoV0QOGxsQHJ0id", uri: "spotify:track:02NrEHtVoV0QOGxsQHJ0id", title: "МРАЗОТИК", file: "son.mp3", aliases: ["мразотик", "сон"] },
-    { num: 11, id: "035FY0eysDZd9akX73iKok", uri: "spotify:track:035FY0eysDZd9akX73iKok", title: "NOTIME", file: "notime.mp3", aliases: ["notime"] },
-    { num: 12, id: "0qitLkJ4pa1MkHQ1sCoJh1", uri: "spotify:track:0qitLkJ4pa1MkHQ1sCoJh1", title: "ЧЁТНЫЙ - Bonus Track", file: "eyforiya.mp3", aliases: ["чётный", "чётный - bonus track", "эйфория", "эйфория - bonus track"] }
+    { num: 1, id: "0bzO2aZbO7RN0tl50wsCJz", uri: "spotify:track:0bzO2aZbO7RN0tl50wsCJz", title: "ONE WEEK RECORD", duration: 141, file: "one_week_record.mp3", aliases: ["one week record"] },
+    { num: 2, id: "0uWNvKc0B1OZsLMzlUzbpD", uri: "spotify:track:0uWNvKc0B1OZsLMzlUzbpD", title: "NeedForSpeed", duration: 125, file: "needforspeed.mp3", aliases: ["needforspeed"] },
+    { num: 3, id: "4YsCP1lZbeMlCaUT0ONML1", uri: "spotify:track:4YsCP1lZbeMlCaUT0ONML1", title: "$enpa1", duration: 173, file: "senpa1.mp3", aliases: ["$enpa1", "senpa1"] },
+    { num: 4, id: "6DlxijdnCniTi2jRL7xfIO", uri: "spotify:track:6DlxijdnCniTi2jRL7xfIO", title: "ХУЛИЁУ", duration: 122, file: "deyti.mp3", aliases: ["хулиёу", "дейти"] },
+    { num: 5, id: "49Aozh4YVr0sYx0rkCmNNU", uri: "spotify:track:49Aozh4YVr0sYx0rkCmNNU", title: "КРЫША", duration: 138, file: "krysha.mp3", aliases: ["крыша"] },
+    { num: 6, id: "22m03tWYBVctgdByCu2ohS", uri: "spotify:track:22m03tWYBVctgdByCu2ohS", title: "ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2", duration: 104, file: "tvari.mp3", aliases: ["фантастические твари - ver.2", "фантастические твари", "фантастические твари ver 2"] },
+    { num: 7, id: "0efigJN3XSbD3xvjDLSCYY", uri: "spotify:track:0efigJN3XSbD3xvjDLSCYY", title: "Я не виноват что... Больше", duration: 116, file: "ya_ne_vinovat.mp3", aliases: ["я не виноват что больше", "я не виноват что... больше"] },
+    { num: 8, id: "5JsbDzwDiKjCuNGh7KE2Ja", uri: "spotify:track:5JsbDzwDiKjCuNGh7KE2Ja", title: "FUCK IT", duration: 127, file: "fuckit.mp3", aliases: ["fuck it"] },
+    { num: 9, id: "1PbTwCZ4vihqw5bZc42Suj", uri: "spotify:track:1PbTwCZ4vihqw5bZc42Suj", title: "$HAKE YOUR A$$", duration: 178, file: "shake_your_ass.mp3", aliases: ["$hake your a$$", "shake your ass"] },
+    { num: 10, id: "02NrEHtVoV0QOGxsQHJ0id", uri: "spotify:track:02NrEHtVoV0QOGxsQHJ0id", title: "МРАЗОТИК", duration: 107, file: "son.mp3", aliases: ["мразотик", "сон"] },
+    { num: 11, id: "035FY0eysDZd9akX73iKok", uri: "spotify:track:035FY0eysDZd9akX73iKok", title: "NOTIME", duration: 107, file: "notime.mp3", aliases: ["notime"] },
+    { num: 12, id: "0qitLkJ4pa1MkHQ1sCoJh1", uri: "spotify:track:0qitLkJ4pa1MkHQ1sCoJh1", title: "ЧЁТНЫЙ - Bonus Track", duration: 83, file: "eyforiya.mp3", aliases: ["чётный", "чётный - bonus track", "эйфория", "эйфория - bonus track"] }
   ];
 
   function normalizeKey(str) {
@@ -91,24 +92,29 @@
         cursor: pointer !important;
         pointer-events: auto !important;
       }
-      [data-testid="tracklist-row"][aria-disabled="true"] [data-encore-id="text"],
-      [data-testid="tracklist-row"][aria-disabled="true"] div[dir="auto"],
-      [data-testid="tracklist-row"][aria-disabled="true"] .standalone-ellipsis-one-line,
-      [data-testid="tracklist-row"][aria-disabled="true"] [class*="title"],
-      .main-trackList-rowDisabled [data-encore-id="text"] {
+      /* ONLY non-active tracks are pure white */
+      [data-testid="tracklist-row"]:not([data-anticensor-active="true"]) [data-encore-id="text"],
+      [data-testid="tracklist-row"]:not([data-anticensor-active="true"]) div[dir="auto"],
+      [data-testid="tracklist-row"]:not([data-anticensor-active="true"]) .standalone-ellipsis-one-line,
+      [data-testid="tracklist-row"]:not([data-anticensor-active="true"]) [class*="title"],
+      .main-trackList-rowDisabled:not([data-anticensor-active="true"]) [data-encore-id="text"] {
         color: #ffffff !important;
       }
-      [data-testid="tracklist-row"][aria-disabled="true"] [data-encore-id="textSecondary"],
-      [data-testid="tracklist-row"][aria-disabled="true"] a[href*="/artist/"],
-      [data-testid="tracklist-row"][aria-disabled="true"] span[class*="artist"],
+      /* Subtitles / artists */
+      [data-testid="tracklist-row"] [data-encore-id="textSecondary"],
+      [data-testid="tracklist-row"] a[href*="/artist/"],
+      [data-testid="tracklist-row"] span[class*="artist"],
       .main-trackList-rowDisabled [data-encore-id="textSecondary"] {
         color: #b3b3b3 !important;
       }
       [data-testid="tracklist-row"]:hover {
         background-color: hsla(0, 0%, 100%, .1) !important;
       }
+      /* ONLY actively playing track is green */
       [data-testid="tracklist-row"][data-anticensor-active="true"] [data-encore-id="text"],
-      [data-testid="tracklist-row"][data-anticensor-active="true"] div[dir="auto"] {
+      [data-testid="tracklist-row"][data-anticensor-active="true"] div[dir="auto"],
+      [data-testid="tracklist-row"][data-anticensor-active="true"] .standalone-ellipsis-one-line,
+      [data-testid="tracklist-row"][data-anticensor-active="true"] [class*="title"] {
         color: #1db954 !important;
       }
     `;
@@ -128,50 +134,11 @@
     }
   }
 
-  // --- HOOK GRAPHQL FETCH TO MAKE UNPLAYABLE TRACKS PLAYABLE IN UI ---
-  try {
-    const _origFetch = window.fetch;
-    window.fetch = async function (...args) {
-      const response = await _origFetch.apply(this, args);
-      try {
-        const url = (typeof args[0] === "string" ? args[0] : (args[0]?.url || ""));
-        if (url.includes("api-partner.spotify.com") || url.includes("/query") || url.includes("/pathfinder/") || url.includes("/album")) {
-          const clone = response.clone();
-          const text = await clone.text();
-          if (text.includes('"playable":false') || text.includes('"is_playable":false') || text.includes('COUNTRY_RESTRICTED') || text.includes('1f1OCxkJ43A1qy9qqFNfuX')) {
-            const modified = text
-              .replace(/"playable":\s*false/g, '"playable":true')
-              .replace(/"is_playable":\s*false/g, '"is_playable":true')
-              .replace(/"reason":\s*"COUNTRY_RESTRICTED"/g, '"reason":"PLAYABLE"')
-              .replace(/"reason":\s*"NOT_IN_CATALOG"/g, '"reason":"PLAYABLE"');
-            return new Response(modified, {
-              status: response.status,
-              statusText: response.statusText,
-              headers: response.headers
-            });
-          }
-        }
-      } catch (_) {}
-      return response;
-    };
-  } catch (_) {}
-
-  function getServerUrl() {
-    try {
-      const custom = localStorage.getItem(SERVER_CONFIG_KEY);
-      if (custom && custom.startsWith("http")) return custom.replace(/\/+$/, "");
-    } catch (_) {}
-    return activeServerUrl;
-  }
-
-  function probeAndWarmServer() {
-    fetch(`${LOCAL_BRIDGE}/health`, { mode: "cors" })
-      .then(r => {
-        if (r.ok) activeServerUrl = LOCAL_BRIDGE;
-      })
-      .catch(() => {
-        activeServerUrl = DEFAULT_CLOUD_SERVER;
-      });
+  function formatTime(sec) {
+    if (isNaN(sec) || sec < 0) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
   }
 
   function getOverrides() {
@@ -219,6 +186,7 @@
   let currentPlayingTrackIndex = -1;
   let currentPlayingTrackTitle = "";
   let userVolume = 1.0;
+  let progressInterval = null;
 
   try {
     const saved = localStorage.getItem(VOLUME_KEY);
@@ -244,6 +212,11 @@
     currentPlayingTrackId = null;
     isAntiCensorPlaying = false;
 
+    if (progressInterval) {
+      clearInterval(progressInterval);
+      progressInterval = null;
+    }
+
     if (ourAudio) {
       try {
         ourAudio.pause();
@@ -254,7 +227,7 @@
       ourAudio = null;
     }
 
-    updateUIForPlayback(false);
+    updateUIForPlayback(false, "", "");
   }
 
   function getStreamUrl(inputUrl) {
@@ -281,29 +254,203 @@
     }
   }
 
+  function playPrevAlbumTrack() {
+    if (ourAudio && ourAudio.currentTime > 3.0) {
+      ourAudio.currentTime = 0;
+      updatePlayerBarUI();
+      return;
+    }
+    if (currentPlayingTrackIndex > 0) {
+      const prevTr = BUILTIN_ALBUM_TRACKS[currentPlayingTrackIndex - 1];
+      const repUrl = `/audio/${prevTr.file}`;
+      startReplacement(prevTr.id, repUrl, 0, prevTr.num - 1, prevTr.title);
+    } else if (ourAudio) {
+      ourAudio.currentTime = 0;
+      updatePlayerBarUI();
+    }
+  }
+
+  // --- UPDATE BOTTOM PLAYER BAR (COVER ART, TITLE, ARTIST, TIME, PROGRESS BAR) ---
+  function updatePlayerBarUI() {
+    if (!ourAudio) return;
+    try {
+      const curTime = ourAudio.currentTime || 0;
+      let dur = ourAudio.duration;
+      if (!dur || isNaN(dur) || dur < 1) {
+        if (currentPlayingTrackIndex >= 0 && currentPlayingTrackIndex < BUILTIN_ALBUM_TRACKS.length) {
+          dur = BUILTIN_ALBUM_TRACKS[currentPlayingTrackIndex].duration || 150;
+        } else {
+          dur = 150;
+        }
+      }
+
+      // 1. Cover Art
+      const imgEls = document.querySelectorAll('[data-testid="now-playing-widget"] [data-testid="cover-art-image"], [data-testid="now-playing-widget"] img, .main-coverSlotCollapsed-container img, .main-nowPlayingWidget-coverArt img');
+      imgEls.forEach(img => {
+        if (img.getAttribute("src") !== ALBUM_COVER_URL) {
+          img.setAttribute("src", ALBUM_COVER_URL);
+          img.setAttribute("srcset", "");
+          img.style.display = "block";
+          img.style.opacity = "1";
+        }
+      });
+
+      // 2. Track Title
+      const titleEls = document.querySelectorAll('[data-testid="now-playing-widget"] [data-testid="context-item-info-title"] a, [data-testid="now-playing-widget"] [data-testid="context-item-info-title"], .main-trackInfo-name a, .main-trackInfo-name');
+      titleEls.forEach(el => {
+        if (el.textContent !== currentPlayingTrackTitle) {
+          el.textContent = currentPlayingTrackTitle;
+          el.setAttribute("title", currentPlayingTrackTitle);
+        }
+      });
+
+      // 3. Artist
+      const artistEls = document.querySelectorAll('[data-testid="now-playing-widget"] [data-testid="context-item-info-subtitles"] a, [data-testid="now-playing-widget"] [data-testid="context-item-info-subtitles"], .main-trackInfo-artists a, .main-trackInfo-artists');
+      artistEls.forEach(el => {
+        if (el.textContent !== "m1raOnTheBlock") {
+          el.textContent = "m1raOnTheBlock";
+          el.setAttribute("title", "m1raOnTheBlock");
+        }
+      });
+
+      // 4. Elapsed Time Text
+      const posEl = document.querySelector('div[data-testid="playback-position"]');
+      if (posEl) posEl.textContent = formatTime(curTime);
+
+      // 5. Total Duration Text
+      const durEl = document.querySelector('div[data-testid="playback-duration"]');
+      if (durEl) durEl.textContent = formatTime(dur);
+
+      // 6. Progress Slider
+      const pct = Math.min(100, Math.max(0, (curTime / dur) * 100));
+      const progressBar = document.querySelector('[data-testid="playback-progressbar"]');
+      if (progressBar) {
+        progressBar.style.setProperty("--progress-bar-transform", pct + "%");
+        const sliderInner = progressBar.querySelector('.progress-bar__slider, [data-testid="progress-bar"]');
+        if (sliderInner) sliderInner.style.width = pct + "%";
+      }
+
+      // 7. Play/Pause Button Icon
+      const playPauseBtn = document.querySelector('[data-testid="control-button-playpause"]');
+      if (playPauseBtn) {
+        const isPlaying = !ourAudio.paused;
+        playPauseBtn.setAttribute("aria-label", isPlaying ? "Пауза" : "Играть");
+        const svg = playPauseBtn.querySelector("svg");
+        if (svg) {
+          if (isPlaying) {
+            svg.innerHTML = '<path d="M2.7 1a.7.7 0 0 0-.7.7v12.6a.7.7 0 0 0 .7.7h2.6a.7.7 0 0 0 .7-.7V1.7a.7.7 0 0 0-.7-.7H2.7zm8 0a.7.7 0 0 0-.7.7v12.6a.7.7 0 0 0 .7.7h2.6a.7.7 0 0 0 .7-.7V1.7a.7.7 0 0 0-.7-.7h-2.6z"></path>';
+          } else {
+            svg.innerHTML = '<path d="M3 1.713a.7.7 0 0 1 1.05-.607l10.89 6.288a.7.7 0 0 1 0 1.212L4.05 14.894A.7.7 0 0 1 3 14.287V1.713z"></path>';
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // --- UPDATE TRACKLIST: ONLY CURRENTLY PLAYING TRACK IS GREEN, ALL OTHERS ARE WHITE! ---
   function updateUIForPlayback(playing, title, artist) {
     try {
       const rows = document.querySelectorAll('[data-testid="tracklist-row"], [role="row"]');
       rows.forEach((row, idx) => {
-        const titleEl = row.querySelector('[data-encore-id="text"], div[dir="auto"], .standalone-ellipsis-one-line');
+        const titleEl = row.querySelector('[data-encore-id="text"], div[dir="auto"], .standalone-ellipsis-one-line, [class*="title"], [class*="trackName"]');
         if (!titleEl) return;
         const text = titleEl.textContent.trim().toLowerCase();
-        if (playing && title && (text.includes(title.toLowerCase()) || (currentPlayingTrackIndex >= 0 && idx === currentPlayingTrackIndex))) {
-          titleEl.style.color = "#1db954";
+        const isThisActive = playing && title && (text.includes(title.toLowerCase()) || (currentPlayingTrackIndex >= 0 && idx === currentPlayingTrackIndex));
+
+        if (isThisActive) {
+          titleEl.style.setProperty("color", "#1db954", "important");
           row.setAttribute("data-anticensor-active", "true");
           row.setAttribute("aria-selected", "true");
         } else {
-          titleEl.style.color = "";
+          // RESET TO STANDARD SPOTIFY WHITE COLOR - DOES NOT STAY GREEN AFTER LISTENING!
+          titleEl.style.removeProperty("color");
+          titleEl.style.color = "#ffffff";
           row.removeAttribute("data-anticensor-active");
           row.removeAttribute("aria-selected");
         }
       });
 
-      const playPauseBtn = document.querySelector('[data-testid="control-button-playpause"]');
-      if (playPauseBtn) {
-        playPauseBtn.setAttribute("aria-label", playing ? "Пауза" : "Играть");
-      }
+      updatePlayerBarUI();
     } catch (_) {}
+  }
+
+  // --- SCRUBBING / REWINDING VIA PROGRESS BAR ---
+  function setupProgressScrubber() {
+    const progressBar = document.querySelector('[data-testid="playback-progressbar"]');
+    if (!progressBar || progressBar.hasAttribute("data-anticensor-scrubber")) return;
+    progressBar.setAttribute("data-anticensor-scrubber", "true");
+    progressBar.style.cursor = "pointer";
+
+    function doSeek(e) {
+      if (!ourAudio) return;
+      let dur = ourAudio.duration;
+      if (!dur || isNaN(dur) || dur < 1) {
+        if (currentPlayingTrackIndex >= 0 && currentPlayingTrackIndex < BUILTIN_ALBUM_TRACKS.length) {
+          dur = BUILTIN_ALBUM_TRACKS[currentPlayingTrackIndex].duration || 150;
+        } else {
+          dur = 150;
+        }
+      }
+      const rect = progressBar.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const width = rect.width;
+      if (width > 0) {
+        const fraction = Math.max(0, Math.min(1, clickX / width));
+        ourAudio.currentTime = fraction * dur;
+        updatePlayerBarUI();
+      }
+    }
+
+    progressBar.addEventListener("click", (e) => {
+      if (ourAudio) {
+        e.preventDefault();
+        e.stopPropagation();
+        doSeek(e);
+      }
+    }, true);
+
+    let isDragging = false;
+    progressBar.addEventListener("mousedown", (e) => {
+      if (ourAudio) {
+        isDragging = true;
+        doSeek(e);
+      }
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (isDragging && ourAudio) {
+        doSeek(e);
+      }
+    });
+    window.addEventListener("mouseup", () => {
+      isDragging = false;
+    });
+  }
+
+  // --- PREVIOUS / NEXT BUTTON HOOKS ---
+  function setupNavButtons() {
+    const skipFwdBtn = document.querySelector('button[data-testid="control-button-skip-forward"]');
+    if (skipFwdBtn && !skipFwdBtn.hasAttribute("data-anticensor-nav")) {
+      skipFwdBtn.setAttribute("data-anticensor-nav", "true");
+      skipFwdBtn.addEventListener("click", (e) => {
+        if (ourAudio || currentPlayingTrackIndex >= 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          playNextAlbumTrack();
+        }
+      }, true);
+    }
+
+    const skipBackBtn = document.querySelector('button[data-testid="control-button-skip-back"]');
+    if (skipBackBtn && !skipBackBtn.hasAttribute("data-anticensor-nav")) {
+      skipBackBtn.setAttribute("data-anticensor-nav", "true");
+      skipBackBtn.addEventListener("click", (e) => {
+        if (ourAudio || currentPlayingTrackIndex >= 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          playPrevAlbumTrack();
+        }
+      }, true);
+    }
   }
 
   function startReplacement(trackId, url, retryCount = 0, albumIndex = -1, explicitTitle = "") {
@@ -325,6 +472,11 @@
 
     const streamUrl = getStreamUrl(url);
     if (!streamUrl) return;
+
+    if (progressInterval) {
+      clearInterval(progressInterval);
+      progressInterval = null;
+    }
 
     if (ourAudio) {
       try {
@@ -395,6 +547,18 @@
     audio.play().then(() => {
       isAntiCensorPlaying = true;
       updateUIForPlayback(true, currentPlayingTrackTitle, "m1raOnTheBlock");
+      setupProgressScrubber();
+      setupNavButtons();
+
+      // High-frequency ticker for smooth progress bar and current time
+      if (progressInterval) clearInterval(progressInterval);
+      progressInterval = setInterval(() => {
+        if (sessionId === activeSessionId && ourAudio && !ourAudio.paused) {
+          updatePlayerBarUI();
+          setupProgressScrubber();
+          setupNavButtons();
+        }
+      }, 200);
     }).catch(err => {
       console.warn("[AntiCensor] Play promise rejected:", err);
     });
@@ -405,7 +569,6 @@
     const row = evt.target && evt.target.closest && evt.target.closest('[data-testid="tracklist-row"], [role="row"], .main-trackList-trackListRow');
     if (!row) return;
 
-    // Do not intercept if user clicked interactive buttons (like 3 dots or heart)
     if (evt.target.closest('button[data-testid*="more"], button[data-testid*="context-menu"], button[aria-haspopup="menu"]')) {
       return;
     }
@@ -457,12 +620,10 @@
 
     const repUrl = getReplacementUrlForInfo({ id, uri, title });
     if (repUrl) {
-      // STOP SPOTIFY FROM RECEIVING THIS CLICK
       evt.preventDefault();
       evt.stopPropagation();
       evt.stopImmediatePropagation();
 
-      // If clicked row is already playing -> toggle play/pause
       if (ourAudio && (currentPlayingTrackId === (id || uri || title) || (title && currentPlayingTrackTitle === title))) {
         if (ourAudio.paused) {
           ourAudio.play().catch(() => {});
@@ -533,7 +694,8 @@
     document.addEventListener("click", handleTrackRowClick, true);
     document.addEventListener("dblclick", handleTrackRowClick, true);
 
-    probeAndWarmServer();
+    setupProgressScrubber();
+    setupNavButtons();
   }
 
   init();
