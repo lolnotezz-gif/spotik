@@ -11,7 +11,9 @@ from socketserver import ThreadingMixIn
 
 PORT = int(os.environ.get("PORT", 8080))
 CACHE_DIR = os.environ.get("CACHE_DIR", os.path.expanduser("~/.anticensor_cache"))
+AUDIO_DIR = os.path.join(os.path.dirname(__file__), "audio")
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # Find ffmpeg binary
 FFMPEG = "ffmpeg"
@@ -29,6 +31,31 @@ in_progress_urls = set()
 def get_target_path(clean_url):
     slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:]
     return os.path.join(CACHE_DIR, f"{slug}.mp3")
+
+def resolve_kugou_to_file(song_hash):
+    clean_h = re.sub(r'[^a-zA-Z0-9]', '', song_hash).lower()
+    target_mp3 = os.path.join(CACHE_DIR, f"kugou_{clean_h}.mp3")
+    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 50000:
+        return target_mp3
+    try:
+        url = f"http://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash={clean_h}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            dl_url = data.get('url')
+            if dl_url:
+                tmp_out = target_mp3 + ".tmp.mp3"
+                dl_req = urllib.request.Request(dl_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(dl_req, timeout=20) as dl_resp:
+                    with open(tmp_out, 'wb') as f:
+                        f.write(dl_resp.read())
+                if os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 50000:
+                    os.replace(tmp_out, target_mp3)
+                    print(f"[AntiCensor] KuGou cached: {target_mp3}")
+                    return target_mp3
+    except Exception as e:
+        print(f"[AntiCensor] KuGou resolve error for {clean_h}: {e}")
+    return None
 
 def resolve_sc_to_file(raw_url):
     url = raw_url.strip()
@@ -215,7 +242,14 @@ class AudioHandler(BaseHTTPRequestHandler):
             return
 
         file_to_stream = None
-        if parsed.path == '/sc' and 'url' in params:
+        if parsed.path.startswith('/audio/'):
+            filename = os.path.basename(parsed.path)
+            candidate = os.path.join(AUDIO_DIR, filename)
+            if os.path.exists(candidate) and os.path.isfile(candidate):
+                file_to_stream = candidate
+        elif parsed.path == '/kugou' and 'hash' in params:
+            file_to_stream = resolve_kugou_to_file(params['hash'][0])
+        elif parsed.path == '/sc' and 'url' in params:
             try:
                 sc_url = params['url'][0]
                 file_to_stream = resolve_sc_to_file(sc_url)
