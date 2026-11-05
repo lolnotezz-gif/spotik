@@ -46,7 +46,45 @@
   BUILTIN_OVERRIDES["1vqfh4jra1tfndlhuan5ne"] = "https://on.soundcloud.com/YiLKhavIH9btKwTbIf";
   BUILTIN_OVERRIDES[normalizeKey("стеклянный")] = "https://on.soundcloud.com/YiLKhavIH9btKwTbIf";
 
-  // --- STYLING: FULL UN-GREYING & SPOTIFY NATIVE VISUALS ---
+  // --- MINIMIZE WINDOW HELPER VIA ESPERANTO IPC ---
+  function minimizeSpotifyWindow() {
+    try {
+      if (typeof window.executeEsperantoCall === "function") {
+        const service = "spotify.desktop.window_state_esperanto.proto.DesktopWindowState";
+        const method = "SetWindowState";
+        const payload = new Uint8Array([8, 3]); // WINDOW_STATE_MINIMIZED
+        
+        const encoder = new TextEncoder();
+        const sBytes = encoder.encode(service);
+        const mBytes = encoder.encode(method);
+        
+        const totalLen = 4 + sBytes.byteLength + 4 + mBytes.byteLength + 4 + payload.byteLength;
+        const buf = new Uint8Array(totalLen);
+        const view = new DataView(buf.buffer);
+        let offset = 0;
+        
+        view.setInt32(offset, sBytes.byteLength);
+        buf.set(sBytes, offset + 4);
+        offset += sBytes.byteLength + 4;
+        
+        view.setInt32(offset, mBytes.byteLength);
+        buf.set(mBytes, offset + 4);
+        offset += mBytes.byteLength + 4;
+        
+        view.setInt32(offset, payload.byteLength);
+        buf.set(payload, offset + 4);
+        
+        window.executeEsperantoCall({
+          request: buf.buffer,
+          persistent: false,
+          onSuccess: () => {},
+          onFailure: () => {}
+        });
+      }
+    } catch (_) {}
+  }
+
+  // --- STYLING: FULL UN-GREYING, SPOTIFY NATIVE VISUALS & WINDOW CONTROLS FIX ---
   function injectAntiCensorStyles() {
     if (document.getElementById("anticensor-css")) return;
     const style = document.createElement("style");
@@ -158,6 +196,19 @@
       #anticensor-progress-bg:hover #anticensor-progress-thumb,
       #anticensor-progress-bg.dragging #anticensor-progress-thumb {
         display: block !important;
+      }
+
+      /* 8. FIX WINDOWS WINDOW CONTROLS (MINIMIZE, MAXIMIZE, CLOSE) */
+      /* Do not let body-drag-top overlap the top-right 140px window buttons! */
+      .spotify__container--is-desktop:not(.fullscreen) .body-drag-top,
+      .body-drag-top {
+        right: 140px !important;
+        width: calc(100% - 140px) !important;
+      }
+      .jZZUhUAqjBxjeJnb4GIK,
+      .jZZUhUAqjBxjeJnb4GIK * {
+        -webkit-app-region: no-drag !important;
+        pointer-events: auto !important;
       }
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -405,7 +456,6 @@
 
       if (hasOurAudio) {
         customLeft.style.display = "flex";
-        // Hide every other child in left column with !important
         for (let i = 0; i < left.children.length; i++) {
           const c = left.children[i];
           if (c !== customLeft) {
@@ -894,8 +944,29 @@
       }
     }, true);
 
-    // Spacebar
+    // Minimize button click helper (top-right controls area)
+    document.addEventListener("click", (evt) => {
+      const spacer = evt.target && evt.target.closest && evt.target.closest('.jZZUhUAqjBxjeJnb4GIK');
+      if (spacer) {
+        const rect = spacer.getBoundingClientRect();
+        const clickX = evt.clientX - rect.left;
+        // On Windows titlebar, the left third of the 135px spacer is Minimize
+        if (clickX >= 0 && clickX <= rect.width / 3) {
+          minimizeSpotifyWindow();
+        }
+      }
+    }, true);
+
+    // Keyboard shortcuts: Spacebar (Play/Pause), Ctrl+M (Minimize window)
     window.addEventListener("keydown", (evt) => {
+      // Ctrl + M to minimize
+      if ((evt.ctrlKey || evt.metaKey) && evt.code === "KeyM") {
+        evt.preventDefault();
+        minimizeSpotifyWindow();
+        return;
+      }
+
+      // Space to toggle play/pause
       if (evt.code === "Space" && !["INPUT", "TEXTAREA"].includes(evt.target?.tagName)) {
         if (ourAudio) {
           evt.preventDefault();
