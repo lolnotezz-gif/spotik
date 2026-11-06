@@ -1481,6 +1481,18 @@ static void updateNowPlayingCenter(void) {
 @implementation AntiCensorLyricItem
 @end
 
+static __weak UILabel *g_activeNowPlayingCardLabel = nil;
+static __weak UIView *g_activeKaraokeContainer = nil;
+
+static NSArray<AntiCensorLyricItem *> *g_currentKaraokeItems = nil;
+static NSMutableArray<UILabel *> *g_currentKaraokeLabels = nil;
+static NSString *g_currentKaraokeTrackKey = nil;
+static NSInteger g_lastActiveKaraokeIdx = -1;
+
+static double g_currentTrackDuration = 180.0;
+static NSTimeInterval g_lastUserLyricsInteractionTime = 0;
+static NSTimeInterval g_lastUserManualLyricsSeekTimestamp = 0;
+
 
 
 @class AntiCensorNowPlayingViewController;
@@ -2224,17 +2236,7 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
 - (void)handleSeekToLyricIndex:(NSInteger)idx inView:(UIView *)view;
 @end
 
-static __weak UILabel *g_activeNowPlayingCardLabel = nil;
-static __weak UIView *g_activeKaraokeContainer = nil;
 
-static NSArray<AntiCensorLyricItem *> *g_currentKaraokeItems = nil;
-static NSMutableArray<UILabel *> *g_currentKaraokeLabels = nil;
-static NSString *g_currentKaraokeTrackKey = nil;
-static NSInteger g_lastActiveKaraokeIdx = -1;
-
-static double g_currentTrackDuration = 180.0;
-static NSTimeInterval g_lastUserLyricsInteractionTime = 0;
-static NSTimeInterval g_lastUserManualLyricsSeekTimestamp = 0;
 
 static void seekSpotifyPlayback(double targetSeconds, double duration) {
     if (isnan(targetSeconds) || targetSeconds < 0) return;
