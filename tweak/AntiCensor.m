@@ -775,26 +775,24 @@ static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *art
     NSDictionary *dict = loadAllLyrics();
     if (!dict || dict.count == 0) return nil;
 
+    // 1. Strict match by Spotify track URI (e.g. spotify:track:6wLq5...)
     if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
         NSString *val = dict[normalizeKey(uri)];
         if (val && val.length > 0) return val;
     }
 
+    // 2. Strict match by Artist - Title (Must have BOTH artist and title to prevent random collisions!)
     if (title && title.length > 1 && artist && artist.length > 1) {
         NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
         NSString *val = dict[normalizeKey(combined)];
         if (val && val.length > 0) return val;
 
-        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
+        NSString *combined2 = [NSString stringWithFormat:@"%@ • %@", artist, title];
         NSString *val2 = dict[normalizeKey(combined2)];
         if (val2 && val2.length > 0) return val2;
     }
 
-    if (title && title.length > 3) {
-        NSString *val = dict[normalizeKey(title)];
-        if (val && val.length > 0) return val;
-    }
-
+    // Note: NEVER match by naked title alone! Single-word titles caused random lyrics to attach to arbitrary tracks.
     return nil;
 }
 
@@ -860,26 +858,70 @@ static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *a
 
 static NSMutableDictionary<NSString *, NSURL *> *g_streamCache = nil;
 static NSMutableDictionary<NSString *, NSNumber *> *g_streamCacheTimestamps = nil;
+static NSString *getStreamCacheFilePath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    return [docDir stringByAppendingPathComponent:@"AntiCensor_StreamCache.json"];
+}
+
+static void saveStreamCacheToDisk(void) {
+    if (!g_streamCache || g_streamCache.count == 0) return;
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    for (NSString *k in g_streamCache) {
+        NSURL *u = g_streamCache[k];
+        NSNumber *ts = g_streamCacheTimestamps[k] ?: @([NSDate timeIntervalSinceReferenceDate]);
+        if (u && u.absoluteString) {
+            dict[k] = @{ @"url": u.absoluteString, @"ts": ts };
+        }
+    }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
+    if (data) {
+        [data writeToFile:getStreamCacheFilePath() atomically:YES];
+    }
+}
+
+static void loadStreamCacheFromDisk(void) {
+    if (!g_streamCache) g_streamCache = [NSMutableDictionary dictionary];
+    if (!g_streamCacheTimestamps) g_streamCacheTimestamps = [NSMutableDictionary dictionary];
+    NSString *path = getStreamCacheFilePath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return;
+    NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (!dict || ![dict isKindOfClass:[NSDictionary class]]) return;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    for (NSString *k in dict) {
+        NSDictionary *item = dict[k];
+        if ([item isKindOfClass:[NSDictionary class]]) {
+            NSString *urlStr = item[@"url"];
+            NSNumber *ts = item[@"ts"];
+            if (urlStr && ts && (now - [ts doubleValue] < 7200.0)) {
+                NSURL *u = [NSURL URLWithString:urlStr];
+                if (u) {
+                    g_streamCache[k] = u;
+                    g_streamCacheTimestamps[k] = ts;
+                }
+            }
+        }
+    }
+}
+
 
 static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *streamUrl)) {
     if (!rawUrl || rawUrl.length == 0) {
-        completion(nil);
+        if (completion) completion(nil);
         return;
     }
 
-    if (!g_streamCache) {
-        g_streamCache = [NSMutableDictionary dictionary];
-    }
-    if (!g_streamCacheTimestamps) {
-        g_streamCacheTimestamps = [NSMutableDictionary dictionary];
+    if (!g_streamCache || !g_streamCacheTimestamps) {
+        loadStreamCacheFromDisk();
     }
 
+    // 1. Instant Cache check with 2-hour TTL (7200 seconds)
     NSURL *cached = g_streamCache[rawUrl];
     NSNumber *cachedTs = g_streamCacheTimestamps[rawUrl];
     if (cached) {
-        // Подписи CloudFront для SoundCloud действительны ~3-5 минут. Не используем протухшие ссылки!
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 180.0)) {
-            completion(cached);
+        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 7200.0)) {
+            if (completion) completion(cached);
             return;
         } else {
             [g_streamCache removeObjectForKey:rawUrl];
@@ -887,13 +929,14 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         }
     }
 
+    // 2. Direct local file check
     if ([rawUrl hasPrefix:@"local://"]) {
         NSString *filename = [rawUrl substringFromIndex:@"local://".length];
         NSString *fullPath = [getLocalAudioDirectoryPath() stringByAppendingPathComponent:filename];
         if ([[NSFileManager defaultManager] fileExistsAtPath:fullPath]) {
             NSURL *u = [NSURL fileURLWithPath:fullPath];
             g_streamCache[rawUrl] = u;
-            completion(u);
+            if (completion) completion(u);
             return;
         }
     }
@@ -902,16 +945,17 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         NSURL *u = [rawUrl hasPrefix:@"file://"] ? [NSURL URLWithString:rawUrl] : [NSURL fileURLWithPath:rawUrl];
         if ([[NSFileManager defaultManager] fileExistsAtPath:u.path]) {
             g_streamCache[rawUrl] = u;
-            completion(u);
+            if (completion) completion(u);
             return;
         }
     }
 
-    if ([rawUrl hasSuffix:@".mp3"] || [rawUrl hasSuffix:@".m3u8"] || [rawUrl containsString:@"media-streaming.soundcloud.cloud"]) {
+    // 3. Direct audio URLs (MP3 / M3U8) -> ZERO latency!
+    if ([rawUrl hasSuffix:@".mp3"] || [rawUrl hasSuffix:@".m3u8"] || [rawUrl containsString:@"media-streaming.soundcloud.cloud"] || [rawUrl containsString:@"cf-media.sndcdn.com"]) {
         NSURL *u = [NSURL URLWithString:rawUrl];
         g_streamCache[rawUrl] = u;
         g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
-        completion(u);
+        if (completion) completion(u);
         return;
     }
 
@@ -919,18 +963,19 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
     NSString *encoded = [rawUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
     NSURL *renderFallback = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
 
+    // 4. SoundCloud API v2 Resolution (Handles on.soundcloud.com natively without extra redirect roundtrip!)
     void (^doApiResolve)(NSString *) = ^(NSString *canonicalUrl) {
         NSString *clean = [canonicalUrl componentsSeparatedByString:@"?"].firstObject;
         NSString *endpoint = [NSString stringWithFormat:@"https://api-v2.soundcloud.com/resolve?url=%@&client_id=%@",
                               [clean stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
-        [req setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:3.5];
+        [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
+        [req setTimeoutInterval:2.5];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
-                completion(renderFallback);
+                if (completion) completion(renderFallback);
                 return;
             }
             @try {
@@ -956,8 +1001,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                             fullSApi = [fullSApi stringByAppendingFormat:@"&track_authorization=%@", json[@"track_authorization"]];
                         }
                         NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:fullSApi]];
-                        [req2 setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
-                        [req2 setTimeoutInterval:3.5];
+                        [req2 setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
+                        [req2 setTimeoutInterval:2.5];
 
                         [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
                             if (d2 && !e2) {
@@ -968,32 +1013,23 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                                     if (fastUrl) {
                                         g_streamCache[rawUrl] = fastUrl;
                                         g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+                                        saveStreamCacheToDisk();
                                     }
-                                    completion(fastUrl);
+                                    if (completion) completion(fastUrl);
                                     return;
                                 }
                             }
-                            completion(renderFallback);
+                            if (completion) completion(renderFallback);
                         }] resume];
                         return;
                     }
                 }
             } @catch (id ex) {}
-            completion(renderFallback);
+            if (completion) completion(renderFallback);
         }] resume];
     };
 
-    if ([rawUrl containsString:@"on.soundcloud.com"] || [rawUrl containsString:@"t.co"] || [rawUrl containsString:@"bit.ly"]) {
-        NSMutableURLRequest *headReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
-        [headReq setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
-        [headReq setTimeoutInterval:3.0];
-        [[[NSURLSession sharedSession] dataTaskWithRequest:headReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-            NSString *finalUrl = r.URL.absoluteString ?: rawUrl;
-            doApiResolve(finalUrl);
-        }] resume];
-    } else {
-        doApiResolve(rawUrl);
-    }
+    doApiResolve(rawUrl);
 }
 
 #pragma mark - AntiCensor State & Real-Time Sync Engine
@@ -3051,9 +3087,8 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     }
 
     isMutingSpotify = YES;
-    applyMuteStateToAllUnits(); // Spotify в полном мьюте
+    applyMuteStateToAllUnits();
 
-    // КРИТИЧНО ДЛЯ AIRPODS, DYNAMIC ISLAND И LOCK SCREEN:
     AVAudioSession *session = [AVAudioSession sharedInstance];
     [session setCategory:AVAudioSessionCategoryPlayback
              withOptions:AVAudioSessionCategoryOptionMixWithOthers |
@@ -3063,18 +3098,21 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     [session setActive:YES error:nil];
 
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:streamUrl];
+    if (@available(iOS 10.0, *)) {
+        item.preferredForwardBufferDuration = 0.5; // Fast buffering for instant audio start!
+    }
+
     if (!g_playerObserver) {
         g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
     }
 
-    // Плавный переход (Crossfade): если уже играл трек, мягко затухаем его, а не обрываем звук
     if (ourAudioPlayer) {
         if (isObservingPlayerItem) {
             @try { [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:kStatusObserverContext]; } @catch (id ex) {}
             isObservingPlayerItem = NO;
         }
         AVPlayer *oldP = ourAudioPlayer;
-        fadeOutPlayer(oldP, 1.5);
+        [oldP pause];
         ourAudioPlayer = nil;
     }
 
@@ -3085,12 +3123,12 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
     }
 
-    if (initialPosition > 0.5) {
+    if (initialPosition > 1.0) {
         [ourAudioPlayer seekToTime:CMTimeMakeWithSeconds(initialPosition, NSEC_PER_SEC)];
     }
 
     isSpotifyCurrentlyPlaying = YES;
-    fadeInPlayer(ourAudioPlayer, 0.5);
+    ourAudioPlayer.volume = 1.0f; // Instant full volume, no silent fade-in delay!
     [ourAudioPlayer play];
     updateNowPlayingCenter();
 }
@@ -4559,77 +4597,33 @@ static void setupFloatingBadge(void) {
 
 #pragma mark - Dynamic Injection Constructor
 
+
+static void preResolveAllOverridesInBackground(void) {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        NSDictionary *all = loadAllOverrides();
+        if (!all || all.count == 0) return;
+        for (NSString *k in all) {
+            NSString *url = all[k];
+            if ([url containsString:@"soundcloud.com"]) {
+                resolveSoundCloudUrl(url, nil);
+            }
+        }
+    });
+}
+
 static void cleanupPoisonedLyricsDatabase(void) {
-    NSMutableDictionary *lyricsDict = loadAllLyrics();
-    NSMutableDictionary *overridesDict = loadAllOverrides();
-    BOOL lyricsChanged = NO;
-    BOOL overridesChanged = NO;
-
-    if (lyricsDict && lyricsDict.count > 0) {
-        NSMutableArray *toRemove = [NSMutableArray array];
-        for (NSString *key in lyricsDict) {
-            NSString *val = [lyricsDict[key] description];
-            NSString *kLower = [key lowercaseString];
-            NSString *vLower = [val lowercaseString];
-
-            // 1. Очищаем мусорные ключи с действиями контекстного меню
-            if ([kLower containsString:@"очеред"] ||
-                [kLower containsString:@"джем"] ||
-                [kLower containsString:@"плейлист"] ||
-                [kLower containsString:@"поделит"] ||
-                [kLower containsString:@"радио"] ||
-                [kLower containsString:@"сведения"]) {
-                [toRemove addObject:key];
-                continue;
-            }
-            // 2. Очищаем фантомный текст "jealous (akkiru)" под "прыгай, дура!"
-            if ([kLower containsString:@"прыгай"] && ([vLower containsString:@"jealous"] || [vLower containsString:@"akkiru"] || [vLower containsString:@"three, two, one"])) {
-                [toRemove addObject:key];
-                continue;
-            }
-            // 3. Ошибочный текст "эстетику"
-            if ([kLower containsString:@"сборник"] && [vLower containsString:@"эстетику"]) {
-                [toRemove addObject:key];
-                continue;
-            }
-            if ([kLower containsString:@"кишлак"] && [vLower containsString:@"эстетику"] && ![kLower containsString:@"эстетик"]) {
-                [toRemove addObject:key];
-                continue;
-            }
-        }
-        if (toRemove.count > 0) {
-            for (NSString *k in toRemove) {
-                [lyricsDict removeObjectForKey:k];
-                syncPushToCloud(k, @"", YES);
-            }
-            lyricsChanged = YES;
-        }
+    // Purge ghost lyrics once on upgrade to v4.1
+    BOOL alreadyPurged = [[NSUserDefaults standardUserDefaults] boolForKey:@"AntiCensor_v4_1_PurgedGhostLyrics"];
+    if (!alreadyPurged) {
+        NSLog(@"[AntiCensor] Purging all ghost lyrics from local storage and user defaults...");
+        persistLyrics(@{});
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:DEFAULTS_LYRICS_KEY];
+        NSString *path = getLyricsFilePath();
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"AntiCensor_v4_1_PurgedGhostLyrics"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        return;
     }
-
-    if (overridesDict && overridesDict.count > 0) {
-        NSMutableArray *toRemove = [NSMutableArray array];
-        for (NSString *key in overridesDict) {
-            NSString *kLower = [key lowercaseString];
-            if ([kLower containsString:@"очеред"] ||
-                [kLower containsString:@"джем"] ||
-                [kLower containsString:@"плейлист"] ||
-                [kLower containsString:@"поделит"] ||
-                [kLower containsString:@"радио"] ||
-                [kLower containsString:@"сведения"]) {
-                [toRemove addObject:key];
-            }
-        }
-        if (toRemove.count > 0) {
-            for (NSString *k in toRemove) {
-                [overridesDict removeObjectForKey:k];
-                syncPushToCloud(k, @"", NO);
-            }
-            overridesChanged = YES;
-        }
-    }
-
-    if (lyricsChanged) persistLyrics(lyricsDict);
-    if (overridesChanged) persistOverrides(overridesDict);
 }
 
 __attribute__((constructor)) static void initAntiCensor(void) {
@@ -4664,6 +4658,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     }];
 
     cleanupPoisonedLyricsDatabase();
+    preResolveAllOverridesInBackground();
     NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v4.0 (Cloud Sync + Native Context Menu + Lyrics Karaoke)...");
 
     // Инициализация аудиосессии для гарантированной поддержки Dynamic Island и экрана блокировки
