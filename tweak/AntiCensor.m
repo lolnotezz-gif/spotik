@@ -27,6 +27,7 @@
 #define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
 #define NOWPLAYING_LYRICS_CARD_TAG 0xAC999
 
+static void cleanupRogueBanners(void);
 static void setupFloatingBadge(void);
 static void checkAndInjectProfileDrawerButton(void);
 static void checkAndSyncLyricsOnScreen(void);
