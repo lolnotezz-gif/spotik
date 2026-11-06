@@ -1101,7 +1101,15 @@ static NSTimer *periodicSyncTimer = nil;
 static UIButton *floatingPillButton = nil;
 
 static double getCurrentSpotifyPreciseTime(void) {
+    if (isReplacementLoading) {
+        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        return 0.0;
+    }
     if (ourAudioPlayer && ourAudioPlayer.currentItem) {
+        if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate) {
+            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+            return 0.0;
+        }
         double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
         if (!isnan(ourPos) && ourPos >= 0) {
             return ourPos;
@@ -1549,22 +1557,186 @@ static NSString *formatTrackTime(double sec) {
     return [NSString stringWithFormat:@"%d:%02d", m, s];
 }
 
+static UIFont *getSpotifyBoldFont(CGFloat size);
+static UIFont *getSpotifyMediumFont(CGFloat size);
+static UIImage *getSpotifySystemIcon(NSString *symbolName, CGFloat pointSize, UIColor *tintColor);
+static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrText, double duration);
+
+static UIImage *getSpotifySystemIcon(NSString *symbolName, CGFloat pointSize, UIColor *tintColor) {
+    UIImage *img = nil;
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:pointSize weight:UIImageSymbolWeightBold];
+        img = [UIImage systemImageNamed:symbolName withConfiguration:cfg];
+        if (!img) {
+            img = [UIImage systemImageNamed:symbolName];
+        }
+    }
+    if (img) {
+        if (tintColor) {
+            if (@available(iOS 13.0, *)) {
+                return [img imageWithTintColor:tintColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+            } else {
+                return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+            }
+        }
+        return img;
+    }
+
+    // Vector drawing fallback using UIBezierPath
+    CGFloat s = pointSize * 1.4;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(s, s), NO, 0.0);
+    [tintColor ?: [UIColor whiteColor] setFill];
+    [tintColor ?: [UIColor whiteColor] setStroke];
+
+    if ([symbolName isEqualToString:@"play.fill"]) {
+        UIBezierPath *p = [UIBezierPath bezierPath];
+        [p moveToPoint:CGPointMake(s * 0.28, s * 0.18)];
+        [p addLineToPoint:CGPointMake(s * 0.82, s * 0.50)];
+        [p addLineToPoint:CGPointMake(s * 0.28, s * 0.82)];
+        [p closePath];
+        [p fill];
+    } else if ([symbolName isEqualToString:@"pause.fill"]) {
+        CGFloat bw = s * 0.22, bh = s * 0.64;
+        UIBezierPath *b1 = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(s * 0.20, (s - bh)/2.0, bw, bh) cornerRadius:bw/3.0];
+        UIBezierPath *b2 = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(s * 0.58, (s - bh)/2.0, bw, bh) cornerRadius:bw/3.0];
+        [b1 fill];
+        [b2 fill];
+    } else if ([symbolName isEqualToString:@"backward.end.fill"]) {
+        CGFloat barW = s * 0.12, barH = s * 0.60;
+        UIBezierPath *bar = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(s * 0.15, (s - barH)/2.0, barW, barH) cornerRadius:2.0];
+        [bar fill];
+        UIBezierPath *t1 = [UIBezierPath bezierPath];
+        [t1 moveToPoint:CGPointMake(s * 0.52, s * 0.22)];
+        [t1 addLineToPoint:CGPointMake(s * 0.27, s * 0.50)];
+        [t1 addLineToPoint:CGPointMake(s * 0.52, s * 0.78)];
+        [t1 closePath];
+        [t1 fill];
+        UIBezierPath *t2 = [UIBezierPath bezierPath];
+        [t2 moveToPoint:CGPointMake(s * 0.82, s * 0.22)];
+        [t2 addLineToPoint:CGPointMake(s * 0.57, s * 0.50)];
+        [t2 addLineToPoint:CGPointMake(s * 0.82, s * 0.78)];
+        [t2 closePath];
+        [t2 fill];
+    } else if ([symbolName isEqualToString:@"forward.end.fill"]) {
+        CGFloat barW = s * 0.12, barH = s * 0.60;
+        UIBezierPath *bar = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(s * 0.73, (s - barH)/2.0, barW, barH) cornerRadius:2.0];
+        [bar fill];
+        UIBezierPath *t1 = [UIBezierPath bezierPath];
+        [t1 moveToPoint:CGPointMake(s * 0.48, s * 0.22)];
+        [t1 addLineToPoint:CGPointMake(s * 0.73, s * 0.50)];
+        [t1 addLineToPoint:CGPointMake(s * 0.48, s * 0.78)];
+        [t1 closePath];
+        [t1 fill];
+        UIBezierPath *t2 = [UIBezierPath bezierPath];
+        [t2 moveToPoint:CGPointMake(s * 0.18, s * 0.22)];
+        [t2 addLineToPoint:CGPointMake(s * 0.43, s * 0.50)];
+        [t2 addLineToPoint:CGPointMake(s * 0.18, s * 0.78)];
+        [t2 closePath];
+        [t2 fill];
+    } else if ([symbolName isEqualToString:@"chevron.down"]) {
+        UIBezierPath *p = [UIBezierPath bezierPath];
+        p.lineWidth = 3.0;
+        p.lineCapStyle = kCGLineCapRound;
+        p.lineJoinStyle = kCGLineJoinRound;
+        [p moveToPoint:CGPointMake(s * 0.22, s * 0.38)];
+        [p addLineToPoint:CGPointMake(s * 0.50, s * 0.65)];
+        [p addLineToPoint:CGPointMake(s * 0.78, s * 0.38)];
+        [p stroke];
+    } else if ([symbolName isEqualToString:@"ellipsis"]) {
+        CGFloat r = s * 0.08;
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(s * 0.22 - r, s * 0.5 - r, r * 2, r * 2)] fill];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(s * 0.50 - r, s * 0.5 - r, r * 2, r * 2)] fill];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(s * 0.78 - r, s * 0.5 - r, r * 2, r * 2)] fill];
+    } else if ([symbolName containsString:@"heart"]) {
+        UIBezierPath *h = [UIBezierPath bezierPath];
+        [h moveToPoint:CGPointMake(s * 0.5, s * 0.8)];
+        [h addCurveToPoint:CGPointMake(s * 0.1, s * 0.4) controlPoint1:CGPointMake(s * 0.2, s * 0.65) controlPoint2:CGPointMake(s * 0.1, s * 0.55)];
+        [h addArcWithCenter:CGPointMake(s * 0.3, s * 0.35) radius:s * 0.2 startAngle:M_PI endAngle:0 clockwise:YES];
+        [h addArcWithCenter:CGPointMake(s * 0.7, s * 0.35) radius:s * 0.2 startAngle:M_PI endAngle:0 clockwise:YES];
+        [h addCurveToPoint:CGPointMake(s * 0.5, s * 0.8) controlPoint1:CGPointMake(s * 0.9, s * 0.55) controlPoint2:CGPointMake(s * 0.8, s * 0.65)];
+        [h closePath];
+        if ([symbolName containsString:@"fill"]) [h fill]; else { h.lineWidth = 2.0; [h stroke]; }
+    } else if ([symbolName isEqualToString:@"shuffle"]) {
+        UIBezierPath *p = [UIBezierPath bezierPath];
+        p.lineWidth = 2.0;
+        [p moveToPoint:CGPointMake(s * 0.2, s * 0.3)];
+        [p addLineToPoint:CGPointMake(s * 0.5, s * 0.7)];
+        [p addLineToPoint:CGPointMake(s * 0.8, s * 0.7)];
+        [p moveToPoint:CGPointMake(s * 0.2, s * 0.7)];
+        [p addLineToPoint:CGPointMake(s * 0.5, s * 0.3)];
+        [p addLineToPoint:CGPointMake(s * 0.8, s * 0.3)];
+        [p stroke];
+    } else if ([symbolName isEqualToString:@"repeat"]) {
+        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(s * 0.25, s * 0.25, s * 0.5, s * 0.5) cornerRadius:3.0];
+        p.lineWidth = 2.0;
+        [p stroke];
+    } else if ([symbolName isEqualToString:@"speaker.wave.2.fill"]) {
+        UIBezierPath *p = [UIBezierPath bezierPath];
+        [p moveToPoint:CGPointMake(s * 0.2, s * 0.4)];
+        [p addLineToPoint:CGPointMake(s * 0.4, s * 0.4)];
+        [p addLineToPoint:CGPointMake(s * 0.6, s * 0.2)];
+        [p addLineToPoint:CGPointMake(s * 0.6, s * 0.8)];
+        [p addLineToPoint:CGPointMake(s * 0.4, s * 0.6)];
+        [p addLineToPoint:CGPointMake(s * 0.2, s * 0.6)];
+        [p closePath];
+        [p fill];
+    } else if ([symbolName isEqualToString:@"square.and.arrow.up"]) {
+        UIBezierPath *b = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(s * 0.25, s * 0.45, s * 0.5, s * 0.45) cornerRadius:2.0];
+        b.lineWidth = 2.0;
+        [b stroke];
+        UIBezierPath *a = [UIBezierPath bezierPath];
+        a.lineWidth = 2.0;
+        [a moveToPoint:CGPointMake(s * 0.5, s * 0.15)];
+        [a addLineToPoint:CGPointMake(s * 0.5, s * 0.6)];
+        [a moveToPoint:CGPointMake(s * 0.35, s * 0.3)];
+        [a addLineToPoint:CGPointMake(s * 0.5, s * 0.15)];
+        [a addLineToPoint:CGPointMake(s * 0.65, s * 0.3)];
+        [a stroke];
+    } else if ([symbolName isEqualToString:@"arrow.up.left.and.arrow.down.right"]) {
+        UIBezierPath *p = [UIBezierPath bezierPath];
+        p.lineWidth = 2.0;
+        [p moveToPoint:CGPointMake(s * 0.25, s * 0.25)];
+        [p addLineToPoint:CGPointMake(s * 0.75, s * 0.75)];
+        [p moveToPoint:CGPointMake(s * 0.5, s * 0.25)];
+        [p addLineToPoint:CGPointMake(s * 0.25, s * 0.25)];
+        [p addLineToPoint:CGPointMake(s * 0.25, s * 0.5)];
+        [p moveToPoint:CGPointMake(s * 0.5, s * 0.75)];
+        [p addLineToPoint:CGPointMake(s * 0.75, s * 0.75)];
+        [p addLineToPoint:CGPointMake(s * 0.75, s * 0.5)];
+        [p stroke];
+    } else {
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(s * 0.35, s * 0.35, s * 0.3, s * 0.3)] fill];
+    }
+
+    UIImage *res = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return res;
+}
+
 @interface AntiCensorNowPlayingViewController : UIViewController <UIGestureRecognizerDelegate>
 @property (nonatomic, assign) int trackIndex;
+@property (nonatomic, strong) NSArray<AntiCensorLyricItem *> *lyricsItems;
 @property (nonatomic, strong) CAGradientLayer *gradientLayer;
 @property (nonatomic, strong) UIView *artworkShadowView;
 @property (nonatomic, strong) UIImageView *artworkImageView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *artistLabel;
+@property (nonatomic, strong) UIButton *heartButton;
 @property (nonatomic, strong) UISlider *scrubberSlider;
 @property (nonatomic, strong) UILabel *currentTimeLabel;
 @property (nonatomic, strong) UILabel *totalTimeLabel;
-@property (nonatomic, strong) UIButton *playPauseButton;
+@property (nonatomic, strong) UIButton *shuffleButton;
 @property (nonatomic, strong) UIButton *prevButton;
+@property (nonatomic, strong) UIButton *playPauseButton;
 @property (nonatomic, strong) UIButton *nextButton;
-@property (nonatomic, strong) UIButton *heartButton;
+@property (nonatomic, strong) UIButton *repeatButton;
+@property (nonatomic, strong) UIButton *devicesButton;
+@property (nonatomic, strong) UIButton *shareButton;
 @property (nonatomic, strong) UIView *lyricsCard;
-@property (nonatomic, strong) UILabel *lyricsCardLine;
+@property (nonatomic, strong) UIButton *lyricsExpandBtn;
+@property (nonatomic, strong) UILabel *lyricsCardLine1;
+@property (nonatomic, strong) UILabel *lyricsCardLine2;
+@property (nonatomic, strong) UILabel *lyricsCardLine3;
 @property (nonatomic, strong) NSTimer *uiTimer;
 @property (nonatomic, assign) BOOL isScrubbing;
 @property (nonatomic, assign) BOOL isLiked;
@@ -1589,10 +1761,10 @@ static NSString *formatTrackTime(double sec) {
 
     self.gradientLayer = [CAGradientLayer layer];
     self.gradientLayer.colors = @[
-        (id)[UIColor colorWithRed:0.18f green:0.20f blue:0.22f alpha:1.0f].CGColor,
+        (id)[UIColor colorWithRed:0.12f green:0.18f blue:0.14f alpha:1.0f].CGColor,
         (id)[UIColor colorWithRed:0.07f green:0.07f blue:0.08f alpha:1.0f].CGColor
     ];
-    self.gradientLayer.locations = @[@0.0, @0.65];
+    self.gradientLayer.locations = @[@0.0, @0.55];
     [self.view.layer insertSublayer:self.gradientLayer atIndex:0];
 
     UISwipeGestureRecognizer *swipe = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(onDismissAction:)];
@@ -1602,9 +1774,7 @@ static NSString *formatTrackTime(double sec) {
     // Top Navigation Bar
     UIButton *chevron = [UIButton buttonWithType:UIButtonTypeSystem];
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
-    [chevron setTitle:@"⌄" forState:UIControlStateNormal];
-    chevron.titleLabel.font = [UIFont systemFontOfSize:28.0 weight:UIFontWeightBold];
-    [chevron setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [chevron setImage:getSpotifySystemIcon(@"chevron.down", 20.0, [UIColor whiteColor]) forState:UIControlStateNormal];
     [chevron addTarget:self action:@selector(onDismissAction:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:chevron];
 
@@ -1625,9 +1795,7 @@ static NSString *formatTrackTime(double sec) {
 
     UIButton *menuBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     menuBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [menuBtn setTitle:@"•••" forState:UIControlStateNormal];
-    menuBtn.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
-    [menuBtn setTitleColor:[UIColor colorWithWhite:0.75 alpha:1.0] forState:UIControlStateNormal];
+    [menuBtn setImage:getSpotifySystemIcon(@"ellipsis", 20.0, [UIColor colorWithWhite:0.75 alpha:1.0]) forState:UIControlStateNormal];
     [menuBtn addTarget:self action:@selector(onMenuAction:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:menuBtn];
 
@@ -1635,38 +1803,38 @@ static NSString *formatTrackTime(double sec) {
     self.artworkShadowView = [[UIView alloc] init];
     self.artworkShadowView.translatesAutoresizingMaskIntoConstraints = NO;
     self.artworkShadowView.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.artworkShadowView.layer.shadowOpacity = 0.55f;
-    self.artworkShadowView.layer.shadowRadius = 18.0f;
+    self.artworkShadowView.layer.shadowOpacity = 0.50f;
+    self.artworkShadowView.layer.shadowRadius = 16.0f;
     self.artworkShadowView.layer.shadowOffset = CGSizeMake(0, 8);
     [self.view addSubview:self.artworkShadowView];
 
     self.artworkImageView = [[UIImageView alloc] init];
     self.artworkImageView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.artworkImageView.layer.cornerRadius = 12.0f;
+    self.artworkImageView.layer.cornerRadius = 8.0f;
     self.artworkImageView.clipsToBounds = YES;
     self.artworkImageView.contentMode = UIViewContentModeScaleAspectFill;
     self.artworkImageView.image = getAlbumArtworkImage();
     [self.artworkShadowView addSubview:self.artworkImageView];
 
-    // Track Title & Artist
+    // Title & Artist
     self.titleLabel = [[UILabel alloc] init];
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.titleLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold];
+    self.titleLabel.font = getSpotifyBoldFont(22.0);
     self.titleLabel.textColor = [UIColor whiteColor];
     self.titleLabel.text = kAlbumTitles[self.trackIndex];
+    self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.view addSubview:self.titleLabel];
 
     self.artistLabel = [[UILabel alloc] init];
     self.artistLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.artistLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightMedium];
-    self.artistLabel.textColor = [UIColor colorWithRed:0.7f green:0.7f blue:0.7f alpha:1.0f];
+    self.artistLabel.font = getSpotifyMediumFont(15.0);
+    self.artistLabel.textColor = [UIColor colorWithWhite:0.7 alpha:1.0];
     self.artistLabel.text = @"m1raOnTheBlock";
     [self.view addSubview:self.artistLabel];
 
     self.heartButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.heartButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.heartButton setTitle:@"💚" forState:UIControlStateNormal];
-    self.heartButton.titleLabel.font = [UIFont systemFontOfSize:22.0];
+    [self.heartButton setImage:getSpotifySystemIcon(@"heart.fill", 22.0, [UIColor colorWithRed:29/255.0 green:185/255.0 blue:84/255.0 alpha:1.0]) forState:UIControlStateNormal];
     [self.heartButton addTarget:self action:@selector(onHeartAction:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.heartButton];
 
@@ -1677,6 +1845,15 @@ static NSString *formatTrackTime(double sec) {
     self.scrubberSlider.maximumValue = 180.0f;
     self.scrubberSlider.minimumTrackTintColor = [UIColor whiteColor];
     self.scrubberSlider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.25f];
+
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(10, 10), NO, 0.0);
+    [[UIColor whiteColor] setFill];
+    [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, 10, 10)] fill];
+    UIImage *thumbImg = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    [self.scrubberSlider setThumbImage:thumbImg forState:UIControlStateNormal];
+    [self.scrubberSlider setThumbImage:thumbImg forState:UIControlStateHighlighted];
+
     [self.scrubberSlider addTarget:self action:@selector(onSliderDrag:) forControlEvents:UIControlEventValueChanged];
     [self.scrubberSlider addTarget:self action:@selector(onSliderEnd:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
     [self.view addSubview:self.scrubberSlider];
@@ -1696,12 +1873,15 @@ static NSString *formatTrackTime(double sec) {
     self.totalTimeLabel.textAlignment = NSTextAlignmentRight;
     [self.view addSubview:self.totalTimeLabel];
 
-    // Controls
+    // Main 5 Controls Row
+    self.shuffleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.shuffleButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.shuffleButton setImage:getSpotifySystemIcon(@"shuffle", 18.0, [UIColor colorWithWhite:0.7 alpha:1.0]) forState:UIControlStateNormal];
+    [self.view addSubview:self.shuffleButton];
+
     self.prevButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.prevButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.prevButton setTitle:@"⏮" forState:UIControlStateNormal];
-    self.prevButton.titleLabel.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightBold];
-    [self.prevButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.prevButton setImage:getSpotifySystemIcon(@"backward.end.fill", 26.0, [UIColor whiteColor]) forState:UIControlStateNormal];
     [self.prevButton addTarget:self action:@selector(onPrevTrackAction:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.prevButton];
 
@@ -1709,25 +1889,37 @@ static NSString *formatTrackTime(double sec) {
     self.playPauseButton.translatesAutoresizingMaskIntoConstraints = NO;
     self.playPauseButton.layer.cornerRadius = 32.0f;
     self.playPauseButton.backgroundColor = [UIColor whiteColor];
-    [self.playPauseButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-    self.playPauseButton.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightBold];
-    [self.playPauseButton setTitle:@"❚❚" forState:UIControlStateNormal];
+    [self.playPauseButton setImage:getSpotifySystemIcon(@"pause.fill", 24.0, [UIColor blackColor]) forState:UIControlStateNormal];
     [self.playPauseButton addTarget:self action:@selector(onPlayPauseAction:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.playPauseButton];
 
     self.nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.nextButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.nextButton setTitle:@"⏭" forState:UIControlStateNormal];
-    self.nextButton.titleLabel.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightBold];
-    [self.nextButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.nextButton setImage:getSpotifySystemIcon(@"forward.end.fill", 26.0, [UIColor whiteColor]) forState:UIControlStateNormal];
     [self.nextButton addTarget:self action:@selector(onNextTrackAction:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.nextButton];
 
-    // Lyrics Preview Card
+    self.repeatButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.repeatButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.repeatButton setImage:getSpotifySystemIcon(@"repeat", 18.0, [UIColor colorWithWhite:0.7 alpha:1.0]) forState:UIControlStateNormal];
+    [self.view addSubview:self.repeatButton];
+
+    // Secondary Toolbar (Devices & Share)
+    self.devicesButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.devicesButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.devicesButton setImage:getSpotifySystemIcon(@"speaker.wave.2.fill", 17.0, [UIColor colorWithWhite:0.7 alpha:1.0]) forState:UIControlStateNormal];
+    [self.view addSubview:self.devicesButton];
+
+    self.shareButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.shareButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.shareButton setImage:getSpotifySystemIcon(@"square.and.arrow.up", 17.0, [UIColor colorWithWhite:0.7 alpha:1.0]) forState:UIControlStateNormal];
+    [self.view addSubview:self.shareButton];
+
+    // Lyrics Preview Card (Spotify 1-in-1 Design)
     self.lyricsCard = [[UIView alloc] init];
     self.lyricsCard.translatesAutoresizingMaskIntoConstraints = NO;
-    self.lyricsCard.layer.cornerRadius = 14.0f;
-    self.lyricsCard.backgroundColor = [UIColor colorWithRed:0.16f green:0.24f blue:0.18f alpha:0.75f];
+    self.lyricsCard.layer.cornerRadius = 16.0f;
+    self.lyricsCard.backgroundColor = [UIColor colorWithRed:0.11f green:0.20f blue:0.14f alpha:0.95f];
     self.lyricsCard.clipsToBounds = YES;
     UITapGestureRecognizer *lTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onLyricsCardTapped:)];
     [self.lyricsCard addGestureRecognizer:lTap];
@@ -1735,18 +1927,42 @@ static NSString *formatTrackTime(double sec) {
 
     UILabel *lyricsTitle = [[UILabel alloc] init];
     lyricsTitle.translatesAutoresizingMaskIntoConstraints = NO;
-    lyricsTitle.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightBold];
+    lyricsTitle.font = getSpotifyBoldFont(14.0);
     lyricsTitle.textColor = [UIColor whiteColor];
-    lyricsTitle.text = @"Текст песни  ⤢";
+    lyricsTitle.text = @"Текст";
     [self.lyricsCard addSubview:lyricsTitle];
 
-    self.lyricsCardLine = [[UILabel alloc] init];
-    self.lyricsCardLine.translatesAutoresizingMaskIntoConstraints = NO;
-    self.lyricsCardLine.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
-    self.lyricsCardLine.textColor = [UIColor whiteColor];
-    self.lyricsCardLine.numberOfLines = 2;
-    self.lyricsCardLine.text = @"Нажмите, чтобы открыть караоке...";
-    [self.lyricsCard addSubview:self.lyricsCardLine];
+    self.lyricsExpandBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.lyricsExpandBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.lyricsExpandBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.15f];
+    self.lyricsExpandBtn.layer.cornerRadius = 13.0f;
+    [self.lyricsExpandBtn setImage:getSpotifySystemIcon(@"arrow.up.left.and.arrow.down.right", 11.0, [UIColor whiteColor]) forState:UIControlStateNormal];
+    [self.lyricsExpandBtn addTarget:self action:@selector(onLyricsCardTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.lyricsCard addSubview:self.lyricsExpandBtn];
+
+    self.lyricsCardLine1 = [[UILabel alloc] init];
+    self.lyricsCardLine1.translatesAutoresizingMaskIntoConstraints = NO;
+    self.lyricsCardLine1.font = getSpotifyBoldFont(18.0);
+    self.lyricsCardLine1.textColor = [UIColor whiteColor];
+    self.lyricsCardLine1.numberOfLines = 1;
+    self.lyricsCardLine1.text = @"•••";
+    [self.lyricsCard addSubview:self.lyricsCardLine1];
+
+    self.lyricsCardLine2 = [[UILabel alloc] init];
+    self.lyricsCardLine2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.lyricsCardLine2.font = getSpotifyBoldFont(16.0);
+    self.lyricsCardLine2.textColor = [UIColor colorWithWhite:1.0 alpha:0.45f];
+    self.lyricsCardLine2.numberOfLines = 1;
+    self.lyricsCardLine2.text = @"";
+    [self.lyricsCard addSubview:self.lyricsCardLine2];
+
+    self.lyricsCardLine3 = [[UILabel alloc] init];
+    self.lyricsCardLine3.translatesAutoresizingMaskIntoConstraints = NO;
+    self.lyricsCardLine3.font = getSpotifyBoldFont(15.0);
+    self.lyricsCardLine3.textColor = [UIColor colorWithWhite:1.0 alpha:0.25f];
+    self.lyricsCardLine3.numberOfLines = 1;
+    self.lyricsCardLine3.text = @"";
+    [self.lyricsCard addSubview:self.lyricsCardLine3];
 
     // AutoLayout Constraints
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
@@ -1765,7 +1981,7 @@ static NSString *formatTrackTime(double sec) {
         [menuBtn.heightAnchor constraintEqualToConstant:44],
 
         // Artwork
-        [self.artworkShadowView.topAnchor constraintEqualToAnchor:headerLbl.bottomAnchor constant:14],
+        [self.artworkShadowView.topAnchor constraintEqualToAnchor:headerLbl.bottomAnchor constant:12],
         [self.artworkShadowView.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:36],
         [self.artworkShadowView.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-36],
         [self.artworkShadowView.heightAnchor constraintEqualToAnchor:self.artworkShadowView.widthAnchor],
@@ -1776,7 +1992,7 @@ static NSString *formatTrackTime(double sec) {
         [self.artworkImageView.trailingAnchor constraintEqualToAnchor:self.artworkShadowView.trailingAnchor],
 
         // Title & Artist
-        [self.titleLabel.topAnchor constraintEqualToAnchor:self.artworkShadowView.bottomAnchor constant:16],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:self.artworkShadowView.bottomAnchor constant:14],
         [self.titleLabel.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:28],
         [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.heartButton.leadingAnchor constant:-12],
 
@@ -1790,7 +2006,7 @@ static NSString *formatTrackTime(double sec) {
         [self.heartButton.heightAnchor constraintEqualToConstant:36],
 
         // Slider
-        [self.scrubberSlider.topAnchor constraintEqualToAnchor:self.artistLabel.bottomAnchor constant:16],
+        [self.scrubberSlider.topAnchor constraintEqualToAnchor:self.artistLabel.bottomAnchor constant:12],
         [self.scrubberSlider.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:28],
         [self.scrubberSlider.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-28],
 
@@ -1801,35 +2017,68 @@ static NSString *formatTrackTime(double sec) {
         [self.totalTimeLabel.trailingAnchor constraintEqualToAnchor:self.scrubberSlider.trailingAnchor],
 
         // Controls
-        [self.playPauseButton.topAnchor constraintEqualToAnchor:self.currentTimeLabel.bottomAnchor constant:12],
+        [self.playPauseButton.topAnchor constraintEqualToAnchor:self.currentTimeLabel.bottomAnchor constant:8],
         [self.playPauseButton.centerXAnchor constraintEqualToAnchor:guide.centerXAnchor],
         [self.playPauseButton.widthAnchor constraintEqualToConstant:64],
         [self.playPauseButton.heightAnchor constraintEqualToConstant:64],
 
         [self.prevButton.centerYAnchor constraintEqualToAnchor:self.playPauseButton.centerYAnchor],
-        [self.prevButton.trailingAnchor constraintEqualToAnchor:self.playPauseButton.leadingAnchor constant:-36],
+        [self.prevButton.trailingAnchor constraintEqualToAnchor:self.playPauseButton.leadingAnchor constant:-28],
         [self.prevButton.widthAnchor constraintEqualToConstant:40],
         [self.prevButton.heightAnchor constraintEqualToConstant:40],
 
+        [self.shuffleButton.centerYAnchor constraintEqualToAnchor:self.playPauseButton.centerYAnchor],
+        [self.shuffleButton.trailingAnchor constraintEqualToAnchor:self.prevButton.leadingAnchor constant:-20],
+        [self.shuffleButton.widthAnchor constraintEqualToConstant:36],
+        [self.shuffleButton.heightAnchor constraintEqualToConstant:36],
+
         [self.nextButton.centerYAnchor constraintEqualToAnchor:self.playPauseButton.centerYAnchor],
-        [self.nextButton.leadingAnchor constraintEqualToAnchor:self.playPauseButton.trailingAnchor constant:36],
+        [self.nextButton.leadingAnchor constraintEqualToAnchor:self.playPauseButton.trailingAnchor constant:28],
         [self.nextButton.widthAnchor constraintEqualToConstant:40],
         [self.nextButton.heightAnchor constraintEqualToConstant:40],
 
+        [self.repeatButton.centerYAnchor constraintEqualToAnchor:self.playPauseButton.centerYAnchor],
+        [self.repeatButton.leadingAnchor constraintEqualToAnchor:self.nextButton.trailingAnchor constant:20],
+        [self.repeatButton.widthAnchor constraintEqualToConstant:36],
+        [self.repeatButton.heightAnchor constraintEqualToConstant:36],
+
+        // Secondary Toolbar (Devices & Share)
+        [self.devicesButton.topAnchor constraintEqualToAnchor:self.playPauseButton.bottomAnchor constant:8],
+        [self.devicesButton.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:28],
+        [self.devicesButton.widthAnchor constraintEqualToConstant:30],
+        [self.devicesButton.heightAnchor constraintEqualToConstant:30],
+
+        [self.shareButton.centerYAnchor constraintEqualToAnchor:self.devicesButton.centerYAnchor],
+        [self.shareButton.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-28],
+        [self.shareButton.widthAnchor constraintEqualToConstant:30],
+        [self.shareButton.heightAnchor constraintEqualToConstant:30],
+
         // Lyrics Card
-        [self.lyricsCard.topAnchor constraintEqualToAnchor:self.playPauseButton.bottomAnchor constant:14],
-        [self.lyricsCard.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:24],
-        [self.lyricsCard.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-24],
-        [self.lyricsCard.bottomAnchor constraintLessThanOrEqualToAnchor:guide.bottomAnchor constant:-12],
-        [self.lyricsCard.heightAnchor constraintGreaterThanOrEqualToConstant:70],
+        [self.lyricsCard.topAnchor constraintEqualToAnchor:self.devicesButton.bottomAnchor constant:8],
+        [self.lyricsCard.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:20],
+        [self.lyricsCard.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-20],
+        [self.lyricsCard.bottomAnchor constraintLessThanOrEqualToAnchor:guide.bottomAnchor constant:-8],
+        [self.lyricsCard.heightAnchor constraintGreaterThanOrEqualToConstant:95],
 
         [lyricsTitle.topAnchor constraintEqualToAnchor:self.lyricsCard.topAnchor constant:10],
         [lyricsTitle.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
 
-        [self.lyricsCardLine.topAnchor constraintEqualToAnchor:lyricsTitle.bottomAnchor constant:4],
-        [self.lyricsCardLine.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
-        [self.lyricsCardLine.trailingAnchor constraintEqualToAnchor:self.lyricsCard.trailingAnchor constant:-14],
-        [self.lyricsCardLine.bottomAnchor constraintLessThanOrEqualToAnchor:self.lyricsCard.bottomAnchor constant:-10]
+        [self.lyricsExpandBtn.centerYAnchor constraintEqualToAnchor:lyricsTitle.centerYAnchor],
+        [self.lyricsExpandBtn.trailingAnchor constraintEqualToAnchor:self.lyricsCard.trailingAnchor constant:-12],
+        [self.lyricsExpandBtn.widthAnchor constraintEqualToConstant:26],
+        [self.lyricsExpandBtn.heightAnchor constraintEqualToConstant:26],
+
+        [self.lyricsCardLine1.topAnchor constraintEqualToAnchor:lyricsTitle.bottomAnchor constant:6],
+        [self.lyricsCardLine1.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
+        [self.lyricsCardLine1.trailingAnchor constraintEqualToAnchor:self.lyricsCard.trailingAnchor constant:-14],
+
+        [self.lyricsCardLine2.topAnchor constraintEqualToAnchor:self.lyricsCardLine1.bottomAnchor constant:3],
+        [self.lyricsCardLine2.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
+        [self.lyricsCardLine2.trailingAnchor constraintEqualToAnchor:self.lyricsCard.trailingAnchor constant:-14],
+
+        [self.lyricsCardLine3.topAnchor constraintEqualToAnchor:self.lyricsCardLine2.bottomAnchor constant:3],
+        [self.lyricsCardLine3.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
+        [self.lyricsCardLine3.trailingAnchor constraintEqualToAnchor:self.lyricsCard.trailingAnchor constant:-14]
     ]];
 }
 
@@ -1881,20 +2130,61 @@ static NSString *formatTrackTime(double sec) {
         self.currentTimeLabel.text = formatTrackTime(cur);
     }
     BOOL isPlaying = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying);
-    [self.playPauseButton setTitle:(isPlaying ? @"❚❚" : @"▶") forState:UIControlStateNormal];
+    UIImage *pImg = isPlaying ? getSpotifySystemIcon(@"pause.fill", 24.0, [UIColor blackColor])
+                              : getSpotifySystemIcon(@"play.fill", 26.0, [UIColor blackColor]);
+    [self.playPauseButton setImage:pImg forState:UIControlStateNormal];
+    self.playPauseButton.imageEdgeInsets = UIEdgeInsetsMake(0, isPlaying ? 0 : 3.0, 0, 0);
 
-    if (g_currentKaraokeItems && g_currentKaraokeItems.count > 0) {
-        NSString *bestText = nil;
-        for (AntiCensorLyricItem *it in g_currentKaraokeItems) {
-            if (cur >= it.time) {
-                bestText = it.text;
-            } else {
+    if (self.lyricsItems && self.lyricsItems.count > 0) {
+        NSInteger activeIdx = -1;
+        for (NSInteger i = 0; i < (NSInteger)self.lyricsItems.count; i++) {
+            if (self.lyricsItems[i].time >= 0 && cur >= self.lyricsItems[i].time) {
+                activeIdx = i;
+            } else if (self.lyricsItems[i].time >= 0) {
                 break;
             }
         }
-        if (bestText && bestText.length > 0) {
-            self.lyricsCardLine.text = bestText;
+
+        if (activeIdx < 0) {
+            // Before vocals begin (instrumental intro)
+            self.lyricsCardLine1.text = @"•••";
+            self.lyricsCardLine1.textColor = [UIColor colorWithWhite:1.0 alpha:0.45f];
+            if (self.lyricsItems.count > 0) {
+                self.lyricsCardLine2.text = self.lyricsItems[0].text;
+                self.lyricsCardLine2.textColor = [UIColor colorWithWhite:1.0 alpha:0.35f];
+            } else {
+                self.lyricsCardLine2.text = @"";
+            }
+            if (self.lyricsItems.count > 1) {
+                self.lyricsCardLine3.text = self.lyricsItems[1].text;
+                self.lyricsCardLine3.textColor = [UIColor colorWithWhite:1.0 alpha:0.20f];
+            } else {
+                self.lyricsCardLine3.text = @"";
+            }
+        } else {
+            // Active line
+            self.lyricsCardLine1.text = self.lyricsItems[activeIdx].text;
+            self.lyricsCardLine1.textColor = [UIColor whiteColor];
+
+            if (activeIdx + 1 < (NSInteger)self.lyricsItems.count) {
+                self.lyricsCardLine2.text = self.lyricsItems[activeIdx + 1].text;
+                self.lyricsCardLine2.textColor = [UIColor colorWithWhite:1.0 alpha:0.45f];
+            } else {
+                self.lyricsCardLine2.text = @"";
+            }
+
+            if (activeIdx + 2 < (NSInteger)self.lyricsItems.count) {
+                self.lyricsCardLine3.text = self.lyricsItems[activeIdx + 2].text;
+                self.lyricsCardLine3.textColor = [UIColor colorWithWhite:1.0 alpha:0.25f];
+            } else {
+                self.lyricsCardLine3.text = @"";
+            }
         }
+    } else {
+        self.lyricsCardLine1.text = @"Нажмите, чтобы добавить текст...";
+        self.lyricsCardLine1.textColor = [UIColor colorWithWhite:1.0 alpha:0.5f];
+        self.lyricsCardLine2.text = @"";
+        self.lyricsCardLine3.text = @"";
     }
 }
 
@@ -1908,7 +2198,6 @@ static NSString *formatTrackTime(double sec) {
     self.titleLabel.text = title;
     self.scrubberSlider.value = 0.0f;
     self.currentTimeLabel.text = @"0:00";
-    self.lyricsCardLine.text = @"Загрузка текста...";
 
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
@@ -1916,6 +2205,19 @@ static NSString *formatTrackTime(double sec) {
     currentActiveSpotifyTrackTitle = title;
     currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
     currentActiveSpotifyTrackURI = uri;
+
+    // Load track lyrics into controller immediately
+    NSString *trackLyrics = getLyricsForTrack(uri, title, @"m1raOnTheBlock");
+    if (trackLyrics && trackLyrics.length > 0) {
+        self.lyricsItems = parseLyricsForTrack(trackLyrics, 180.0);
+        g_currentKaraokeItems = self.lyricsItems;
+        g_currentKaraokeTrackKey = uri ?: title;
+        g_lastActiveKaraokeIdx = -1;
+    } else {
+        self.lyricsItems = nil;
+        g_currentKaraokeItems = nil;
+        g_currentKaraokeTrackKey = nil;
+    }
 
     startReplacementAudio(title, url, 0.0);
     cleanupRogueBanners();
@@ -1931,12 +2233,18 @@ static NSString *formatTrackTime(double sec) {
 }
 
 - (void)onLyricsCardTapped:(UITapGestureRecognizer *)gesture {
-    showLyricsManagerDialog(kAlbumURIs[self.trackIndex], kAlbumTitles[self.trackIndex], @"m1raOnTheBlock", kAlbumTitles[self.trackIndex]);
+    if (self.lyricsItems && self.lyricsItems.count > 0) {
+        checkAndSyncLyricsOnScreen();
+    } else {
+        showLyricsManagerDialog(kAlbumURIs[self.trackIndex], kAlbumTitles[self.trackIndex], @"m1raOnTheBlock", kAlbumTitles[self.trackIndex]);
+    }
 }
 
 - (void)onHeartAction:(id)sender {
     self.isLiked = !self.isLiked;
-    [self.heartButton setTitle:(self.isLiked ? @"💚" : @"🤍") forState:UIControlStateNormal];
+    UIImage *hImg = self.isLiked ? getSpotifySystemIcon(@"heart.fill", 22.0, [UIColor colorWithRed:29/255.0 green:185/255.0 blue:84/255.0 alpha:1.0])
+                                 : getSpotifySystemIcon(@"heart", 22.0, [UIColor colorWithWhite:0.7 alpha:1.0]);
+    [self.heartButton setImage:hImg forState:UIControlStateNormal];
     if (@available(iOS 10.0, *)) {
         UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [fb prepare];
@@ -1955,7 +2263,10 @@ static NSString *formatTrackTime(double sec) {
         }
         updateNowPlayingCenter();
         BOOL isPlaying = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying);
-        [self.playPauseButton setTitle:(isPlaying ? @"❚❚" : @"▶") forState:UIControlStateNormal];
+        UIImage *pImg = isPlaying ? getSpotifySystemIcon(@"pause.fill", 24.0, [UIColor blackColor])
+                                  : getSpotifySystemIcon(@"play.fill", 26.0, [UIColor blackColor]);
+        [self.playPauseButton setImage:pImg forState:UIControlStateNormal];
+        self.playPauseButton.imageEdgeInsets = UIEdgeInsetsMake(0, isPlaying ? 0 : 3.0, 0, 0);
         if (@available(iOS 10.0, *)) {
             UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
             [fb prepare];
@@ -2430,7 +2741,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformIdentity;
             } else {
-                lbl.textColor = [UIColor blackColor];
+                lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.42f];
                 lbl.alpha = 1.0f;
                 lbl.transform = CGAffineTransformIdentity;
             }
@@ -2510,7 +2821,16 @@ static UIFont *getSpotifyBoldFont(CGFloat size) {
     if (!f) f = [UIFont fontWithName:@"SpotifyMixUI-Bold" size:size];
     if (!f) f = [UIFont fontWithName:@"CircularSpUI-Bold" size:size];
     if (!f) f = [UIFont fontWithName:@"CircularSp-Bold" size:size];
-    if (!f) f = [UIFont systemFontOfSize:size weight:UIFontWeightHeavy];
+    if (!f) f = [UIFont systemFontOfSize:size weight:UIFontWeightBold];
+    return f;
+}
+
+static UIFont *getSpotifyMediumFont(CGFloat size) {
+    UIFont *f = [UIFont fontWithName:@"SpotifyMix-Medium" size:size];
+    if (!f) f = [UIFont fontWithName:@"SpotifyMixUI-Medium" size:size];
+    if (!f) f = [UIFont fontWithName:@"CircularSpUI-Book" size:size];
+    if (!f) f = [UIFont fontWithName:@"CircularSp-Book" size:size];
+    if (!f) f = [UIFont systemFontOfSize:size weight:UIFontWeightMedium];
     return f;
 }
 
@@ -2520,87 +2840,84 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
 
     NSString *cleanText = [rawLrcOrText stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
     cleanText = [cleanText stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSArray<NSString *> *lines = [cleanText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+
+    // Parse [offset:+/-ms] tag
+    double offsetSec = 0.0;
+    NSRegularExpression *offsetRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\s*\\[offset:\\s*([+-]?\\d+)\\s*\\]"
+                                                                                 options:NSRegularExpressionCaseInsensitive
+                                                                                   error:nil];
+    for (NSString *line in lines) {
+        NSTextCheckingResult *m = [offsetRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+        if (m && m.numberOfRanges > 1) {
+            NSString *valStr = [line substringWithRange:[m rangeAtIndex:1]];
+            offsetSec = [valStr doubleValue] / 1000.0;
+            break;
+        }
+    }
 
     NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[(\\d{1,2}):(\\d{2})(?:\\.(\\d{1,3}))?\\]" options:0 error:nil];
-    NSArray<NSTextCheckingResult *> *matches = [tagRegex matchesInString:cleanText options:0 range:NSMakeRange(0, cleanText.length)];
+    NSRegularExpression *metaRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\s*\\[(ti|ar|al|by|offset|length|re|ve):"
+                                                                               options:NSRegularExpressionCaseInsensitive
+                                                                                 error:nil];
 
-    if (matches.count > 0) {
-        // Текст до первого тега (если есть) — относится к 0.0s (начало песни)
-        NSUInteger firstTagPos = matches[0].range.location;
-        if (firstTagPos > 0) {
-            NSString *preTag = [[cleanText substringToIndex:firstTagPos] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (preTag.length > 0) {
+    BOOL hasTimestamps = NO;
+
+    for (NSString *rawLine in lines) {
+        NSString *stripped = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (stripped.length == 0) continue;
+        if ([metaRegex firstMatchInString:stripped options:0 range:NSMakeRange(0, stripped.length)]) {
+            continue; // Skip LRC metadata headers
+        }
+
+        NSArray<NSTextCheckingResult *> *matches = [tagRegex matchesInString:stripped options:0 range:NSMakeRange(0, stripped.length)];
+        if (matches.count > 0) {
+            hasTimestamps = YES;
+            NSString *text = [tagRegex stringByReplacingMatchesInString:stripped options:0 range:NSMakeRange(0, stripped.length) withTemplate:@""];
+            text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+            for (NSTextCheckingResult *m in matches) {
+                int mins = [[stripped substringWithRange:[m rangeAtIndex:1]] intValue];
+                int secs = [[stripped substringWithRange:[m rangeAtIndex:2]] intValue];
+                double ms = 0.0;
+                if ([m rangeAtIndex:3].location != NSNotFound) {
+                    NSString *msStr = [stripped substringWithRange:[m rangeAtIndex:3]];
+                    ms = [msStr doubleValue] / pow(10.0, (double)msStr.length);
+                }
+                double t = (mins * 60.0) + secs + ms + offsetSec;
+                if (t < 0.0) t = 0.0;
+
                 AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
-                it.time = 0.0;
-                it.text = preTag;
+                it.time = t;
+                it.text = text ?: @"";
                 [items addObject:it];
             }
-        }
-
-        for (NSUInteger mIdx = 0; mIdx < matches.count; mIdx++) {
-            NSTextCheckingResult *m = matches[mIdx];
-            int mins = [[cleanText substringWithRange:[m rangeAtIndex:1]] intValue];
-            int secs = [[cleanText substringWithRange:[m rangeAtIndex:2]] intValue];
-            double ms = 0.0;
-            if ([m rangeAtIndex:3].location != NSNotFound) {
-                NSString *msStr = [cleanText substringWithRange:[m rangeAtIndex:3]];
-                ms = [msStr doubleValue] / pow(10.0, (double)msStr.length);
-            }
-            double tagTime = (mins * 60.0) + secs + ms;
-
-            NSUInteger start = NSMaxRange(m.range);
-            NSUInteger end = (mIdx + 1 < matches.count) ? matches[mIdx + 1].range.location : cleanText.length;
-            if (end > start) {
-                NSString *chunk = [cleanText substringWithRange:NSMakeRange(start, end - start)];
-                NSArray *chunkLines = [chunk componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-                for (NSString *cl in chunkLines) {
-                    NSString *trimmed = [cl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                    if (trimmed.length > 0) {
-                        AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
-                        it.time = tagTime;
-                        it.text = trimmed;
-                        [items addObject:it];
-                    }
-                }
-            }
-        }
-    } else {
-        NSArray *rawLines = [cleanText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-        for (NSString *line in rawLines) {
-            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-            if (trimmed.length > 0) {
+        } else {
+            if (!hasTimestamps) {
                 AntiCensorLyricItem *it = [[AntiCensorLyricItem alloc] init];
                 it.time = -1.0;
-                it.text = trimmed;
+                it.text = stripped;
                 [items addObject:it];
-            }
-        }
-
-        if (items.count > 0) {
-            double dur = duration > 10.0 ? duration : 180.0;
-            double intro = MIN(5.0, dur * 0.04);
-            double outro = MAX(dur - 8.0, dur * 0.94);
-            double span = MAX(10.0, outro - intro);
-            double totalChars = 0;
-            for (AntiCensorLyricItem *it in items) {
-                totalChars += MAX(10, it.text.length);
-            }
-            double accum = 0;
-            for (NSUInteger i = 0; i < items.count; i++) {
-                items[i].time = intro + (span * (accum / totalChars));
-                accum += MAX(10, items[i].text.length);
             }
         }
     }
 
+    if (hasTimestamps) {
+        [items sortUsingComparator:^NSComparisonResult(AntiCensorLyricItem *a, AntiCensorLyricItem *b) {
+            if (a.time < b.time) return NSOrderedAscending;
+            if (a.time > b.time) return NSOrderedDescending;
+            return NSOrderedSame;
+        }];
+        NSMutableArray<AntiCensorLyricItem *> *filtered = [NSMutableArray array];
+        for (AntiCensorLyricItem *it in items) {
+            if (it.text.length > 0 || it.time > 0) {
+                [filtered addObject:it];
+            }
+        }
+        items = filtered;
+    }
+
     if (items.count == 0) return nil;
-
-    [items sortUsingComparator:^NSComparisonResult(AntiCensorLyricItem *a, AntiCensorLyricItem *b) {
-        if (a.time < b.time) return NSOrderedAscending;
-        if (a.time > b.time) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
-
     return items;
 }
 
@@ -3095,7 +3412,7 @@ static void updateNowPlayingLyricsCard(UIView *win, double currentTime, NSString
         NSString *line = g_currentKaraokeItems[k].text;
         if (!line || line.length == 0) continue;
 
-        UIColor *color = (k == activeIdx) ? [UIColor whiteColor] : [UIColor blackColor];
+        UIColor *color = (k == activeIdx) ? [UIColor whiteColor] : [UIColor colorWithWhite:1.0 alpha:0.42f];
         NSDictionary *attrs = @{
             NSFontAttributeName: getSpotifyBoldFont(19.0),
             NSForegroundColorAttributeName: color,
@@ -3439,7 +3756,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                     lbl.numberOfLines = 0;
                     lbl.lineBreakMode = NSLineBreakByWordWrapping;
                     lbl.font = getSpotifyBoldFont(24.0);
-                    lbl.textColor = [UIColor blackColor];
+                    lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.42f];
                     lbl.alpha = 1.0f;
                     lbl.transform = CGAffineTransformIdentity;
                     lbl.text = it.text;
@@ -3508,7 +3825,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
                         } else {
-                            lbl.textColor = [UIColor blackColor];
+                            lbl.textColor = [UIColor colorWithWhite:1.0 alpha:0.42f];
                             lbl.alpha = 1.0f;
                             lbl.transform = CGAffineTransformIdentity;
                         }
@@ -4667,7 +4984,14 @@ static void cleanupRogueBanners(void) {
             [queue removeObjectAtIndex:0];
             if ([v isKindOfClass:[UILabel class]]) {
                 NSString *txt = [((UILabel *)v).text lowercaseString] ?: @"";
-                if ([txt containsString:@"coll. of $hit"] || [txt containsString:@"1f1ocxkj43a1qy9qqfnfux"]) {
+                if ([txt containsString:@"coll. of $hit"] ||
+                    [txt containsString:@"coll. of $hi"] ||
+                    [txt containsString:@"1f1ocxkj43a1qy9qqfnfux"] ||
+                    [txt containsString:@"one week record"] ||
+                    [txt containsString:@"needforspeed"] ||
+                    [txt containsString:@"senpa1"] ||
+                    [txt containsString:@"хулиеу"] ||
+                    [txt containsString:@"мразотик"]) {
                     s_isAlbumScreenVisible = YES;
                     break;
                 }
@@ -4699,6 +5023,9 @@ static void cleanupRogueBanners(void) {
                 NSString *acc = [btn.accessibilityLabel lowercaseString] ?: @"";
                 if (btn.bounds.size.width >= 35.0 && btn.bounds.size.height >= 35.0 &&
                     ([acc containsString:@"play"] || [acc containsString:@"воспроизведение"] || [acc containsString:@"shuffle"] || [acc containsString:@"перемешать"] || btn.tag == 0xAC777)) {
+                    btn.hidden = NO;
+                    btn.alpha = 1.0f;
+                    btn.userInteractionEnabled = YES;
                     if (btn.tag != 0xAC777) {
                         btn.tag = 0xAC777;
                         [btn addTarget:[AntiCensorCellTapHandler sharedHandler] action:@selector(handleBigPlayButtonTap:) forControlEvents:UIControlEventTouchUpInside];
