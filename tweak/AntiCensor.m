@@ -28,6 +28,9 @@
 #define NOWPLAYING_LYRICS_CARD_TAG 0xAC999
 
 static void cleanupRogueBanners(void);
+@class AntiCensorNowPlayingViewController;
+static void presentAlbumNowPlayingScreen(int trackIdx);
+
 static void setupFloatingBadge(void);
 static void checkAndInjectProfileDrawerButton(void);
 static void checkAndSyncLyricsOnScreen(void);
@@ -1479,6 +1482,485 @@ static void updateNowPlayingCenter(void) {
 @end
 
 
+
+@class AntiCensorNowPlayingViewController;
+static __weak AntiCensorNowPlayingViewController *g_activeNowPlayingVC = nil;
+static void presentAlbumNowPlayingScreen(int trackIdx);
+
+static NSString *formatTrackTime(double sec) {
+    if (isnan(sec) || sec < 0) sec = 0;
+    int m = (int)(sec / 60.0);
+    int s = (int)sec % 60;
+    return [NSString stringWithFormat:@"%d:%02d", m, s];
+}
+
+@interface AntiCensorNowPlayingViewController : UIViewController <UIGestureRecognizerDelegate>
+@property (nonatomic, assign) int trackIndex;
+@property (nonatomic, strong) CAGradientLayer *gradientLayer;
+@property (nonatomic, strong) UIView *artworkShadowView;
+@property (nonatomic, strong) UIImageView *artworkImageView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *artistLabel;
+@property (nonatomic, strong) UISlider *scrubberSlider;
+@property (nonatomic, strong) UILabel *currentTimeLabel;
+@property (nonatomic, strong) UILabel *totalTimeLabel;
+@property (nonatomic, strong) UIButton *playPauseButton;
+@property (nonatomic, strong) UIButton *prevButton;
+@property (nonatomic, strong) UIButton *nextButton;
+@property (nonatomic, strong) UIButton *heartButton;
+@property (nonatomic, strong) UIView *lyricsCard;
+@property (nonatomic, strong) UILabel *lyricsCardLine;
+@property (nonatomic, strong) NSTimer *uiTimer;
+@property (nonatomic, assign) BOOL isScrubbing;
+@property (nonatomic, assign) BOOL isLiked;
+- (instancetype)initWithAlbumTrackIndex:(int)idx;
+- (void)updateWithTrackIndex:(int)idx;
+@end
+
+@implementation AntiCensorNowPlayingViewController
+
+- (instancetype)initWithAlbumTrackIndex:(int)idx {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _trackIndex = (idx >= 0 && idx < 12) ? idx : 0;
+        _isLiked = YES;
+    }
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithRed:0.07f green:0.07f blue:0.08f alpha:1.0f];
+
+    self.gradientLayer = [CAGradientLayer layer];
+    self.gradientLayer.colors = @[
+        (id)[UIColor colorWithRed:0.18f green:0.20f blue:0.22f alpha:1.0f].CGColor,
+        (id)[UIColor colorWithRed:0.07f green:0.07f blue:0.08f alpha:1.0f].CGColor
+    ];
+    self.gradientLayer.locations = @[@0.0, @0.65];
+    [self.view.layer insertSublayer:self.gradientLayer atIndex:0];
+
+    UISwipeGestureRecognizer *swipe = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(onDismissAction:)];
+    swipe.direction = UISwipeGestureRecognizerDirectionDown;
+    [self.view addGestureRecognizer:swipe];
+
+    // Top Navigation Bar
+    UIButton *chevron = [UIButton buttonWithType:UIButtonTypeSystem];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    [chevron setTitle:@"⌄" forState:UIControlStateNormal];
+    chevron.titleLabel.font = [UIFont systemFontOfSize:28.0 weight:UIFontWeightBold];
+    [chevron setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [chevron addTarget:self action:@selector(onDismissAction:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:chevron];
+
+    UILabel *headerLbl = [[UILabel alloc] init];
+    headerLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    headerLbl.numberOfLines = 2;
+    headerLbl.textAlignment = NSTextAlignmentCenter;
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:@"ИЗ АЛЬБОМА\n" attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:10.0 weight:UIFontWeightBold],
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.65 alpha:1.0]
+    }];
+    [attr appendAttributedString:[[NSAttributedString alloc] initWithString:@"Coll. of $hiTт (vol. 0.5)" attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:12.0 weight:UIFontWeightBold],
+        NSForegroundColorAttributeName: [UIColor whiteColor]
+    }]];
+    headerLbl.attributedText = attr;
+    [self.view addSubview:headerLbl];
+
+    UIButton *menuBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    menuBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [menuBtn setTitle:@"•••" forState:UIControlStateNormal];
+    menuBtn.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
+    [menuBtn setTitleColor:[UIColor colorWithWhite:0.75 alpha:1.0] forState:UIControlStateNormal];
+    [menuBtn addTarget:self action:@selector(onMenuAction:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:menuBtn];
+
+    // Artwork Container & Image
+    self.artworkShadowView = [[UIView alloc] init];
+    self.artworkShadowView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.artworkShadowView.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.artworkShadowView.layer.shadowOpacity = 0.55f;
+    self.artworkShadowView.layer.shadowRadius = 18.0f;
+    self.artworkShadowView.layer.shadowOffset = CGSizeMake(0, 8);
+    [self.view addSubview:self.artworkShadowView];
+
+    self.artworkImageView = [[UIImageView alloc] init];
+    self.artworkImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.artworkImageView.layer.cornerRadius = 12.0f;
+    self.artworkImageView.clipsToBounds = YES;
+    self.artworkImageView.contentMode = UIViewContentModeScaleAspectFill;
+    self.artworkImageView.image = getAlbumArtworkImage();
+    [self.artworkShadowView addSubview:self.artworkImageView];
+
+    // Track Title & Artist
+    self.titleLabel = [[UILabel alloc] init];
+    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.titleLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold];
+    self.titleLabel.textColor = [UIColor whiteColor];
+    self.titleLabel.text = kAlbumTitles[self.trackIndex];
+    [self.view addSubview:self.titleLabel];
+
+    self.artistLabel = [[UILabel alloc] init];
+    self.artistLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.artistLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightMedium];
+    self.artistLabel.textColor = [UIColor colorWithRed:0.7f green:0.7f blue:0.7f alpha:1.0f];
+    self.artistLabel.text = @"m1raOnTheBlock";
+    [self.view addSubview:self.artistLabel];
+
+    self.heartButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.heartButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.heartButton setTitle:@"💚" forState:UIControlStateNormal];
+    self.heartButton.titleLabel.font = [UIFont systemFontOfSize:22.0];
+    [self.heartButton addTarget:self action:@selector(onHeartAction:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.heartButton];
+
+    // Scrubber Slider
+    self.scrubberSlider = [[UISlider alloc] init];
+    self.scrubberSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scrubberSlider.minimumValue = 0.0f;
+    self.scrubberSlider.maximumValue = 180.0f;
+    self.scrubberSlider.minimumTrackTintColor = [UIColor whiteColor];
+    self.scrubberSlider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.25f];
+    [self.scrubberSlider addTarget:self action:@selector(onSliderDrag:) forControlEvents:UIControlEventValueChanged];
+    [self.scrubberSlider addTarget:self action:@selector(onSliderEnd:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    [self.view addSubview:self.scrubberSlider];
+
+    self.currentTimeLabel = [[UILabel alloc] init];
+    self.currentTimeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.currentTimeLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
+    self.currentTimeLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+    self.currentTimeLabel.text = @"0:00";
+    [self.view addSubview:self.currentTimeLabel];
+
+    self.totalTimeLabel = [[UILabel alloc] init];
+    self.totalTimeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.totalTimeLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
+    self.totalTimeLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+    self.totalTimeLabel.text = @"3:00";
+    self.totalTimeLabel.textAlignment = NSTextAlignmentRight;
+    [self.view addSubview:self.totalTimeLabel];
+
+    // Controls
+    self.prevButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.prevButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.prevButton setTitle:@"⏮" forState:UIControlStateNormal];
+    self.prevButton.titleLabel.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightBold];
+    [self.prevButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.prevButton addTarget:self action:@selector(onPrevTrackAction:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.prevButton];
+
+    self.playPauseButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.playPauseButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.playPauseButton.layer.cornerRadius = 32.0f;
+    self.playPauseButton.backgroundColor = [UIColor whiteColor];
+    [self.playPauseButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    self.playPauseButton.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightBold];
+    [self.playPauseButton setTitle:@"❚❚" forState:UIControlStateNormal];
+    [self.playPauseButton addTarget:self action:@selector(onPlayPauseAction:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.playPauseButton];
+
+    self.nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.nextButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.nextButton setTitle:@"⏭" forState:UIControlStateNormal];
+    self.nextButton.titleLabel.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightBold];
+    [self.nextButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.nextButton addTarget:self action:@selector(onNextTrackAction:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.nextButton];
+
+    // Lyrics Preview Card
+    self.lyricsCard = [[UIView alloc] init];
+    self.lyricsCard.translatesAutoresizingMaskIntoConstraints = NO;
+    self.lyricsCard.layer.cornerRadius = 14.0f;
+    self.lyricsCard.backgroundColor = [UIColor colorWithRed:0.16f green:0.24f blue:0.18f alpha:0.75f];
+    self.lyricsCard.clipsToBounds = YES;
+    UITapGestureRecognizer *lTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onLyricsCardTapped:)];
+    [self.lyricsCard addGestureRecognizer:lTap];
+    [self.view addSubview:self.lyricsCard];
+
+    UILabel *lyricsTitle = [[UILabel alloc] init];
+    lyricsTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    lyricsTitle.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightBold];
+    lyricsTitle.textColor = [UIColor whiteColor];
+    lyricsTitle.text = @"Текст песни  ⤢";
+    [self.lyricsCard addSubview:lyricsTitle];
+
+    self.lyricsCardLine = [[UILabel alloc] init];
+    self.lyricsCardLine.translatesAutoresizingMaskIntoConstraints = NO;
+    self.lyricsCardLine.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+    self.lyricsCardLine.textColor = [UIColor whiteColor];
+    self.lyricsCardLine.numberOfLines = 2;
+    self.lyricsCardLine.text = @"Нажмите, чтобы открыть караоке...";
+    [self.lyricsCard addSubview:self.lyricsCardLine];
+
+    // AutoLayout Constraints
+    UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [chevron.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:16],
+        [chevron.topAnchor constraintEqualToAnchor:guide.topAnchor constant:4],
+        [chevron.widthAnchor constraintEqualToConstant:44],
+        [chevron.heightAnchor constraintEqualToConstant:44],
+
+        [headerLbl.centerXAnchor constraintEqualToAnchor:guide.centerXAnchor],
+        [headerLbl.centerYAnchor constraintEqualToAnchor:chevron.centerYAnchor],
+
+        [menuBtn.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-16],
+        [menuBtn.centerYAnchor constraintEqualToAnchor:chevron.centerYAnchor],
+        [menuBtn.widthAnchor constraintEqualToConstant:44],
+        [menuBtn.heightAnchor constraintEqualToConstant:44],
+
+        // Artwork
+        [self.artworkShadowView.topAnchor constraintEqualToAnchor:headerLbl.bottomAnchor constant:14],
+        [self.artworkShadowView.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:36],
+        [self.artworkShadowView.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-36],
+        [self.artworkShadowView.heightAnchor constraintEqualToAnchor:self.artworkShadowView.widthAnchor],
+
+        [self.artworkImageView.topAnchor constraintEqualToAnchor:self.artworkShadowView.topAnchor],
+        [self.artworkImageView.bottomAnchor constraintEqualToAnchor:self.artworkShadowView.bottomAnchor],
+        [self.artworkImageView.leadingAnchor constraintEqualToAnchor:self.artworkShadowView.leadingAnchor],
+        [self.artworkImageView.trailingAnchor constraintEqualToAnchor:self.artworkShadowView.trailingAnchor],
+
+        // Title & Artist
+        [self.titleLabel.topAnchor constraintEqualToAnchor:self.artworkShadowView.bottomAnchor constant:16],
+        [self.titleLabel.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:28],
+        [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.heartButton.leadingAnchor constant:-12],
+
+        [self.artistLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:3],
+        [self.artistLabel.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
+        [self.artistLabel.trailingAnchor constraintEqualToAnchor:self.titleLabel.trailingAnchor],
+
+        [self.heartButton.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-28],
+        [self.heartButton.centerYAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor],
+        [self.heartButton.widthAnchor constraintEqualToConstant:36],
+        [self.heartButton.heightAnchor constraintEqualToConstant:36],
+
+        // Slider
+        [self.scrubberSlider.topAnchor constraintEqualToAnchor:self.artistLabel.bottomAnchor constant:16],
+        [self.scrubberSlider.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:28],
+        [self.scrubberSlider.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-28],
+
+        [self.currentTimeLabel.topAnchor constraintEqualToAnchor:self.scrubberSlider.bottomAnchor constant:2],
+        [self.currentTimeLabel.leadingAnchor constraintEqualToAnchor:self.scrubberSlider.leadingAnchor],
+
+        [self.totalTimeLabel.topAnchor constraintEqualToAnchor:self.scrubberSlider.bottomAnchor constant:2],
+        [self.totalTimeLabel.trailingAnchor constraintEqualToAnchor:self.scrubberSlider.trailingAnchor],
+
+        // Controls
+        [self.playPauseButton.topAnchor constraintEqualToAnchor:self.currentTimeLabel.bottomAnchor constant:12],
+        [self.playPauseButton.centerXAnchor constraintEqualToAnchor:guide.centerXAnchor],
+        [self.playPauseButton.widthAnchor constraintEqualToConstant:64],
+        [self.playPauseButton.heightAnchor constraintEqualToConstant:64],
+
+        [self.prevButton.centerYAnchor constraintEqualToAnchor:self.playPauseButton.centerYAnchor],
+        [self.prevButton.trailingAnchor constraintEqualToAnchor:self.playPauseButton.leadingAnchor constant:-36],
+        [self.prevButton.widthAnchor constraintEqualToConstant:40],
+        [self.prevButton.heightAnchor constraintEqualToConstant:40],
+
+        [self.nextButton.centerYAnchor constraintEqualToAnchor:self.playPauseButton.centerYAnchor],
+        [self.nextButton.leadingAnchor constraintEqualToAnchor:self.playPauseButton.trailingAnchor constant:36],
+        [self.nextButton.widthAnchor constraintEqualToConstant:40],
+        [self.nextButton.heightAnchor constraintEqualToConstant:40],
+
+        // Lyrics Card
+        [self.lyricsCard.topAnchor constraintEqualToAnchor:self.playPauseButton.bottomAnchor constant:14],
+        [self.lyricsCard.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:24],
+        [self.lyricsCard.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-24],
+        [self.lyricsCard.bottomAnchor constraintLessThanOrEqualToAnchor:guide.bottomAnchor constant:-12],
+        [self.lyricsCard.heightAnchor constraintGreaterThanOrEqualToConstant:70],
+
+        [lyricsTitle.topAnchor constraintEqualToAnchor:self.lyricsCard.topAnchor constant:10],
+        [lyricsTitle.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
+
+        [self.lyricsCardLine.topAnchor constraintEqualToAnchor:lyricsTitle.bottomAnchor constant:4],
+        [self.lyricsCardLine.leadingAnchor constraintEqualToAnchor:self.lyricsCard.leadingAnchor constant:14],
+        [self.lyricsCardLine.trailingAnchor constraintEqualToAnchor:self.lyricsCard.trailingAnchor constant:-14],
+        [self.lyricsCardLine.bottomAnchor constraintLessThanOrEqualToAnchor:self.lyricsCard.bottomAnchor constant:-10]
+    ]];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.gradientLayer.frame = self.view.bounds;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    g_activeNowPlayingVC = self;
+    [self startTimer];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    if (g_activeNowPlayingVC == self) g_activeNowPlayingVC = nil;
+    [self stopTimer];
+}
+
+- (void)startTimer {
+    [self stopTimer];
+    __weak typeof(self) weakSelf = self;
+    self.uiTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull t) {
+        [weakSelf onTimerTick];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:self.uiTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopTimer {
+    if (self.uiTimer) {
+        [self.uiTimer invalidate];
+        self.uiTimer = nil;
+    }
+}
+
+- (void)onTimerTick {
+    if (!ourAudioPlayer) return;
+    if (self.isScrubbing) return;
+
+    double cur = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+    double dur = CMTimeGetSeconds(ourAudioPlayer.currentItem.duration);
+    if (!isnan(dur) && dur > 1.0) {
+        self.scrubberSlider.maximumValue = (float)dur;
+        self.totalTimeLabel.text = formatTrackTime(dur);
+    }
+    if (!isnan(cur) && cur >= 0) {
+        self.scrubberSlider.value = (float)cur;
+        self.currentTimeLabel.text = formatTrackTime(cur);
+    }
+    BOOL isPlaying = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying);
+    [self.playPauseButton setTitle:(isPlaying ? @"❚❚" : @"▶") forState:UIControlStateNormal];
+
+    if (g_currentKaraokeItems && g_currentKaraokeItems.count > 0) {
+        NSString *bestText = nil;
+        for (AntiCensorLyricItem *it in g_currentKaraokeItems) {
+            if (cur >= it.time) {
+                bestText = it.text;
+            } else {
+                break;
+            }
+        }
+        if (bestText && bestText.length > 0) {
+            self.lyricsCardLine.text = bestText;
+        }
+    }
+}
+
+- (void)updateWithTrackIndex:(int)idx {
+    if (idx < 0 || idx >= 12) return;
+    self.trackIndex = idx;
+    NSString *title = kAlbumTitles[idx];
+    NSString *url = kAlbumUrls[idx];
+    NSString *uri = kAlbumURIs[idx];
+
+    self.titleLabel.text = title;
+    self.scrubberSlider.value = 0.0f;
+    self.currentTimeLabel.text = @"0:00";
+    self.lyricsCardLine.text = @"Загрузка текста...";
+
+    isMutingSpotify = YES;
+    applyMuteStateToAllUnits();
+    isSpotifyCurrentlyPlaying = YES;
+    currentActiveSpotifyTrackTitle = title;
+    currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+    currentActiveSpotifyTrackURI = uri;
+
+    startReplacementAudio(title, url, 0.0);
+    cleanupRogueBanners();
+    updateNowPlayingCenter();
+}
+
+- (void)onDismissAction:(id)sender {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)onMenuAction:(id)sender {
+    showAntiCensorMainOptionsDialog(kAlbumURIs[self.trackIndex], kAlbumTitles[self.trackIndex], @"m1raOnTheBlock");
+}
+
+- (void)onLyricsCardTapped:(UITapGestureRecognizer *)gesture {
+    showLyricsManagerDialog(kAlbumURIs[self.trackIndex], kAlbumTitles[self.trackIndex], @"m1raOnTheBlock", kAlbumTitles[self.trackIndex]);
+}
+
+- (void)onHeartAction:(id)sender {
+    self.isLiked = !self.isLiked;
+    [self.heartButton setTitle:(self.isLiked ? @"💚" : @"🤍") forState:UIControlStateNormal];
+    if (@available(iOS 10.0, *)) {
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [fb prepare];
+        [fb impactOccurred];
+    }
+}
+
+- (void)onPlayPauseAction:(id)sender {
+    if (ourAudioPlayer) {
+        if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+            [ourAudioPlayer pause];
+            isSpotifyCurrentlyPlaying = NO;
+        } else {
+            [ourAudioPlayer play];
+            isSpotifyCurrentlyPlaying = YES;
+        }
+        updateNowPlayingCenter();
+        BOOL isPlaying = (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying);
+        [self.playPauseButton setTitle:(isPlaying ? @"❚❚" : @"▶") forState:UIControlStateNormal];
+        if (@available(iOS 10.0, *)) {
+            UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [fb prepare];
+            [fb impactOccurred];
+        }
+    }
+}
+
+- (void)onPrevTrackAction:(id)sender {
+    double cur = ourAudioPlayer ? CMTimeGetSeconds(ourAudioPlayer.currentTime) : 0;
+    if (cur > 3.0) {
+        safeSeekPlayerToTime(0.0);
+        updateNowPlayingCenter();
+        return;
+    }
+    int prevIdx = (self.trackIndex - 1 + 12) % 12;
+    [self updateWithTrackIndex:prevIdx];
+}
+
+- (void)onNextTrackAction:(id)sender {
+    int nextIdx = (self.trackIndex + 1) % 12;
+    [self updateWithTrackIndex:nextIdx];
+}
+
+- (void)onSliderDrag:(UISlider *)sender {
+    self.isScrubbing = YES;
+    self.currentTimeLabel.text = formatTrackTime(sender.value);
+}
+
+- (void)onSliderEnd:(UISlider *)sender {
+    self.isScrubbing = NO;
+    g_lastUserManualLyricsSeekTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    safeSeekPlayerToTime(sender.value);
+    updateNowPlayingCenter();
+}
+
+@end
+
+static void presentAlbumNowPlayingScreen(int trackIdx) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_activeNowPlayingVC) {
+            [g_activeNowPlayingVC updateWithTrackIndex:trackIdx];
+            return;
+        }
+
+        UIViewController *topVC = getTopViewController();
+        if (!topVC) return;
+
+        AntiCensorNowPlayingViewController *vc = [[AntiCensorNowPlayingViewController alloc] initWithAlbumTrackIndex:trackIdx];
+        if (@available(iOS 13.0, *)) {
+            vc.modalPresentationStyle = UIModalPresentationAutomatic;
+        } else {
+            vc.modalPresentationStyle = UIModalPresentationFullScreen;
+        }
+        vc.modalTransitionStyle = UIModalTransitionStyleCoverVertical;
+
+        [topVC presentViewController:vc animated:YES completion:nil];
+    });
+}
+
 @interface AntiCensorCellTapHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedHandler;
 - (void)handleCellTap:(UITapGestureRecognizer *)gesture;
@@ -1528,7 +2010,7 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
         cleanupRogueBanners();
         return;
     }
-    // Start track 1: ONE WEEK RECORD
+    // Start track 1: ONE WEEK RECORD and open the Now Playing screen!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
     isSpotifyCurrentlyPlaying = YES;
@@ -1537,6 +2019,7 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
     currentActiveSpotifyTrackURI = kAlbumURIs[0];
     startReplacementAudio(kAlbumTitles[0], kAlbumUrls[0], 0.0);
     cleanupRogueBanners();
+    presentAlbumNowPlayingScreen(0);
 }
 
 - (void)handleCellTap:(UITapGestureRecognizer *)gesture {
@@ -1587,32 +2070,22 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
 
         NSLog(@"[AntiCensor iOS] Cell tap matched album track [%d] '%@' -> %@", matchedTrackIdx + 1, matchedTitle, matchedUrl);
 
-        if (ourAudioPlayer != nil && currentPlayingUrl && [currentPlayingUrl isEqualToString:matchedUrl]) {
-            if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
-                [ourAudioPlayer pause];
-                isSpotifyCurrentlyPlaying = NO;
-                updateNowPlayingCenter();
-                cleanupRogueBanners();
-                return;
-            } else {
-                [ourAudioPlayer play];
-                isSpotifyCurrentlyPlaying = YES;
-                updateNowPlayingCenter();
-                cleanupRogueBanners();
-                return;
-            }
+        BOOL isSameTrack = (currentPlayingUrl && [currentPlayingUrl isEqualToString:matchedUrl]);
+        if (!isSameTrack || !ourAudioPlayer || ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+            isMutingSpotify = YES;
+            applyMuteStateToAllUnits();
+
+            isSpotifyCurrentlyPlaying = YES;
+            currentActiveSpotifyTrackTitle = matchedTitle;
+            currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+            currentActiveSpotifyTrackURI = matchedURI;
+
+            startReplacementAudio(matchedTitle, matchedUrl, 0.0);
+            cleanupRogueBanners();
         }
 
-        isMutingSpotify = YES;
-        applyMuteStateToAllUnits();
-
-        isSpotifyCurrentlyPlaying = YES;
-        currentActiveSpotifyTrackTitle = matchedTitle;
-        currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
-        currentActiveSpotifyTrackURI = matchedURI;
-
-        startReplacementAudio(matchedTitle, matchedUrl, 0.0);
-        cleanupRogueBanners();
+        // Открываем нативный Spotify экран трека с плавной анимацией выезда снизу вверх!
+        presentAlbumNowPlayingScreen(matchedTrackIdx);
     }
 }
 
@@ -3019,6 +3492,9 @@ static void checkAndSyncLyricsOnScreen(void) {
 }
 
 static void cleanupRogueBanners(void);
+@class AntiCensorNowPlayingViewController;
+static void presentAlbumNowPlayingScreen(int trackIdx);
+
 
 static void onPeriodicSyncCheck(NSTimer *timer) {
     // 0. Инжектим кнопку в боковое меню профиля только при его открытии
@@ -3313,16 +3789,23 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
 
     if (ourAudioPlayer) {
         if (hasElapsed && ourAudioPlayer) {
-            double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
             NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-            // Игнорируем сетевые эхо-события только в первые 2.0 сек сразу после нашего ручного поиска
-            BOOL isOurOwnEcho = (now - g_lastUserManualLyricsSeekTimestamp < 2.0);
-            if (!isOurOwnEcho && !g_isPlayerSeeking) {
-                double diff = fabs(position - ourPos);
-                // Если позиция Spotify изменилась (нажатие на строку текста Spotify или сдвиг ползунка):
-                // МГНОВЕННО перематываем наш аудиоплеер на нужный таймкод!
-                if (diff > 0.35) {
-                    safeSeekPlayerToTime(position);
+            NSTimeInterval timeSinceForeground = now - g_lastForegroundOrScreenTransitionTimestamp;
+            // КРИТИЧЕСКИЙ ФИКС ДЛЯ DYNAMIC ISLAND:
+            // Когда пользователь заходит в Спотик через Dynamic Island или экран блокировки,
+            // Spotify просыпается из фона и шлёт рассинхронизированный таймкод (~5 сек назад или вперед).
+            // Запрещаем перемотку в первые 4.0 сек после выхода из фона!
+            if (timeSinceForeground < 4.0) {
+                updateNowPlayingCenter();
+            } else {
+                double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+                BOOL isOurOwnEcho = (now - g_lastUserManualLyricsSeekTimestamp < 2.5);
+                if (!isOurOwnEcho && !g_isPlayerSeeking) {
+                    double diff = fabs(position - ourPos);
+                    // Перематываем только при реальном значительном ручном сдвиге пользователем (> 0.5s)
+                    if (diff > 0.5) {
+                        safeSeekPlayerToTime(position);
+                    }
                 }
             }
         }
@@ -4653,6 +5136,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                     currentActiveSpotifyTrackURI = nextURI;
                     startReplacementAudio(nextTitle, nextUrl, 0.0);
                     cleanupRogueBanners();
+                    if (g_activeNowPlayingVC) [g_activeNowPlayingVC updateWithTrackIndex:(int)(idx + 1)];
                 }
             }
         }
@@ -4701,6 +5185,12 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
+            if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+                [ourAudioPlayer play];
+            }
+            updateNowPlayingCenter();
+        }
     }];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
@@ -4708,6 +5198,12 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
+            if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+                [ourAudioPlayer play];
+            }
+            updateNowPlayingCenter();
+        }
     }];
 
     // ОДНОКРАТНАЯ ПОЛНАЯ ОЧИСТКА БАЗЫ ДАННЫХ ОТ СТАРЫХ МУСОРНЫХ КЛЮЧЕЙ (WIPE CORRUPTED CACHE)
@@ -4806,6 +5302,11 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     // 4.5. MPRemoteCommandCenter: перемотка (scrubbing), play/pause и навигация для Lock Screen, Dynamic Island и Control Center
     MPRemoteCommandCenter *commandCenter = [MPRemoteCommandCenter sharedCommandCenter];
     [commandCenter.changePlaybackPositionCommand setEnabled:YES];
+    // Отключаем кнопки 15-секундного пропуска в Dynamic Island, чтобы не было случайных прыжков
+    [commandCenter.skipForwardCommand setEnabled:NO];
+    [commandCenter.skipBackwardCommand setEnabled:NO];
+    [commandCenter.seekForwardCommand setEnabled:NO];
+    [commandCenter.seekBackwardCommand setEnabled:NO];
     [commandCenter.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
         if (ourAudioPlayer && [event isKindOfClass:[MPChangePlaybackPositionCommandEvent class]]) {
             MPChangePlaybackPositionCommandEvent *posEvt = (MPChangePlaybackPositionCommandEvent *)event;
@@ -4876,6 +5377,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                 currentActiveSpotifyTrackURI = nextURI;
                 startReplacementAudio(nextTitle, nextUrl, 0.0);
                 cleanupRogueBanners();
+                if (g_activeNowPlayingVC) [g_activeNowPlayingVC updateWithTrackIndex:(int)(idx + 1)];
             }
         }
         return MPRemoteCommandHandlerStatusSuccess;
@@ -4908,6 +5410,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                 currentActiveSpotifyTrackURI = prevURI;
                 startReplacementAudio(prevTitle, prevUrl, 0.0);
                 cleanupRogueBanners();
+                if (g_activeNowPlayingVC) [g_activeNowPlayingVC updateWithTrackIndex:(int)(idx - 1)];
             } else if (ourAudioPlayer) {
                 safeSeekPlayerToTime(0.0);
                 updateNowPlayingCenter();
