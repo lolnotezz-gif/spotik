@@ -345,79 +345,179 @@ static NSString *getLocalAudioDirectoryPath(void) {
 }
 
 
+static NSString *const kAlbumUrls[12] = {
+    @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+    @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+    @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+    @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+    @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+    @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+    @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+    @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+    @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+    @"https://spotik-in4b.onrender.com/audio/son.mp3",
+    @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+    @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3"
+};
+
+static NSString *const kAlbumTitles[12] = {
+    @"ONE WEEK RECORD",
+    @"NeedForSpeed",
+    @"$enpa1",
+    @"ХУЛИЁУ",
+    @"КРЫША",
+    @"ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2",
+    @"Я не виноват что... Больше",
+    @"FUCK IT",
+    @"$HAKE YOUR A$$",
+    @"МРАЗОТИК",
+    @"NOTIME",
+    @"ЧЁТНЫЙ - Bonus Track"
+};
+
+static NSString *const kAlbumURIs[12] = {
+    @"spotify:track:0bzO2aZbO7RN0tl50wsCJz",
+    @"spotify:track:0uWNvKc0B1OZsLMzlUzbpD",
+    @"spotify:track:4YsCP1lZbeMlCaUT0ONML1",
+    @"spotify:track:6DlxijdnCniTi2jRL7xfIO",
+    @"spotify:track:49Aozh4YVr0sYx0rkCmNNU",
+    @"spotify:track:22m03tWYBVctgdByCu2ohS",
+    @"spotify:track:0efigJN3XSbD3xvjDLSCYY",
+    @"spotify:track:5JsbDzwDiKjCuNGh7KE2Ja",
+    @"spotify:track:1PbTwCZ4vihqw5bZc42Suj",
+    @"spotify:track:02NrEHtVoV0QOGxsQHJ0id",
+    @"spotify:track:035FY0eysDZd9akX73iKok",
+    @"spotify:track:0qitLkJ4pa1MkHQ1sCoJh1"
+};
+
+static BOOL s_isAlbumScreenVisible = NO;
+
+static int identifyAlbumTrackIndex(NSString *text) {
+    if (!text || ![text isKindOfClass:[NSString class]] || text.length == 0) return -1;
+    NSString *clean = text.lowercaseString;
+    clean = [clean stringByReplacingOccurrencesOfString:@"ё" withString:@"е"];
+    clean = [clean stringByReplacingOccurrencesOfString:@"$" withString:@"s"];
+    clean = [clean stringByReplacingOccurrencesOfString:@"." withString:@" "];
+    clean = [clean stringByReplacingOccurrencesOfString:@"-" withString:@" "];
+    clean = [clean stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+    clean = [clean stringByReplacingOccurrencesOfString:@"•" withString:@" "];
+    clean = [clean stringByReplacingOccurrencesOfString:@"—" withString:@" "];
+
+    if ([clean containsString:@"one week"]) return 0;
+    if ([clean containsString:@"needforspeed"] || [clean containsString:@"need for speed"]) return 1;
+    if ([clean containsString:@"senpa1"] || [clean containsString:@"senpai"]) return 2;
+    if ([clean containsString:@"хулиеу"] || [clean containsString:@"хули"] || [clean containsString:@"дейти"] || [clean containsString:@"дети"]) return 3;
+    if ([clean containsString:@"крыша"] || [clean containsString:@"krysha"]) return 4;
+    if ([clean containsString:@"твари"] || [clean containsString:@"фантастические"]) return 5;
+    if ([clean containsString:@"не виноват"]) return 6;
+    if ([clean containsString:@"fuck it"] || [clean containsString:@"fuckit"]) return 7;
+    if ([clean containsString:@"shake your a"]) return 8;
+    if ([clean containsString:@"мразотик"] || [clean containsString:@"сон"] || [clean containsString:@"mrazotik"]) return 9;
+    if ([clean containsString:@"notime"] || [clean containsString:@"no time"]) return 10;
+    if ([clean containsString:@"четный"] || [clean containsString:@"bonus track"] || [clean containsString:@"эйфория"] || [clean containsString:@"eyforiya"]) return 11;
+
+    return -1;
+}
+
 static NSDictionary *getBuiltinDefaultOverrides(void) {
     static NSDictionary *builtin = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        builtin = @{
-            @"spotify:track:0bzO2aZbO7RN0tl50wsCJz": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
-            @"0bzO2aZbO7RN0tl50wsCJz": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
-            @"m1raontheblock - one week record": @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
+        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
 
-            @"spotify:track:0uWNvKc0B1OZsLMzlUzbpD": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-            @"0uWNvKc0B1OZsLMzlUzbpD": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-            @"m1raontheblock - needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-            @"m1raontheblock, vixi - needforspeed": @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
+        // 12 album tracks: IDs, URIs, full titles and aliases
+        for (int i = 0; i < 12; i++) {
+            NSString *url = kAlbumUrls[i];
+            NSString *uri = kAlbumURIs[i];
+            NSString *idStr = [uri stringByReplacingOccurrencesOfString:@"spotify:track:" withString:@""];
+            NSString *title = kAlbumTitles[i];
 
-            @"spotify:track:4YsCP1lZbeMlCaUT0ONML1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"4YsCP1lZbeMlCaUT0ONML1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"m1raontheblock - senpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"m1raontheblock - $enpa1": @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
+            dict[uri] = url;
+            dict[uri.lowercaseString] = url;
+            dict[idStr] = url;
+            dict[normalizeKey(title)] = url;
+            dict[normalizeKey([NSString stringWithFormat:@"m1raontheblock - %@", title])] = url;
+        }
 
-            @"spotify:track:6DlxijdnCniTi2jRL7xfIO": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"6DlxijdnCniTi2jRL7xfIO": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"m1raontheblock - дейти": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"m1raontheblock - хулиёу": @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
+        dict[normalizeKey(@"one week record")] = kAlbumUrls[0];
+        dict[normalizeKey(@"m1raontheblock - one week record")] = kAlbumUrls[0];
 
-            @"spotify:track:49Aozh4YVr0sYx0rkCmNNU": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-            @"49Aozh4YVr0sYx0rkCmNNU": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-            @"m1raontheblock - крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-            @"m1raontheblock, vixi - крыша": @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
+        dict[normalizeKey(@"needforspeed")] = kAlbumUrls[1];
+        dict[normalizeKey(@"m1raontheblock - needforspeed")] = kAlbumUrls[1];
+        dict[normalizeKey(@"m1raontheblock, vixi - needforspeed")] = kAlbumUrls[1];
 
-            @"spotify:track:22m03tWYBVctgdByCu2ohS": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"22m03tWYBVctgdByCu2ohS": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"m1raontheblock - фантастические твари": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"m1raontheblock - фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"m1raontheblock, vixi, wzcqq - фантастические твари - ver.2": @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
+        dict[normalizeKey(@"senpa1")] = kAlbumUrls[2];
+        dict[normalizeKey(@"$enpa1")] = kAlbumUrls[2];
+        dict[normalizeKey(@"m1raontheblock - senpa1")] = kAlbumUrls[2];
+        dict[normalizeKey(@"m1raontheblock - $enpa1")] = kAlbumUrls[2];
 
-            @"spotify:track:0efigJN3XSbD3xvjDLSCYY": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"0efigJN3XSbD3xvjDLSCYY": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"m1raontheblock - я не виноват что больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"m1raontheblock - я не виноват что... больше": @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
+        dict[normalizeKey(@"хулиёу")] = kAlbumUrls[3];
+        dict[normalizeKey(@"хулиеу")] = kAlbumUrls[3];
+        dict[normalizeKey(@"дейти")] = kAlbumUrls[3];
+        dict[normalizeKey(@"дети")] = kAlbumUrls[3];
+        dict[normalizeKey(@"m1raontheblock - хулиёу")] = kAlbumUrls[3];
+        dict[normalizeKey(@"m1raontheblock - хулиеу")] = kAlbumUrls[3];
+        dict[normalizeKey(@"m1raontheblock - дейти")] = kAlbumUrls[3];
+        dict[normalizeKey(@"m1raontheblock - дети")] = kAlbumUrls[3];
 
-            @"spotify:track:5JsbDzwDiKjCuNGh7KE2Ja": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-            @"5JsbDzwDiKjCuNGh7KE2Ja": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-            @"m1raontheblock - fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-            @"m1raontheblock, vixi - fuck it": @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
+        dict[normalizeKey(@"крыша")] = kAlbumUrls[4];
+        dict[normalizeKey(@"krysha")] = kAlbumUrls[4];
+        dict[normalizeKey(@"m1raontheblock - крыша")] = kAlbumUrls[4];
+        dict[normalizeKey(@"m1raontheblock, vixi - крыша")] = kAlbumUrls[4];
 
-            @"spotify:track:1PbTwCZ4vihqw5bZc42Suj": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"1PbTwCZ4vihqw5bZc42Suj": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"m1raontheblock - $hake your a$$": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"m1raontheblock - shake your ass": @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
+        dict[normalizeKey(@"фантастические твари")] = kAlbumUrls[5];
+        dict[normalizeKey(@"фантастические твари - ver.2")] = kAlbumUrls[5];
+        dict[normalizeKey(@"твари")] = kAlbumUrls[5];
+        dict[normalizeKey(@"m1raontheblock - фантастические твари")] = kAlbumUrls[5];
+        dict[normalizeKey(@"m1raontheblock - фантастические твари - ver.2")] = kAlbumUrls[5];
+        dict[normalizeKey(@"m1raontheblock, vixi, wzcqq - фантастические твари - ver.2")] = kAlbumUrls[5];
 
-            @"spotify:track:02NrEHtVoV0QOGxsQHJ0id": @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"02NrEHtVoV0QOGxsQHJ0id": @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"m1raontheblock - сон": @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"m1raontheblock - мразотик": @"https://spotik-in4b.onrender.com/audio/son.mp3",
+        dict[normalizeKey(@"я не виноват")] = kAlbumUrls[6];
+        dict[normalizeKey(@"я не виноват что больше")] = kAlbumUrls[6];
+        dict[normalizeKey(@"я не виноват что... больше")] = kAlbumUrls[6];
+        dict[normalizeKey(@"m1raontheblock - я не виноват")] = kAlbumUrls[6];
+        dict[normalizeKey(@"m1raontheblock - я не виноват что больше")] = kAlbumUrls[6];
+        dict[normalizeKey(@"m1raontheblock - я не виноват что... больше")] = kAlbumUrls[6];
 
-            @"spotify:track:035FY0eysDZd9akX73iKok": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
-            @"035FY0eysDZd9akX73iKok": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
-            @"m1raontheblock - notime": @"https://spotik-in4b.onrender.com/audio/notime.mp3",
+        dict[normalizeKey(@"fuck it")] = kAlbumUrls[7];
+        dict[normalizeKey(@"m1raontheblock - fuck it")] = kAlbumUrls[7];
+        dict[normalizeKey(@"m1raontheblock, vixi - fuck it")] = kAlbumUrls[7];
 
-            @"spotify:track:0qitLkJ4pa1MkHQ1sCoJh1": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"0qitLkJ4pa1MkHQ1sCoJh1": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"m1raontheblock - эйфория": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"m1raontheblock - чётный": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
-            @"m1raontheblock - чётный - bonus track": @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3",
+        dict[normalizeKey(@"shake your ass")] = kAlbumUrls[8];
+        dict[normalizeKey(@"$hake your a$$")] = kAlbumUrls[8];
+        dict[normalizeKey(@"m1raontheblock - shake your ass")] = kAlbumUrls[8];
+        dict[normalizeKey(@"m1raontheblock - $hake your a$$")] = kAlbumUrls[8];
 
-            @"spotify:track:2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
-            @"2nryvrkn55a0leqvd2eduq": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
-            @"flip phone twerk": @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt",
+        dict[normalizeKey(@"сон")] = kAlbumUrls[9];
+        dict[normalizeKey(@"мразотик")] = kAlbumUrls[9];
+        dict[normalizeKey(@"m1raontheblock - сон")] = kAlbumUrls[9];
+        dict[normalizeKey(@"m1raontheblock - мразотик")] = kAlbumUrls[9];
 
-            @"spotify:track:1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
-            @"1vqfh4jra1tfndlhuan5ne": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf",
-            @"стеклянный": @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf"
-        };
+        dict[normalizeKey(@"notime")] = kAlbumUrls[10];
+        dict[normalizeKey(@"m1raontheblock - notime")] = kAlbumUrls[10];
+
+        dict[normalizeKey(@"чётный")] = kAlbumUrls[11];
+        dict[normalizeKey(@"четный")] = kAlbumUrls[11];
+        dict[normalizeKey(@"чётный - bonus track")] = kAlbumUrls[11];
+        dict[normalizeKey(@"четный - bonus track")] = kAlbumUrls[11];
+        dict[normalizeKey(@"эйфория")] = kAlbumUrls[11];
+        dict[normalizeKey(@"эйфория - bonus track")] = kAlbumUrls[11];
+        dict[normalizeKey(@"eyforiya")] = kAlbumUrls[11];
+        dict[normalizeKey(@"m1raontheblock - чётный")] = kAlbumUrls[11];
+        dict[normalizeKey(@"m1raontheblock - четный")] = kAlbumUrls[11];
+        dict[normalizeKey(@"m1raontheblock - чётный - bonus track")] = kAlbumUrls[11];
+        dict[normalizeKey(@"m1raontheblock - четный - bonus track")] = kAlbumUrls[11];
+        dict[normalizeKey(@"m1raontheblock - эйфория")] = kAlbumUrls[11];
+        dict[normalizeKey(@"m1raontheblock - эйфория - bonus track")] = kAlbumUrls[11];
+
+        dict[@"spotify:track:2nryvrkn55a0leqvd2eduq"] = @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt";
+        dict[@"2nryvrkn55a0leqvd2eduq"] = @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt";
+        dict[normalizeKey(@"flip phone twerk")] = @"https://on.soundcloud.com/toxh9rgoOq8q9SJ5xt";
+        dict[@"spotify:track:1vqfh4jra1tfndlhuan5ne"] = @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf";
+        dict[@"1vqfh4jra1tfndlhuan5ne"] = @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf";
+        dict[normalizeKey(@"стеклянный")] = @"https://on.soundcloud.com/YiLKhavIH9btKwTbIf";
+
+        builtin = [dict copy];
     });
     return builtin;
 }
@@ -1254,17 +1354,16 @@ static BOOL isCurrentTrackFromAlbum(NSString *uri, NSString *title, NSString *ar
     if (uri && [uri containsString:@"1f1OCxkJ43A1qy9qqFNfuX"]) {
         return YES;
     }
-    NSArray *albumIds = @[
-        @"0bzO2aZbO7RN0tl50wsCJz", @"0uWNvKc0B1OZsLMzlUzbpD", @"4YsCP1lZbeMlCaUT0ONML1",
-        @"6DlxijdnCniTi2jRL7xfIO", @"49Aozh4YVr0sYx0rkCmNNU", @"22m03tWYBVctgdByCu2ohS",
-        @"0efigJN3XSbD3xvjDLSCYY", @"5JsbDzwDiKjCuNGh7KE2Ja", @"1PbTwCZ4vihqw5bZc42Suj",
-        @"02NrEHtVoV0QOGxsQHJ0id", @"035FY0eysDZd9akX73iKok", @"0qitLkJ4pa1MkHQ1sCoJh1"
-    ];
-    for (NSString *trackId in albumIds) {
-        if (uri && [uri containsString:trackId]) return YES;
+    for (int i = 0; i < 12; i++) {
+        if (uri && [uri containsString:kAlbumURIs[i]]) return YES;
+        NSString *idStr = [kAlbumURIs[i] stringByReplacingOccurrencesOfString:@"spotify:track:" withString:@""];
+        if (uri && [uri containsString:idStr]) return YES;
     }
     NSString *aLower = artist.lowercaseString ?: @"";
     if ([aLower containsString:@"m1raontheblock"]) {
+        return YES;
+    }
+    if (title && identifyAlbumTrackIndex(title) >= 0) {
         return YES;
     }
     return NO;
@@ -1343,9 +1442,10 @@ static void updateNowPlayingCenter(void) {
 @end
 
 
-@interface AntiCensorCellTapHandler : NSObject
+@interface AntiCensorCellTapHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)sharedHandler;
 - (void)handleCellTap:(UITapGestureRecognizer *)gesture;
+- (void)handleBigPlayButtonTap:(id)sender;
 @end
 
 static void unGreyAndEnableCell(UIView *cell);
@@ -1365,72 +1465,103 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
     return s;
 }
 
-- (void)handleCellTap:(UITapGestureRecognizer *)gesture {
-    UIView *cell = gesture.view;
-    if (!cell) return;
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
 
-    NSMutableArray *views = [NSMutableArray arrayWithObject:cell];
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    return YES;
+}
+
+- (void)handleBigPlayButtonTap:(id)sender {
+    NSLog(@"[AntiCensor iOS] Big Play button tapped on album page!");
+    if (ourAudioPlayer != nil && currentPlayingUrl && isCurrentTrackFromAlbum(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist, currentPlayingUrl)) {
+        if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+            [ourAudioPlayer pause];
+            isSpotifyCurrentlyPlaying = NO;
+        } else {
+            [ourAudioPlayer play];
+            isSpotifyCurrentlyPlaying = YES;
+        }
+        updateNowPlayingCenter();
+        cleanupRogueBanners();
+        return;
+    }
+    // Start track 1: ONE WEEK RECORD
+    isMutingSpotify = YES;
+    applyMuteStateToAllUnits();
+    isSpotifyCurrentlyPlaying = YES;
+    currentActiveSpotifyTrackTitle = kAlbumTitles[0];
+    currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+    currentActiveSpotifyTrackURI = kAlbumURIs[0];
+    startReplacementAudio(kAlbumTitles[0], kAlbumUrls[0], 0.0);
+    cleanupRogueBanners();
+}
+
+- (void)handleCellTap:(UITapGestureRecognizer *)gesture {
+    UIView *targetView = gesture.view;
+    if (!targetView) return;
+
+    UIView *actualCell = targetView;
+    while (actualCell && ![actualCell isKindOfClass:[UICollectionViewCell class]] && ![actualCell isKindOfClass:[UITableViewCell class]]) {
+        actualCell = actualCell.superview;
+    }
+    if (!actualCell) actualCell = targetView;
+
+    int matchedTrackIdx = -1;
+    NSMutableArray *views = [NSMutableArray arrayWithObject:actualCell];
     NSMutableArray<UILabel *> *labels = [NSMutableArray array];
     while (views.count > 0) {
         UIView *v = views.firstObject;
         [views removeObjectAtIndex:0];
         if ([v isKindOfClass:[UILabel class]]) {
-            [labels addObject:(UILabel *)v];
+            UILabel *lbl = (UILabel *)v;
+            [labels addObject:lbl];
+            if (matchedTrackIdx < 0 && lbl.text && lbl.text.length > 0) {
+                int idx = identifyAlbumTrackIndex(lbl.text);
+                if (idx >= 0) matchedTrackIdx = idx;
+            }
         }
         [views addObjectsFromArray:v.subviews];
     }
 
-    NSString *matchedTitle = nil;
-    NSString *matchedUrl = nil;
-    NSDictionary *builtins = getBuiltinDefaultOverrides();
-
-    for (UILabel *lbl in labels) {
-        NSString *txt = lbl.text;
-        if (!txt || txt.length == 0) continue;
-        NSString *clean = normalizeKey(txt);
-        if (clean.length == 0) continue;
-
-        if (builtins[clean]) {
-            matchedTitle = txt;
-            matchedUrl = builtins[clean];
-            break;
+    if (matchedTrackIdx < 0 && s_isAlbumScreenVisible) {
+        UIView *p = actualCell.superview;
+        while (p && ![p isKindOfClass:[UICollectionView class]] && ![p isKindOfClass:[UITableView class]]) {
+            p = p.superview;
         }
-        NSString *withArtist = [NSString stringWithFormat:@"m1raontheblock - %@", clean];
-        if (builtins[withArtist]) {
-            matchedTitle = txt;
-            matchedUrl = builtins[withArtist];
-            break;
+        if ([p isKindOfClass:[UICollectionView class]]) {
+            NSIndexPath *ip = [((UICollectionView *)p) indexPathForCell:(UICollectionViewCell *)actualCell];
+            if (ip && ip.item < 12) matchedTrackIdx = (int)ip.item;
+        } else if ([p isKindOfClass:[UITableView class]]) {
+            NSIndexPath *ip = [((UITableView *)p) indexPathForCell:(UITableViewCell *)actualCell];
+            if (ip && ip.row < 12) matchedTrackIdx = (int)ip.row;
         }
     }
 
-    if (!matchedUrl) {
-        for (UILabel *lbl in labels) {
-            NSString *clean = normalizeKey(lbl.text ?: @"");
-            if (clean.length < 3) continue;
-            for (NSString *k in builtins) {
-                if (k.length > 3 && ([k containsString:clean] || [clean containsString:k])) {
-                    matchedTitle = lbl.text;
-                    matchedUrl = builtins[k];
-                    break;
-                }
-            }
-            if (matchedUrl) break;
-        }
-    }
+    if (matchedTrackIdx >= 0 && matchedTrackIdx < 12) {
+        NSString *matchedTitle = kAlbumTitles[matchedTrackIdx];
+        NSString *matchedUrl = kAlbumUrls[matchedTrackIdx];
+        NSString *matchedURI = kAlbumURIs[matchedTrackIdx];
 
-    if (matchedUrl) {
-        NSLog(@"[AntiCensor iOS] Cell tap matched track '%@' -> %@", matchedTitle, matchedUrl);
+        NSLog(@"[AntiCensor iOS] Cell tap matched album track [%d] '%@' -> %@", matchedTrackIdx + 1, matchedTitle, matchedUrl);
 
-        if (ourAudioPlayer != nil && currentPlayingKey && matchedTitle && [currentPlayingKey.lowercaseString containsString:matchedTitle.lowercaseString]) {
+        if (ourAudioPlayer != nil && currentPlayingUrl && [currentPlayingUrl isEqualToString:matchedUrl]) {
             if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
                 [ourAudioPlayer pause];
                 isSpotifyCurrentlyPlaying = NO;
                 updateNowPlayingCenter();
+                cleanupRogueBanners();
                 return;
             } else {
                 [ourAudioPlayer play];
                 isSpotifyCurrentlyPlaying = YES;
                 updateNowPlayingCenter();
+                cleanupRogueBanners();
                 return;
             }
         }
@@ -1439,27 +1570,12 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
         applyMuteStateToAllUnits();
 
         isSpotifyCurrentlyPlaying = YES;
-        currentActiveSpotifyTrackTitle = matchedTitle ?: @"Track";
+        currentActiveSpotifyTrackTitle = matchedTitle;
         currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
-        currentActiveSpotifyTrackURI = [NSString stringWithFormat:@"spotify:track:%@", matchedTitle];
+        currentActiveSpotifyTrackURI = matchedURI;
 
-        MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
-        NSMutableDictionary *info = [NSMutableDictionary dictionary];
-        info[MPMediaItemPropertyTitle] = currentActiveSpotifyTrackTitle;
-        info[MPMediaItemPropertyArtist] = currentActiveSpotifyTrackArtist;
-        info[MPMediaItemPropertyAlbumTitle] = @"Coll. of $hiTт (vol. 0.5)";
-        info[MPNowPlayingInfoPropertyPlaybackRate] = @(1.0);
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(0.0);
-        info[MPMediaItemPropertyPlaybackDuration] = @(150.0);
-        g_isUpdatingNowPlaying = YES;
-        center.nowPlayingInfo = info;
-        g_isUpdatingNowPlaying = NO;
-
-        startReplacementAudio(currentActiveSpotifyTrackTitle, matchedUrl, 0.0);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            unGreyAndEnableCell(cell);
-        });
+        startReplacementAudio(matchedTitle, matchedUrl, 0.0);
+        cleanupRogueBanners();
     }
 }
 
@@ -1468,77 +1584,101 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
 static void unGreyAndEnableCell(UIView *cell) {
     if (!cell) return;
 
-    BOOL isTargetCell = NO;
-    NSString *foundTrackTitle = nil;
+    int matchedTrackIdx = -1;
+    NSString *matchedTrackTitle = nil;
 
     NSMutableArray *views = [NSMutableArray arrayWithObject:cell];
     NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+    NSMutableArray<UIView *> *allDescendants = [NSMutableArray array];
+
     while (views.count > 0) {
         UIView *v = views.firstObject;
         [views removeObjectAtIndex:0];
+        [allDescendants addObject:v];
+
         if ([v isKindOfClass:[UILabel class]]) {
             UILabel *lbl = (UILabel *)v;
             [labels addObject:lbl];
             NSString *t = lbl.text;
-            if (t && t.length > 0) {
-                NSString *lower = t.lowercaseString;
-                if ([lower containsString:@"one week record"] ||
-                    [lower containsString:@"needforspeed"] ||
-                    [lower containsString:@"senpa1"] ||
-                    [lower containsString:@"$enpa1"] ||
-                    [lower containsString:@"хулиёу"] ||
-                    [lower containsString:@"дейти"] ||
-                    ([lower isEqualToString:@"крыша"] || [lower containsString:@"крыша ("] || [lower containsString:@"крыша -"]) ||
-                    [lower containsString:@"фантастические твари"] ||
-                    [lower containsString:@"я не виноват"] ||
-                    ([lower isEqualToString:@"fuck it"] || [lower containsString:@"fuck it ("] || [lower containsString:@"fuck it -"]) ||
-                    [lower containsString:@"shake your a"] ||
-                    [lower containsString:@"мразотик"] ||
-                    ([lower isEqualToString:@"сон"] || [lower containsString:@"сон ("] || [lower containsString:@"сон -"]) ||
-                    [lower containsString:@"notime"] ||
-                    [lower containsString:@"чётный"] ||
-                    ([lower isEqualToString:@"эйфория"] || [lower containsString:@"эйфория ("] || [lower containsString:@"эйфория -"]) ||
-                    [lower containsString:@"coll. of $hit"] ||
-                    [lower containsString:@"m1raontheblock"]) {
-                    isTargetCell = YES;
-                    foundTrackTitle = t;
+            if (t && t.length > 0 && matchedTrackIdx < 0) {
+                int idx = identifyAlbumTrackIndex(t);
+                if (idx >= 0) {
+                    matchedTrackIdx = idx;
+                    matchedTrackTitle = t;
                 }
             }
         }
         [views addObjectsFromArray:v.subviews];
     }
 
-    if (isTargetCell) {
+    if (matchedTrackIdx < 0 && s_isAlbumScreenVisible) {
+        UIView *p = cell.superview;
+        while (p && ![p isKindOfClass:[UICollectionView class]] && ![p isKindOfClass:[UITableView class]]) {
+            p = p.superview;
+        }
+        if ([p isKindOfClass:[UICollectionView class]]) {
+            NSIndexPath *ip = [((UICollectionView *)p) indexPathForCell:(UICollectionViewCell *)cell];
+            if (ip && ip.item < 12) {
+                matchedTrackIdx = (int)ip.item;
+                matchedTrackTitle = kAlbumTitles[matchedTrackIdx];
+            }
+        } else if ([p isKindOfClass:[UITableView class]]) {
+            NSIndexPath *ip = [((UITableView *)p) indexPathForCell:(UITableViewCell *)cell];
+            if (ip && ip.row < 12) {
+                matchedTrackIdx = (int)ip.row;
+                matchedTrackTitle = kAlbumTitles[matchedTrackIdx];
+            }
+        }
+    }
+
+    if (matchedTrackIdx >= 0 && matchedTrackIdx < 12) {
         cell.userInteractionEnabled = YES;
         cell.alpha = 1.0f;
+        UIView *contentView = cell;
         if ([cell isKindOfClass:[UITableViewCell class]]) {
-            ((UITableViewCell *)cell).contentView.userInteractionEnabled = YES;
-            ((UITableViewCell *)cell).contentView.alpha = 1.0f;
+            contentView = ((UITableViewCell *)cell).contentView;
         } else if ([cell isKindOfClass:[UICollectionViewCell class]]) {
-            ((UICollectionViewCell *)cell).contentView.userInteractionEnabled = YES;
-            ((UICollectionViewCell *)cell).contentView.alpha = 1.0f;
+            contentView = ((UICollectionViewCell *)cell).contentView;
+        }
+        contentView.userInteractionEnabled = YES;
+        contentView.alpha = 1.0f;
+
+        for (UIView *desc in allDescendants) {
+            desc.userInteractionEnabled = YES;
+            if (desc.alpha < 0.95f) {
+                desc.alpha = 1.0f;
+            }
         }
 
         BOOL isCurrentPlayingTrack = (ourAudioPlayer != nil &&
                                       ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying &&
                                       isSpotifyCurrentlyPlaying &&
-                                      currentPlayingKey &&
-                                      foundTrackTitle &&
-                                      [currentPlayingKey.lowercaseString containsString:foundTrackTitle.lowercaseString]);
+                                      currentPlayingUrl &&
+                                      [currentPlayingUrl isEqualToString:kAlbumUrls[matchedTrackIdx]]);
 
         for (UILabel *lbl in labels) {
             lbl.alpha = 1.0f;
             lbl.hidden = NO;
-            // ONLY the actively playing track is green! When finished or switched, ALL OTHER TRACKS ARE CLEAN WHITE!
+            NSString *lText = lbl.text.lowercaseString ?: @"";
+            BOOL isSubtitle = [lText containsString:@"m1raontheblock"] || lbl.font.pointSize < 13.0;
+
             if (isCurrentPlayingTrack) {
-                lbl.textColor = [UIColor colorWithRed:0x1D/255.0 green:0xB9/255.0 blue:0x54/255.0 alpha:1.0];
+                if (isSubtitle) {
+                    lbl.textColor = [UIColor colorWithRed:0x1D/255.0 green:0xB9/255.0 blue:0x54/255.0 alpha:0.8];
+                } else {
+                    lbl.textColor = [UIColor colorWithRed:0x1D/255.0 green:0xB9/255.0 blue:0x54/255.0 alpha:1.0];
+                }
             } else {
-                lbl.textColor = [UIColor whiteColor];
+                if (isSubtitle) {
+                    lbl.textColor = [UIColor colorWithWhite:0.7 alpha:1.0];
+                } else {
+                    lbl.textColor = [UIColor whiteColor];
+                }
             }
         }
 
         BOOL hasTap = NO;
-        for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
+        for (UIGestureRecognizer *gr in contentView.gestureRecognizers) {
             if ([gr.name isEqualToString:@"AntiCensorTap"]) {
                 hasTap = YES;
                 break;
@@ -1547,8 +1687,9 @@ static void unGreyAndEnableCell(UIView *cell) {
         if (!hasTap) {
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[AntiCensorCellTapHandler sharedHandler] action:@selector(handleCellTap:)];
             tap.name = @"AntiCensorTap";
-            tap.cancelsTouchesInView = NO;
-            [cell addGestureRecognizer:tap];
+            tap.delegate = [AntiCensorCellTapHandler sharedHandler];
+            tap.cancelsTouchesInView = YES;
+            [contentView addGestureRecognizer:tap];
         }
     }
 }
@@ -3957,6 +4098,28 @@ static void cleanupRogueBanners(void) {
     BOOL hasUserLyrics = (userLyrics && userLyrics.length > 0);
 
     NSArray *windows = [UIApplication sharedApplication].windows;
+
+    // 1. Detect if the user is currently on the album screen
+    s_isAlbumScreenVisible = NO;
+    for (UIWindow *win in windows) {
+        if (!win || win.hidden) continue;
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UILabel class]]) {
+                NSString *txt = [((UILabel *)v).text lowercaseString] ?: @"";
+                if ([txt containsString:@"coll. of $hit"] || [txt containsString:@"1f1ocxkj43a1qy9qqfnfux"]) {
+                    s_isAlbumScreenVisible = YES;
+                    break;
+                }
+            }
+            [queue addObjectsFromArray:v.subviews];
+        }
+        if (s_isAlbumScreenVisible) break;
+    }
+
+    // 2. Process all views: karaoke, big play button, ungreying cells, and mini-player updates
     for (UIWindow *win in windows) {
         if (!win) continue;
         NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
@@ -3965,16 +4128,27 @@ static void cleanupRogueBanners(void) {
             [queue removeObjectAtIndex:0];
 
             if (v.tag == KARAOKE_CONTAINER_TAG) {
-                // Если пользователь НЕ отмечал этот трек кастомным текстом, или оверлей оторван от экрана — удаляем его
                 if (!hasUserLyrics || (v != g_activeKaraokeContainer && !v.window)) {
                     [v removeFromSuperview];
                     continue;
                 }
-                // Активный контейнер караоке НИ В КОЕМ СЛУЧАЕ НЕ УДАЛЯЕМ!
                 continue;
             }
 
-            // Восстанавливаем лейблы в ячейках списков на Главной и Поиске (включая contentView!), если они были скрыты
+            // Hook big play/shuffle button on album page
+            if (s_isAlbumScreenVisible && [v isKindOfClass:[UIButton class]]) {
+                UIButton *btn = (UIButton *)v;
+                NSString *acc = [btn.accessibilityLabel lowercaseString] ?: @"";
+                if (btn.bounds.size.width >= 35.0 && btn.bounds.size.height >= 35.0 &&
+                    ([acc containsString:@"play"] || [acc containsString:@"воспроизведение"] || [acc containsString:@"shuffle"] || [acc containsString:@"перемешать"] || btn.tag == 0xAC777)) {
+                    if (btn.tag != 0xAC777) {
+                        btn.tag = 0xAC777;
+                        [btn addTarget:[AntiCensorCellTapHandler sharedHandler] action:@selector(handleBigPlayButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+                    }
+                }
+            }
+
+            // Un-grey and enable cells
             if ([v isKindOfClass:[UICollectionViewCell class]] || [v isKindOfClass:[UITableViewCell class]]) {
                 unGreyAndEnableCell(v);
                 UIView *contentView = nil;
@@ -4308,14 +4482,13 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
         UIAlertController *alert = (UIAlertController *)vcToPresent;
         NSString *alertTitle = (alert.title ?: @"").lowercaseString;
         NSString *alertMsg = (alert.message ?: @"").lowercaseString;
-        if ([alertTitle containsString:@"unavailable"] || [alertTitle containsString:@"недоступен"] ||
-            [alertMsg containsString:@"unavailable"] || [alertMsg containsString:@"недоступен"] ||
-            [alertMsg containsString:@"region"] || [alertMsg containsString:@"регион"]) {
-            if (ourAudioPlayer != nil || isReplacementLoading || currentPlayingKey != nil) {
-                NSLog(@"[AntiCensor] Suppressed unavailable track alert: %@", alert.title);
-                if (completion) completion();
-                return;
-            }
+        if ([alertTitle containsString:@"unavailable"] || [alertTitle containsString:@"недоступн"] ||
+            [alertMsg containsString:@"unavailable"] || [alertMsg containsString:@"недоступн"] ||
+            [alertMsg containsString:@"region"] || [alertMsg containsString:@"регион"] ||
+            [alertTitle containsString:@"not available"] || [alertMsg containsString:@"not available"]) {
+            NSLog(@"[AntiCensor] Suppressed unavailable track alert: %@ (%@)", alert.title, alert.message);
+            if (completion) completion();
+            return;
         }
     }
 
@@ -4467,34 +4640,24 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         if (ourAudioPlayer && ourAudioPlayer.currentItem == note.object) {
             NSLog(@"[AntiCensor] Replaced track ended, checking next album track...");
-            NSArray *albumUrls = @[
-                @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
-                @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-                @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-                @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-                @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-                @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-                @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-                @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-                @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-                @"https://spotik-in4b.onrender.com/audio/son.mp3",
-                @"https://spotik-in4b.onrender.com/audio/notime.mp3",
-                @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3"
-            ];
             if (currentPlayingUrl) {
-                NSUInteger idx = [albumUrls indexOfObject:currentPlayingUrl];
-                if (idx != NSNotFound && idx < albumUrls.count - 1) {
-                    NSArray *albumTitles = @[
-                        @"ONE WEEK RECORD", @"NeedForSpeed", @"$enpa1", @"ХУЛИЁУ",
-                        @"КРЫША", @"ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2", @"Я не виноват что... Больше",
-                        @"FUCK IT", @"$HAKE YOUR A$$", @"МРАЗОТИК", @"NOTIME", @"ЧЁТНЫЙ - Bonus Track"
-                    ];
-                    NSString *nextUrl = albumUrls[idx + 1];
-                    NSString *nextTitle = (idx + 1 < albumTitles.count) ? albumTitles[idx + 1] : [NSString stringWithFormat:@"AlbumTrack_%lu", (unsigned long)(idx + 2)];
+                NSUInteger idx = NSNotFound;
+                for (NSUInteger i = 0; i < 12; i++) {
+                    if ([kAlbumUrls[i] isEqualToString:currentPlayingUrl]) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx != NSNotFound && idx < 11) {
+                    NSString *nextUrl = kAlbumUrls[idx + 1];
+                    NSString *nextTitle = kAlbumTitles[idx + 1];
+                    NSString *nextURI = kAlbumURIs[idx + 1];
                     NSLog(@"[AntiCensor] Auto-advancing to next album track: %@ (%@)", nextTitle, nextUrl);
                     currentActiveSpotifyTrackTitle = nextTitle;
                     currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+                    currentActiveSpotifyTrackURI = nextURI;
                     startReplacementAudio(nextTitle, nextUrl, 0.0);
+                    cleanupRogueBanners();
                 }
             }
         }
@@ -4700,32 +4863,23 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         if (!ourAudioPlayer || !isCurrentTrackFromAlbum(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist, currentPlayingUrl)) {
             return MPRemoteCommandHandlerStatusCommandFailed;
         }
-        NSArray *urls = @[
-            @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
-            @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-            @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-            @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-            @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"https://spotik-in4b.onrender.com/audio/notime.mp3",
-            @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3"
-        ];
-        NSArray *titles = @[
-            @"ONE WEEK RECORD", @"NeedForSpeed", @"$enpa1", @"ХУЛИЁУ",
-            @"КРЫША", @"ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2", @"Я не виноват что... Больше",
-            @"FUCK IT", @"$HAKE YOUR A$$", @"МРАЗОТИК", @"NOTIME", @"ЧЁТНЫЙ - Bonus Track"
-        ];
         if (currentPlayingUrl) {
-            NSUInteger idx = [urls indexOfObject:currentPlayingUrl];
-            if (idx != NSNotFound && idx < urls.count - 1) {
-                NSString *nextUrl = urls[idx + 1];
-                NSString *nextTitle = titles[idx + 1];
+            NSUInteger idx = NSNotFound;
+            for (NSUInteger i = 0; i < 12; i++) {
+                if ([kAlbumUrls[i] isEqualToString:currentPlayingUrl]) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx != NSNotFound && idx < 11) {
+                NSString *nextUrl = kAlbumUrls[idx + 1];
+                NSString *nextTitle = kAlbumTitles[idx + 1];
+                NSString *nextURI = kAlbumURIs[idx + 1];
                 currentActiveSpotifyTrackTitle = nextTitle;
+                currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+                currentActiveSpotifyTrackURI = nextURI;
                 startReplacementAudio(nextTitle, nextUrl, 0.0);
+                cleanupRogueBanners();
             }
         }
         return MPRemoteCommandHandlerStatusSuccess;
@@ -4741,32 +4895,23 @@ __attribute__((constructor)) static void initAntiCensor(void) {
             updateNowPlayingCenter();
             return MPRemoteCommandHandlerStatusSuccess;
         }
-        NSArray *urls = @[
-            @"https://spotik-in4b.onrender.com/audio/one_week_record.mp3",
-            @"https://spotik-in4b.onrender.com/audio/needforspeed.mp3",
-            @"https://spotik-in4b.onrender.com/audio/senpa1.mp3",
-            @"https://spotik-in4b.onrender.com/audio/deyti.mp3",
-            @"https://spotik-in4b.onrender.com/audio/krysha.mp3",
-            @"https://spotik-in4b.onrender.com/audio/tvari.mp3",
-            @"https://spotik-in4b.onrender.com/audio/ya_ne_vinovat.mp3",
-            @"https://spotik-in4b.onrender.com/audio/fuckit.mp3",
-            @"https://spotik-in4b.onrender.com/audio/shake_your_ass.mp3",
-            @"https://spotik-in4b.onrender.com/audio/son.mp3",
-            @"https://spotik-in4b.onrender.com/audio/notime.mp3",
-            @"https://spotik-in4b.onrender.com/audio/eyforiya.mp3"
-        ];
-        NSArray *titles = @[
-            @"ONE WEEK RECORD", @"NeedForSpeed", @"$enpa1", @"ХУЛИЁУ",
-            @"КРЫША", @"ФАНТАСТИЧЕСКИЕ ТВАРИ - ver.2", @"Я не виноват что... Больше",
-            @"FUCK IT", @"$HAKE YOUR A$$", @"МРАЗОТИК", @"NOTIME", @"ЧЁТНЫЙ - Bonus Track"
-        ];
         if (currentPlayingUrl) {
-            NSUInteger idx = [urls indexOfObject:currentPlayingUrl];
+            NSUInteger idx = NSNotFound;
+            for (NSUInteger i = 0; i < 12; i++) {
+                if ([kAlbumUrls[i] isEqualToString:currentPlayingUrl]) {
+                    idx = i;
+                    break;
+                }
+            }
             if (idx != NSNotFound && idx > 0) {
-                NSString *prevUrl = urls[idx - 1];
-                NSString *prevTitle = titles[idx - 1];
+                NSString *prevUrl = kAlbumUrls[idx - 1];
+                NSString *prevTitle = kAlbumTitles[idx - 1];
+                NSString *prevURI = kAlbumURIs[idx - 1];
                 currentActiveSpotifyTrackTitle = prevTitle;
+                currentActiveSpotifyTrackArtist = @"m1raOnTheBlock";
+                currentActiveSpotifyTrackURI = prevURI;
                 startReplacementAudio(prevTitle, prevUrl, 0.0);
+                cleanupRogueBanners();
             } else if (ourAudioPlayer) {
                 safeSeekPlayerToTime(0.0);
                 updateNowPlayingCenter();
