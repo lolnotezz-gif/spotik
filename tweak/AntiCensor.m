@@ -920,11 +920,11 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         loadStreamCacheFromDisk();
     }
 
-    // 1. Instant Cache check with 2-hour TTL (7200 seconds)
+    // 1. Instant Cache check with 2-hour TTL (7100 seconds)
     NSURL *cached = g_streamCache[rawUrl];
     NSNumber *cachedTs = g_streamCacheTimestamps[rawUrl];
     if (cached) {
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 7200.0)) {
+        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 7100.0)) {
             if (completion) completion(cached);
             return;
         } else {
@@ -963,23 +963,36 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         return;
     }
 
-    NSString *server = getServerURL();
-    NSString *encoded = [rawUrl stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSURL *renderFallback = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
-
-    // 4. SoundCloud API v2 Resolution (Handles on.soundcloud.com natively without extra redirect roundtrip!)
+    // SoundCloud API v2 resolver
     void (^doApiResolve)(NSString *) = ^(NSString *canonicalUrl) {
+        if (!canonicalUrl || canonicalUrl.length == 0) {
+            if (completion) completion(nil);
+            return;
+        }
         NSString *clean = [canonicalUrl componentsSeparatedByString:@"?"].firstObject;
+        clean = [clean stringByReplacingOccurrencesOfString:@"m.soundcloud.com" withString:@"soundcloud.com"];
+
+        // Check cache with clean URL
+        NSURL *cClean = g_streamCache[clean];
+        NSNumber *tsClean = g_streamCacheTimestamps[clean];
+        if (cClean && (!tsClean || ([NSDate timeIntervalSinceReferenceDate] - [tsClean doubleValue] < 7100.0))) {
+            g_streamCache[rawUrl] = cClean;
+            g_streamCacheTimestamps[rawUrl] = tsClean;
+            if (completion) completion(cClean);
+            return;
+        }
+
         NSString *endpoint = [NSString stringWithFormat:@"https://api-v2.soundcloud.com/resolve?url=%@&client_id=%@",
                               [clean stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
-        [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:2.5];
+        [req setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
+        [req setTimeoutInterval:4.0];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
-                if (completion) completion(renderFallback);
+                NSLog(@"[AntiCensor] API v2 resolve failed for %@: %@", clean, err);
+                if (completion) completion(nil);
                 return;
             }
             @try {
@@ -1005,8 +1018,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                             fullSApi = [fullSApi stringByAppendingFormat:@"&track_authorization=%@", json[@"track_authorization"]];
                         }
                         NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:fullSApi]];
-                        [req2 setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-                        [req2 setTimeoutInterval:2.5];
+                        [req2 setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
+                        [req2 setTimeoutInterval:4.0];
 
                         [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
                             if (d2 && !e2) {
@@ -1016,24 +1029,54 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                                     NSURL *fastUrl = [NSURL URLWithString:media];
                                     if (fastUrl) {
                                         g_streamCache[rawUrl] = fastUrl;
-                                        g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+                                        g_streamCache[clean] = fastUrl;
+                                        NSNumber *nowTs = @([NSDate timeIntervalSinceReferenceDate]);
+                                        g_streamCacheTimestamps[rawUrl] = nowTs;
+                                        g_streamCacheTimestamps[clean] = nowTs;
                                         saveStreamCacheToDisk();
                                     }
+                                    NSLog(@"[AntiCensor] Resolved stream URL for %@: %@", clean, fastUrl);
                                     if (completion) completion(fastUrl);
                                     return;
                                 }
                             }
-                            if (completion) completion(renderFallback);
+                            NSLog(@"[AntiCensor] Failed to fetch media url from transcoding for %@", clean);
+                            if (completion) completion(nil);
                         }] resume];
                         return;
                     }
                 }
-            } @catch (id ex) {}
-            if (completion) completion(renderFallback);
+            } @catch (id ex) {
+                NSLog(@"[AntiCensor] Exception resolving SoundCloud: %@", ex);
+            }
+            if (completion) completion(nil);
         }] resume];
     };
 
-    doApiResolve(rawUrl);
+    // 4. Follow redirect for on.soundcloud.com, t.co, bit.ly
+    if ([rawUrl containsString:@"on.soundcloud.com"] || [rawUrl containsString:@"t.co"] || [rawUrl containsString:@"bit.ly"]) {
+        NSMutableURLRequest *headReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
+        [headReq setHTTPMethod:@"HEAD"];
+        [headReq setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
+        [headReq setTimeoutInterval:3.5];
+
+        [[[NSURLSession sharedSession] dataTaskWithRequest:headReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            NSString *finalUrl = r.URL.absoluteString;
+            if (!finalUrl || [finalUrl containsString:@"on.soundcloud.com"] || finalUrl.length < 15) {
+                NSMutableURLRequest *getReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
+                [getReq setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
+                [getReq setTimeoutInterval:4.0];
+                [[[NSURLSession sharedSession] dataTaskWithRequest:getReq completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
+                    NSString *finalUrl2 = r2.URL.absoluteString ?: rawUrl;
+                    doApiResolve(finalUrl2);
+                }] resume];
+                return;
+            }
+            doApiResolve(finalUrl);
+        }] resume];
+    } else {
+        doApiResolve(rawUrl);
+    }
 }
 
 #pragma mark - AntiCensor State & Real-Time Sync Engine
@@ -3577,9 +3620,6 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     [session setActive:YES error:nil];
 
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:streamUrl];
-    if (@available(iOS 10.0, *)) {
-        item.preferredForwardBufferDuration = 0.5; // Fast buffering for instant audio start!
-    }
 
     if (!g_playerObserver) {
         g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
@@ -3598,16 +3638,13 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
     isObservingPlayerItem = YES;
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
-    if (@available(iOS 10.0, *)) {
-        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
-    }
 
     if (initialPosition > 1.0) {
         [ourAudioPlayer seekToTime:CMTimeMakeWithSeconds(initialPosition, NSEC_PER_SEC)];
     }
 
     isSpotifyCurrentlyPlaying = YES;
-    ourAudioPlayer.volume = 1.0f; // Instant full volume, no silent fade-in delay!
+    ourAudioPlayer.volume = 1.0f;
     [ourAudioPlayer play];
     updateNowPlayingCenter();
 }
@@ -3615,7 +3652,7 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
     if (!scUrl || scUrl.length == 0) return;
 
-    if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl] && (ourAudioPlayer != nil || isReplacementLoading)) {
+    if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl] && ourAudioPlayer != nil && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
         return;
     }
 
@@ -3627,18 +3664,15 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
 
-    // Быстрый кэш (0 мс задержки!)
-    if (!g_streamCache) {
-        g_streamCache = [NSMutableDictionary dictionary];
-    }
-    if (!g_streamCacheTimestamps) {
-        g_streamCacheTimestamps = [NSMutableDictionary dictionary];
+    // Быстрый кэш на 2 часа (7100 сек)
+    if (!g_streamCache || !g_streamCacheTimestamps) {
+        loadStreamCacheFromDisk();
     }
 
     NSURL *cached = g_streamCache[scUrl];
     NSNumber *cachedTs = g_streamCacheTimestamps[scUrl];
     if (cached) {
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 180.0)) {
+        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 7100.0)) {
             isReplacementLoading = NO;
             playStreamUrl(cached, trackKey, initialPosition);
             return;
@@ -3651,10 +3685,10 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     // Разрешаем в фоне
     resolveSoundCloudUrl(scUrl, ^(NSURL *streamUrl) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            isReplacementLoading = NO;
             if (![trackKey isEqualToString:currentPlayingKey]) {
                 return;
             }
-            isReplacementLoading = NO;
             if (!streamUrl) {
                 NSLog(@"[AntiCensor] Stream URL not resolved for %@. Spotify stays 100%% MUTED!", trackKey);
                 isMutingSpotify = YES;
