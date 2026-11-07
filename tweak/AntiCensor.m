@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.4.4-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110712
+#define ANTICENSOR_VERSION_STRING @"v5.5.0-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110713
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1172,7 +1172,6 @@ static UIButton *floatingPillButton = nil;
 
 static double getCurrentSpotifyPreciseTime(void) {
     if (isReplacementLoading) {
-        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
         return (lastKnownSpotifyPosition > 0.0) ? lastKnownSpotifyPosition : 0.0;
     }
     if (ourAudioPlayer && ourAudioPlayer.currentItem) {
@@ -1187,7 +1186,27 @@ static double getCurrentSpotifyPreciseTime(void) {
         }
     }
 
-    // Direct synchronization with Spotify's native player progress slider (UISlider)
+    // 1. Check system MPNowPlayingInfoCenter elapsed playback time
+    @try {
+        NSDictionary *npInfo = [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo;
+        if (npInfo) {
+            NSNumber *elapsedNum = npInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime];
+            NSNumber *rateNum = npInfo[MPNowPlayingInfoPropertyPlaybackRate];
+            if (elapsedNum && [elapsedNum doubleValue] >= 0) {
+                double elapsed = [elapsedNum doubleValue];
+                if (rateNum && [rateNum floatValue] > 0.01f) {
+                    lastKnownSpotifyPosition = elapsed;
+                    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                    return elapsed;
+                } else if (rateNum && [rateNum floatValue] <= 0.01f) {
+                    lastKnownSpotifyPosition = elapsed;
+                    return elapsed;
+                }
+            }
+        }
+    } @catch (...) {}
+
+    // 2. Direct synchronization with Spotify's scrubber slider (UISlider)
     double sliderVal = -1.0;
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *win in windows) {
@@ -1198,9 +1217,19 @@ static double getCurrentSpotifyPreciseTime(void) {
             [queue removeObjectAtIndex:0];
             if ([v isKindOfClass:[UISlider class]]) {
                 UISlider *slider = (UISlider *)v;
-                if (slider.maximumValue > 10.0 && slider.bounds.size.width > 120.0 && !slider.isTracking) {
-                    sliderVal = (double)slider.value;
-                    break;
+                NSString *cls = NSStringFromClass([slider class]);
+                if (![cls containsString:@"Volume"] && slider.bounds.size.width > 80.0 && !slider.isTracking) {
+                    float maxV = slider.maximumValue;
+                    float minV = slider.minimumValue;
+                    float val = slider.value;
+                    if (maxV > minV) {
+                        if (maxV <= 1.05f && maxV >= 0.95f) {
+                            sliderVal = (double)val * g_currentTrackDuration;
+                        } else {
+                            sliderVal = (double)val;
+                        }
+                        break;
+                    }
                 }
             }
             [queue addObjectsFromArray:v.subviews];
@@ -1217,6 +1246,7 @@ static double getCurrentSpotifyPreciseTime(void) {
     if (!isSpotifyCurrentlyPlaying) {
         return lastKnownSpotifyPosition;
     }
+
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     NSTimeInterval delta = now - lastSpotifyPositionTimestamp;
     if (delta > 0 && delta < 600) {
@@ -1335,7 +1365,7 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         }
     });
 
-    [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
+    [ourAudioPlayer seekToTime:seekTime completionHandler:^(BOOL finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             g_isPlayerSeeking = NO;
             lastKnownSpotifyPosition = toSeek;
@@ -1648,6 +1678,8 @@ static __weak UIView *g_activeKaraokeContainer = nil;
 static NSArray<AntiCensorLyricItem *> *g_currentKaraokeItems = nil;
 static NSMutableArray<UILabel *> *g_currentKaraokeLabels = nil;
 static NSString *g_currentKaraokeTrackKey = nil;
+            g_activeInjectedLyricsTrackKey = nil;
+static NSString *g_activeInjectedLyricsTrackKey = nil;
 static NSInteger g_lastActiveKaraokeIdx = -1;
 
 static double g_currentTrackDuration = 180.0;
@@ -3867,7 +3899,8 @@ static void checkAndSyncLyricsOnScreen(void) {
             }
         }
 
-        if (!existingContainer || ![trackKey isEqualToString:g_currentKaraokeTrackKey]) {
+        if (!existingContainer || !g_currentKaraokeLabels || g_currentKaraokeLabels.count == 0 || ![trackKey isEqualToString:g_activeInjectedLyricsTrackKey]) {
+            g_activeInjectedLyricsTrackKey = trackKey;
             hideUnsyncedLyricsIndicator(win);
 
             if (g_currentKaraokeItems && g_currentKaraokeItems.count > 0) {
@@ -3992,7 +4025,7 @@ static void checkAndSyncLyricsOnScreen(void) {
                 BOOL userRecentlyInteracted = (now - g_lastUserLyricsInteractionTime < 4.5);
 
                 // Плавное следование скролла за активной строкой (только один раз при смене строки)
-                if (!userRecentlyInteracted && !activeScroll.isDragging && !activeScroll.isDecelerating
+                if (!activeScroll.isDragging && !activeScroll.isDecelerating
                     && activeIdx >= 0 && activeIdx < (NSInteger)g_currentKaraokeLabels.count) {
                     UILabel *actLbl = g_currentKaraokeLabels[activeIdx];
                     CGFloat targetY = actLbl.frame.origin.y - (activeScroll.bounds.size.height * 0.28);
@@ -4262,6 +4295,14 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     if (hasElapsed) {
         lastKnownSpotifyPosition = position;
         lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        // If user scrubbed in Spotify and ourAudioPlayer is active: SEEK ourAudioPlayer!
+        if (ourAudioPlayer && ourAudioPlayer.currentItem) {
+            double currentOurTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+            if (isnan(currentOurTime)) currentOurTime = 0.0;
+            if (fabs(position - currentOurTime) > 1.5 && !g_isPlayerSeeking) {
+                safeSeekPlayerToTime(position);
+            }
+        }
     }
     if (hasRate) {
         isSpotifyCurrentlyPlaying = isPlaying;
@@ -5786,7 +5827,47 @@ static void cleanupPoisonedLyricsDatabase(void) {
     }
 }
 
+
+// Hook UISlider endTrackingWithTouch:withEvent: so dragging Spotify's scrubber IMMEDIATELY rewinds our player
+static void (*orig_UISlider_endTrackingWithTouch_withEvent)(id, SEL, UITouch *, UIEvent *) = NULL;
+static void custom_UISlider_endTrackingWithTouch_withEvent(UISlider *self, SEL _cmd, UITouch *touch, UIEvent *event) {
+    if (orig_UISlider_endTrackingWithTouch_withEvent) {
+        orig_UISlider_endTrackingWithTouch_withEvent(self, _cmd, touch, event);
+    }
+    NSString *cls = NSStringFromClass([self class]);
+    if (![cls containsString:@"Volume"] && self.bounds.size.width > 80.0) {
+        float maxV = self.maximumValue;
+        float minV = self.minimumValue;
+        float val = self.value;
+        double targetSec = 0.0;
+        if (maxV > minV) {
+            if (maxV <= 1.05f && maxV >= 0.95f) {
+                targetSec = (double)val * g_currentTrackDuration;
+            } else {
+                targetSec = (double)val;
+            }
+            if (targetSec >= 0) {
+                lastKnownSpotifyPosition = targetSec;
+                lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                if (ourAudioPlayer) {
+                    safeSeekPlayerToTime(targetSec);
+                }
+                checkAndSyncLyricsOnScreen();
+            }
+        }
+    }
+}
+
 __attribute__((constructor)) static void initAntiCensor(void) {
+    Class sliderClass = [UISlider class];
+    if (sliderClass) {
+        Method mEnd = class_getInstanceMethod(sliderClass, @selector(endTrackingWithTouch:withEvent:));
+        if (mEnd) {
+            orig_UISlider_endTrackingWithTouch_withEvent = (void *)method_getImplementation(mEnd);
+            method_setImplementation(mEnd, (IMP)custom_UISlider_endTrackingWithTouch_withEvent);
+        }
+    }
+
     // --- 0. OTA DYNAMIC DYLIB LOADER ---
     if (getenv("ANTICENSOR_RUNNING_OTA") != NULL) {
         NSLog(@"[AntiCensor] Running from OTA updated dylib (%@, build %ld).", ANTICENSOR_VERSION_STRING, (long)ANTICENSOR_BUILD_NUMBER);
