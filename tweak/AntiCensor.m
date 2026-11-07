@@ -1162,6 +1162,8 @@ static NSString *currentActiveSpotifyTrackURI = nil;
 static NSString *currentActiveSpotifyTrackTitle = nil;
 static NSString *currentActiveSpotifyTrackArtist = nil;
 
+static double g_currentTrackDuration = 180.0;
+static NSString *g_activeInjectedLyricsTrackKey = nil;
 static double lastKnownSpotifyPosition = 0.0;
 static NSTimeInterval lastSpotifyPositionTimestamp = 0.0;
 static BOOL isSpotifyCurrentlyPlaying = NO;
@@ -1678,11 +1680,7 @@ static __weak UIView *g_activeKaraokeContainer = nil;
 static NSArray<AntiCensorLyricItem *> *g_currentKaraokeItems = nil;
 static NSMutableArray<UILabel *> *g_currentKaraokeLabels = nil;
 static NSString *g_currentKaraokeTrackKey = nil;
-            g_activeInjectedLyricsTrackKey = nil;
-static NSString *g_activeInjectedLyricsTrackKey = nil;
 static NSInteger g_lastActiveKaraokeIdx = -1;
-
-static double g_currentTrackDuration = 180.0;
 static NSTimeInterval g_lastUserLyricsInteractionTime = 0;
 static NSTimeInterval g_lastUserManualLyricsSeekTimestamp = 0;
 
