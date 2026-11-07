@@ -29,8 +29,23 @@ in_progress_lock = threading.Lock()
 in_progress_urls = set()
 
 def get_target_path(clean_url):
-    slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:]
-    return os.path.join(CACHE_DIR, f"{slug}.mp3")
+    slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
+    return os.path.join(AUDIO_DIR, f"sc_{slug}.mp3")
+
+def auto_cache_sc_track(track_key, sc_url):
+    try:
+        mp3_path = resolve_sc_to_file(sc_url)
+        if mp3_path and os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 30000:
+            filename = os.path.basename(mp3_path)
+            cloud_url = f"https://spotik-in4b.onrender.com/audio/{filename}"
+            with sync_lock:
+                db = load_sync_db()
+                db["overrides"][track_key] = cloud_url
+                db["updated_at"] = time.time()
+                save_sync_db(db)
+            print(f"[AntiCensor] Auto-cached {track_key} -> {cloud_url}")
+    except Exception as e:
+        print(f"[AntiCensor] Auto-cache error for {track_key}: {e}")
 
 def resolve_kugou_to_file(song_hash):
     clean_h = re.sub(r'[^a-zA-Z0-9]', '', song_hash).lower()
@@ -71,9 +86,13 @@ def resolve_sc_to_file(raw_url):
 
     clean_url = url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
     target_mp3 = get_target_path(clean_url)
+    slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
+    legacy_mp3 = os.path.join(CACHE_DIR, f"{slug}.mp3")
 
-    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 50000:
+    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 30000:
         return target_mp3
+    if os.path.exists(legacy_mp3) and os.path.getsize(legacy_mp3) > 30000:
+        return legacy_mp3
 
     with in_progress_lock:
         if clean_url not in in_progress_urls:
@@ -422,10 +441,14 @@ class AudioHandler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(body)
                 db = load_sync_db()
+                tracks_to_cache = []
                 if "overrides" in payload and isinstance(payload["overrides"], dict):
                     for k, v in payload["overrides"].items():
                         if v and len(str(v).strip()) > 0:
-                            db["overrides"][k] = v
+                            v_str = str(v).strip()
+                            db["overrides"][k] = v_str
+                            if ("soundcloud.com" in v_str or "on.soundcloud.com" in v_str) and not v_str.endswith(".mp3"):
+                                tracks_to_cache.append((k, v_str))
                         elif k in db["overrides"]:
                             del db["overrides"][k]
                 if "lyrics" in payload and isinstance(payload["lyrics"], dict):
@@ -436,13 +459,40 @@ class AudioHandler(BaseHTTPRequestHandler):
                             del db["lyrics"][k]
                 db["updated_at"] = time.time()
                 save_sync_db(db)
+                for t_k, t_u in tracks_to_cache:
+                    threading.Thread(target=auto_cache_sc_track, args=(t_k, t_u), daemon=True).start()
                 self.send_response(200)
                 self.send_cors()
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                if not is_head:
-                    self.wfile.write(json.dumps(db).encode('utf-8'))
+                self.wfile.write(json.dumps(db).encode('utf-8'))
                 return
+            except Exception as e:
+                self.send_response(400)
+                self.send_cors()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                return
+
+        if parsed.path == '/api/add_track':
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                payload = json.loads(body) if body else {}
+                key = payload.get("key")
+                url = payload.get("url")
+                if key and url:
+                    threading.Thread(target=auto_cache_sc_track, args=(key, url), daemon=True).start()
+                    clean_url = url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
+                    slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
+                    predicted_cloud = f"https://spotik-in4b.onrender.com/audio/sc_{slug}.mp3"
+                    self.send_response(200)
+                    self.send_cors()
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "caching_started", "cloud_url": predicted_cloud}).encode('utf-8'))
+                    return
             except Exception as e:
                 self.send_response(400)
                 self.send_cors()
@@ -493,6 +543,21 @@ class AudioHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if not is_head:
                 self.wfile.write(b'{"status":"started"}')
+            return
+
+        if parsed.path == '/api/add_track' and 'url' in params and 'key' in params:
+            key = params['key'][0]
+            sc_url = params['url'][0]
+            threading.Thread(target=auto_cache_sc_track, args=(key, sc_url), daemon=True).start()
+            clean_url = sc_url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
+            slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
+            predicted_cloud = f"https://spotik-in4b.onrender.com/audio/sc_{slug}.mp3"
+            self.send_response(200)
+            self.send_cors()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            if not is_head:
+                self.wfile.write(json.dumps({"status": "caching_started", "cloud_url": predicted_cloud}).encode('utf-8'))
             return
 
         if parsed.path == '/status' and 'url' in params:
@@ -587,5 +652,12 @@ def _keepalive_pinger():
 if __name__ == '__main__':
     server = ThreadedHTTPServer(('0.0.0.0', PORT), AudioHandler)
     print(f"[AntiCensor] Cloud Bridge listening on 0.0.0.0:{PORT}")
+    def _precache_defaults():
+        time.sleep(3)
+        db = load_sync_db()
+        for k, v in list(db.get("overrides", {}).items()):
+            if ("soundcloud.com" in v or "on.soundcloud.com" in v) and not v.endswith(".mp3"):
+                auto_cache_sc_track(k, v)
+    threading.Thread(target=_precache_defaults, daemon=True).start()
     threading.Thread(target=_keepalive_pinger, daemon=True).start()
     server.serve_forever()

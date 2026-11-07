@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.2-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110715
+#define ANTICENSOR_VERSION_STRING @"v5.5.3-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110716
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1001,6 +1001,24 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         }
     }
 
+    // Fast-path: SoundCloud напрямую через Render (минуя блокировки РКН на телефоне и без таймаутов)
+    if ([rawUrl containsString:@"soundcloud.com"] || [rawUrl containsString:@"on.soundcloud.com"]) {
+        NSString *server = getServerURL();
+        NSString *clean = [rawUrl componentsSeparatedByString:@"?"].firstObject;
+        NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+        [scAllowed removeCharactersInString:@":/?&=#+"];
+        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
+        NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
+        NSLog(@"[AntiCensor] Fast SoundCloud playback via Cloud Bridge: %@", renderUrl);
+        if (renderUrl) {
+            g_streamCache[rawUrl] = renderUrl;
+            g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+            saveStreamCacheToDisk();
+        }
+        if (completion) completion(renderUrl);
+        return;
+    }
+
     // Надежный Render fallback: если прямая ссылка не работает, Render скачает и отдаст MP3!
     void (^useRenderFallback)(NSString *) = ^(NSString *urlToFallback) {
         NSString *server = getServerURL();
@@ -1157,6 +1175,7 @@ static BOOL isObservingPlayerItem = NO;
 
 static NSString *currentPlayingKey = nil;
 static BOOL isReplacementLoading = NO;
+static BOOL g_isAppLaunching = YES;
 
 static NSString *currentActiveSpotifyTrackURI = nil;
 static NSString *currentActiveSpotifyTrackTitle = nil;
@@ -4297,10 +4316,6 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
             }
         }
     }
-    if (hasRate) {
-        isSpotifyCurrentlyPlaying = isPlaying;
-    }
-
     NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
 
     // СТРОГАЯ ИЗОЛЯЦИЯ: Если у трека нет замены — НЕМЕДЛЕННО размьючиваем Spotify и выключаем плеер!
@@ -4313,24 +4328,44 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
 
     NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
 
-    // ПРОВЕРКА: Если этот трек УЖЕ играет или прямо сейчас загружается — НЕ СБРАСЫВАТЬ!
+    // 1. НА СТАРТЕ ПРИЛОЖЕНИЯ: Защита от автозапуска!
+    // Если приложение только открылось и восстановило старый трек без явной команды Play — НЕ НАЧИНАТЬ ВОСПРОИЗВЕДЕНИЕ!
+    if (g_isAppLaunching) {
+        if (!hasRate || !isPlaying) {
+            isSpotifyCurrentlyPlaying = NO;
+            currentPlayingKey = trackKey;
+            currentPlayingUrl = repUrl;
+            return;
+        }
+    }
+
+    // 2. Если Spotify прислал явное изменение состояния воспроизведения (playbackRate)
+    if (hasRate) {
+        isSpotifyCurrentlyPlaying = isPlaying;
+    }
+
+    // 3. Если этот трек УЖЕ играет или прямо сейчас загружается
     BOOL isSameTrackAndUrl = [trackKey isEqualToString:currentPlayingKey] && [repUrl isEqualToString:currentPlayingUrl];
     if (isSameTrackAndUrl && (ourAudioPlayer != nil || isReplacementLoading)) {
-        if (!isPlaying) {
+        if (hasRate && !isPlaying) {
+            // Пользователь явно нажал ПАУЗУ
             isSpotifyCurrentlyPlaying = NO;
             if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
                 [ourAudioPlayer pause];
             }
-        } else if (ourAudioPlayer && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
+        } else if (hasRate && isPlaying) {
+            // Пользователь нажал PLAY
             isSpotifyCurrentlyPlaying = YES;
-            [ourAudioPlayer play];
+            if (ourAudioPlayer && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
+                [ourAudioPlayer play];
+            }
         }
         updateNowPlayingCenter();
         return;
     }
 
-    // If Spotify is currently PAUSED, do not start audio!
-    if (!isPlaying) {
+    // 4. Если пользователь нажал паузу (hasRate == YES && isPlaying == NO) — не запускаем
+    if (hasRate && !isPlaying) {
         isSpotifyCurrentlyPlaying = NO;
         currentPlayingKey = trackKey;
         currentPlayingUrl = repUrl;
@@ -4341,7 +4376,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         return;
     }
 
-    // New replacement track and Spotify is actively playing: start replacement audio
+    // 5. ВЫБРАН НОВЫЙ ТРЕК С ЗАМЕНОЙ: Запускаем воспроизведение немедленно!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
     isSpotifyCurrentlyPlaying = YES;
@@ -4799,9 +4834,21 @@ static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *
                     if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:inputUrl];
                     saveStreamCacheToDisk();
                 }
+                // Немедленно уведомляем Render о новом треке для кэширования в облачное хранилище
+                if ([inputUrl containsString:@"soundcloud.com"] || [inputUrl containsString:@"on.soundcloud.com"]) {
+                    NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+                    [scAllowed removeCharactersInString:@":/?&=#+"];
+                    NSString *encoded = [inputUrl stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
+                    NSString *preloadUrl = [NSString stringWithFormat:@"%@/preload?url=%@", getServerURL(), encoded];
+                    NSMutableURLRequest *pReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:preloadUrl]];
+                    [pReq setTimeoutInterval:10.0];
+                    [[[NSURLSession sharedSession] dataTaskWithRequest:pReq] resume];
+                }
+
                 // Сбрасываем старый плеер для немедленного старта с 0.0 секунды
                 currentPlayingKey = nil;
                 currentPlayingUrl = nil;
+                isSpotifyCurrentlyPlaying = YES;
                 startReplacementAudio(uri ?: (title ?: disp), inputUrl, 0.0);
             }
         }];
@@ -5955,6 +6002,12 @@ __attribute__((constructor)) static void initAntiCensor(void) {
             }
         }
     }
+
+    // Сброс флага запуска через 2.5 секунды (разрешает воспроизведение по клику пользователя)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        g_isAppLaunching = NO;
+        NSLog(@"[AntiCensor] Initial app launch period complete. User playback controls active.");
+    });
 
     // Фоновая проверка OTA обновлений через 4 секунды после старта
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
