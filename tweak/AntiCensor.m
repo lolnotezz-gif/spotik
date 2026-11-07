@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.4.0-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110708
+#define ANTICENSOR_VERSION_STRING @"v5.4.1-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110709
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -810,6 +810,17 @@ static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *art
         NSString *normTitle = normalizeKey(title);
         NSString *val = dict[normTitle];
         if (val && val.length > 0) return val;
+    }
+
+    // 4. Fuzzy scan: find any key that CONTAINS the normalized title (for local:// URI stored keys)
+    if (title && title.length >= 3) {
+        NSString *normTitle = normalizeKey(title);
+        for (NSString *k in dict.allKeys) {
+            if ([k containsString:normTitle] || [normTitle containsString:k]) {
+                NSString *val = dict[k];
+                if (val && val.length > 0) return val;
+            }
+        }
     }
 
     return nil;
@@ -4703,7 +4714,8 @@ static void showLyricsEditPrompt(NSString *uri, NSString *title, NSString *artis
         UIAlertAction *saveBtn = [UIAlertAction actionWithTitle:@"💾 Сохранить и синхронизировать" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
             NSString *text = alert.textFields.firstObject.text;
             if (text && text.length > 0) {
-                if (uri && [uri hasPrefix:@"spotify:track:"]) saveLyricsForTrack(uri, text);
+                // Save by URI for ALL track types (spotify:track:, spotify:local:, local://, etc.)
+                if (uri && uri.length > 5) saveLyricsForTrack(uri, text);
                 if (title && title.length > 0) saveLyricsForTrack(title, text);
                 if (artist && title) saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], text);
                 if (displayTrack && displayTrack.length > 0) saveLyricsForTrack(displayTrack, text);

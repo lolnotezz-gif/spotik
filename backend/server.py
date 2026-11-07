@@ -544,7 +544,8 @@ class AudioHandler(BaseHTTPRequestHandler):
 
                     self.send_response(206)
                     self.send_cors()
-                    self.send_header('Content-Type', 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) or open(file_to_stream, 'rb').read(8).startswith(b'\x00\x00\x00') else 'audio/mpeg')
+                    ct = 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) else 'audio/mpeg'
+                    self.send_header('Content-Type', ct)
                     self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
                     self.send_header('Content-Length', str(length))
                     self.send_header('Accept-Ranges', 'bytes')
@@ -558,7 +559,8 @@ class AudioHandler(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_cors()
-            self.send_header('Content-Type', 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) or open(file_to_stream, 'rb').read(8).startswith(b'\x00\x00\x00') else 'audio/mpeg')
+            ct = 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) else 'audio/mpeg'
+            self.send_header('Content-Type', ct)
             self.send_header('Content-Length', str(file_size))
             self.send_header('Accept-Ranges', 'bytes')
             self.end_headers()
@@ -569,7 +571,21 @@ class AudioHandler(BaseHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
 
+import time as _time
+
+def _keepalive_pinger():
+    """Ping /health every 10 minutes to prevent Render free-tier sleep."""
+    _time.sleep(60)
+    while True:
+        try:
+            import urllib.request as _ureq
+            _ureq.urlopen("http://127.0.0.1:" + str(PORT) + "/health", timeout=5)
+        except Exception:
+            pass
+        _time.sleep(600)
+
 if __name__ == '__main__':
     server = ThreadedHTTPServer(('0.0.0.0', PORT), AudioHandler)
     print(f"[AntiCensor] Cloud Bridge listening on 0.0.0.0:{PORT}")
+    threading.Thread(target=_keepalive_pinger, daemon=True).start()
     server.serve_forever()
