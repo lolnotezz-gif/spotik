@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.4-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110717
+#define ANTICENSOR_VERSION_STRING @"v5.5.5-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110718
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1050,7 +1050,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
         [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:5.0];
+        [req setTimeoutInterval:1.0];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
@@ -1098,7 +1098,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                         }
                         NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:fullSApi]];
                         [req2 setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-                        [req2 setTimeoutInterval:2.0];
+                        [req2 setTimeoutInterval:1.0];
 
                         [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
                             if (d2 && !e2) {
@@ -1136,7 +1136,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
     if ([rawUrl containsString:@"on.soundcloud.com"] || [rawUrl containsString:@"t.co"] || [rawUrl containsString:@"bit.ly"]) {
         NSMutableURLRequest *redReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
         [redReq setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-        [redReq setTimeoutInterval:2.0];
+        [redReq setTimeoutInterval:1.0];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:redReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             NSString *finalUrl = r.URL.absoluteString;
@@ -1367,7 +1367,7 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         }
     });
 
-    [ourAudioPlayer seekToTime:seekTime completionHandler:^(BOOL finished) {
+    [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             g_isPlayerSeeking = NO;
             lastKnownSpotifyPosition = toSeek;
@@ -4292,9 +4292,16 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     }
 
     if (hasElapsed) {
-        lastKnownSpotifyPosition = position;
-        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        if (!ourAudioPlayer) {
+            lastKnownSpotifyPosition = position;
+            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        }
     }
+
+    if (hasRate) {
+        isSpotifyCurrentlyPlaying = isPlaying;
+    }
+
     NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
 
     // СТРОГАЯ ИЗОЛЯЦИЯ: Если у трека нет замены — НЕМЕДЛЕННО размьючиваем Spotify и выключаем плеер!
@@ -4306,10 +4313,6 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     }
 
     NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
-
-    if (hasRate) {
-        isSpotifyCurrentlyPlaying = isPlaying;
-    }
 
     BOOL isSameTrackAndUrl = [trackKey isEqualToString:currentPlayingKey] && [repUrl isEqualToString:currentPlayingUrl];
 
