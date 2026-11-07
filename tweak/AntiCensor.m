@@ -21,6 +21,9 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
+#define ANTICENSOR_VERSION_STRING @"v5.3.0-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110705
+
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
@@ -933,9 +936,9 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         }
     }
 
-    // 2. Direct local file check
-    if ([rawUrl hasPrefix:@"local://"]) {
-        NSString *filename = [rawUrl substringFromIndex:@"local://".length];
+    // 2. Direct local file check (from mobile device)
+    if ([rawUrl hasPrefix:@"local://"] || [rawUrl hasPrefix:@"file://"] || [rawUrl containsString:@"AntiCensor_AudioFiles"]) {
+        NSString *filename = [rawUrl lastPathComponent];
         NSString *fullPath = [getLocalAudioDirectoryPath() stringByAppendingPathComponent:filename];
         if ([[NSFileManager defaultManager] fileExistsAtPath:fullPath]) {
             NSURL *u = [NSURL fileURLWithPath:fullPath];
@@ -943,15 +946,21 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
             if (completion) completion(u);
             return;
         }
-    }
-
-    if ([rawUrl hasPrefix:@"file://"] || [rawUrl hasPrefix:@"/"]) {
-        NSURL *u = [rawUrl hasPrefix:@"file://"] ? [NSURL URLWithString:rawUrl] : [NSURL fileURLWithPath:rawUrl];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:u.path]) {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docPath = [paths.firstObject stringByAppendingPathComponent:filename];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:docPath]) {
+            NSURL *u = [NSURL fileURLWithPath:docPath];
             g_streamCache[rawUrl] = u;
             if (completion) completion(u);
             return;
         }
+    }
+
+    if ([rawUrl hasPrefix:@"/"] && [[NSFileManager defaultManager] fileExistsAtPath:rawUrl]) {
+        NSURL *u = [NSURL fileURLWithPath:rawUrl];
+        g_streamCache[rawUrl] = u;
+        if (completion) completion(u);
+        return;
     }
 
     // 3. Direct audio URLs (MP3 / M3U8) -> ZERO latency!
@@ -963,10 +972,23 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         return;
     }
 
+    // Render backend fallback helper (Guarantees playback even if SoundCloud API fails!)
+    void (^useRenderFallback)(NSString *) = ^(NSString *urlToFallback) {
+        NSString *server = getServerURL();
+        NSString *encoded = [urlToFallback stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+        NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
+        NSLog(@"[AntiCensor] SoundCloud streaming via Render backend: %@", renderUrl);
+        if (renderUrl) {
+            g_streamCache[rawUrl] = renderUrl;
+            g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+        }
+        if (completion) completion(renderUrl);
+    };
+
     // SoundCloud API v2 resolver
     void (^doApiResolve)(NSString *) = ^(NSString *canonicalUrl) {
         if (!canonicalUrl || canonicalUrl.length == 0) {
-            if (completion) completion(nil);
+            useRenderFallback(rawUrl);
             return;
         }
         NSString *clean = [canonicalUrl componentsSeparatedByString:@"?"].firstObject;
@@ -987,12 +1009,12 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
         [req setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:4.0];
+        [req setTimeoutInterval:3.5];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
                 NSLog(@"[AntiCensor] API v2 resolve failed for %@: %@", clean, err);
-                if (completion) completion(nil);
+                useRenderFallback(clean);
                 return;
             }
             @try {
@@ -1019,7 +1041,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                         }
                         NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:fullSApi]];
                         [req2 setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
-                        [req2 setTimeoutInterval:4.0];
+                        [req2 setTimeoutInterval:3.5];
 
                         [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
                             if (d2 && !e2) {
@@ -1040,8 +1062,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                                     return;
                                 }
                             }
-                            NSLog(@"[AntiCensor] Failed to fetch media url from transcoding for %@", clean);
-                            if (completion) completion(nil);
+                            NSLog(@"[AntiCensor] Transcoding media url fetch failed, using Render fallback for %@", clean);
+                            useRenderFallback(clean);
                         }] resume];
                         return;
                     }
@@ -1049,7 +1071,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
             } @catch (id ex) {
                 NSLog(@"[AntiCensor] Exception resolving SoundCloud: %@", ex);
             }
-            if (completion) completion(nil);
+            useRenderFallback(clean);
         }] resume];
     };
 
@@ -3955,6 +3977,9 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
     isObservingPlayerItem = YES;
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
+    if (@available(iOS 10.0, *)) {
+        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
+    }
 
     if (initialPosition > 1.0) {
         [ourAudioPlayer seekToTime:CMTimeMakeWithSeconds(initialPosition, NSEC_PER_SEC)];
@@ -3967,6 +3992,9 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
 }
 
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
+    if (![trackKey isEqualToString:currentPlayingKey]) {
+        initialPosition = 0.0;
+    }
     if (!scUrl || scUrl.length == 0) return;
 
     if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl] && ourAudioPlayer != nil && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
@@ -4123,7 +4151,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         isMutingSpotify = YES;
         applyMuteStateToAllUnits();
         isSpotifyCurrentlyPlaying = YES;
-        startReplacementAudio(trackKey, repUrl, position);
+        startReplacementAudio(trackKey, repUrl, 0.0);
         return;
     }
 
@@ -4141,30 +4169,12 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     applyMuteStateToAllUnits();
 
     if (ourAudioPlayer) {
-        if (hasElapsed && ourAudioPlayer) {
-            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-            NSTimeInterval timeSinceForeground = now - g_lastForegroundOrScreenTransitionTimestamp;
-            // КРИТИЧЕСКИЙ ФИКС ДЛЯ DYNAMIC ISLAND:
-            // Когда пользователь заходит в Спотик через Dynamic Island или экран блокировки,
-            // Spotify просыпается из фона и шлёт рассинхронизированный таймкод (~5 сек назад или вперед).
-            // Запрещаем перемотку в первые 4.0 сек после выхода из фона!
-            if (timeSinceForeground < 4.0) {
-                updateNowPlayingCenter();
-            } else {
-                double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-                BOOL isOurOwnEcho = (now - g_lastUserManualLyricsSeekTimestamp < 2.5);
-                if (!isOurOwnEcho && !g_isPlayerSeeking) {
-                    double diff = fabs(position - ourPos);
-                    // Перематываем только при реальном значительном ручном сдвиге пользователем (> 0.5s)
-                    if (diff > 0.5) {
-                        safeSeekPlayerToTime(position);
-                    }
-                }
-            }
-        }
+        // Когда наш кастомный плеер играет (SoundCloud или локальный файл) — он единственный хозяин таймлайна!
+        // Spotify заглушен, и его фоновые рассинхронизированные таймкоды Dynamic Island НИКОГДА не должны дёргать наш плеер!
         if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
             [ourAudioPlayer play];
         }
+        updateNowPlayingCenter();
     }
 }
 
@@ -4204,6 +4214,111 @@ static void custom_setNowPlayingInfo(id target, SEL _cmd, NSDictionary *info) {
 
 #pragma mark - Settings & Replacement Dialog
 
+#pragma mark - Over-The-Air (OTA) Tweak Updates
+
+static void triggerAntiCensorOTACheck(BOOL isManual) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = getTopViewController();
+        UIAlertController *loadingAlert = nil;
+        if (isManual && top) {
+            loadingAlert = [UIAlertController alertControllerWithTitle:@"🚀 AntiCensor OTA"
+                                                               message:@"Проверка обновлений по воздуху...\n\n(Пожалуйста, подождите)"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+            UIActivityIndicatorView *sp = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+            sp.translatesAutoresizingMaskIntoConstraints = NO;
+            [sp startAnimating];
+            [loadingAlert.view addSubview:sp];
+            [NSLayoutConstraint activateConstraints:@[
+                [sp.centerXAnchor constraintEqualToAnchor:loadingAlert.view.centerXAnchor],
+                [sp.bottomAnchor constraintEqualToAnchor:loadingAlert.view.bottomAnchor constant:-20.0]
+            ]];
+            [top presentViewController:loadingAlert animated:YES completion:nil];
+        }
+
+        NSString *verUrlStr = @"https://raw.githubusercontent.com/lolnotezz-gif/spotik/main/version.txt";
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:verUrlStr]];
+        [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
+        [req setTimeoutInterval:5.0];
+
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            void (^showResult)(NSString *, NSString *, BOOL) = ^(NSString *t, NSString *m, BOOL canRestart) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    void (^presentFinalAlert)(void) = ^{
+                        UIViewController *topVC = getTopViewController();
+                        if (!topVC) return;
+                        UIAlertController *res = [UIAlertController alertControllerWithTitle:t message:m preferredStyle:UIAlertControllerStyleAlert];
+                        if (canRestart) {
+                            [res addAction:[UIAlertAction actionWithTitle:@"⚡ Перезапустить Spotify" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull a) {
+                                exit(0);
+                            }]];
+                            [res addAction:[UIAlertAction actionWithTitle:@"Позже" style:UIAlertActionStyleCancel handler:nil]];
+                        } else {
+                            [res addAction:[UIAlertAction actionWithTitle:@"Отлично!" style:UIAlertActionStyleDefault handler:nil]];
+                        }
+                        [topVC presentViewController:res animated:YES completion:nil];
+                    };
+
+                    if (loadingAlert) {
+                        [loadingAlert dismissViewControllerAnimated:YES completion:presentFinalAlert];
+                    } else if (isManual || canRestart) {
+                        presentFinalAlert();
+                    }
+                });
+            };
+
+            if (!data || err) {
+                if (isManual) showResult(@"Ошибка проверки", @"Не удалось связаться с сервером обновлений GitHub.", NO);
+                return;
+            }
+
+            NSString *remoteStr = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            NSInteger remoteBuild = [remoteStr integerValue];
+            NSInteger currentBuild = MAX((NSInteger)ANTICENSOR_BUILD_NUMBER, [[NSUserDefaults standardUserDefaults] integerForKey:@"AntiCensor_Installed_OTA_Build"]);
+
+            if (remoteBuild > currentBuild) {
+                NSLog(@"[AntiCensor OTA] New version detected: remote build %ld > local build %ld. Downloading dylib...", (long)remoteBuild, (long)currentBuild);
+                NSString *dlUrlStr = @"https://raw.githubusercontent.com/lolnotezz-gif/spotik/main/build_output/AntiCensor.dylib";
+                NSMutableURLRequest *dlReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:dlUrlStr]];
+                [dlReq setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
+                [dlReq setTimeoutInterval:25.0];
+
+                [[[NSURLSession sharedSession] dataTaskWithRequest:dlReq completionHandler:^(NSData *dData, NSURLResponse *dResp, NSError *dErr) {
+                    if (!dData || dErr || dData.length < 50000) {
+                        NSLog(@"[AntiCensor OTA] Download error: %@", dErr);
+                        if (isManual) showResult(@"Ошибка загрузки", @"Не удалось скачать файл обновления dylib.", NO);
+                        return;
+                    }
+
+                    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+                    NSString *docDir = paths.firstObject;
+                    NSString *tmpPath = [docDir stringByAppendingPathComponent:@"AntiCensor_OTA.dylib.tmp"];
+                    NSString *targetPath = [docDir stringByAppendingPathComponent:@"AntiCensor_OTA.dylib"];
+
+                    NSError *wErr = nil;
+                    [dData writeToFile:tmpPath options:NSDataWritingAtomic error:&wErr];
+                    if (!wErr) {
+                        [[NSFileManager defaultManager] removeItemAtPath:targetPath error:nil];
+                        [[NSFileManager defaultManager] moveItemAtPath:tmpPath toPath:targetPath error:nil];
+                        [[NSUserDefaults standardUserDefaults] setInteger:remoteBuild forKey:@"AntiCensor_Installed_OTA_Build"];
+                        [[NSUserDefaults standardUserDefaults] synchronize];
+                        NSLog(@"[AntiCensor OTA] Update installed successfully! Target: %@", targetPath);
+
+                        showResult(@"🎉 Обновление установлено по воздуху!",
+                                   @"Свежая версия AntiCensor.dylib успешно скачана и установлена прямо в приложение без ПК и проводов!\n\nНажмите «Перезапустить Spotify», чтобы применить обновление.",
+                                   YES);
+                    } else {
+                        if (isManual) showResult(@"Ошибка записи", @"Не удалось сохранить обновление в память приложения.", NO);
+                    }
+                }] resume];
+            } else {
+                if (isManual) {
+                    showResult(@"AntiCensor актуален", @"У вас установлена самая последняя версия AntiCensor! Обновления не требуются.", NO);
+                }
+            }
+        }] resume];
+    });
+}
+
 static void showManageAllTracksDialog(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *topVC = getTopViewController();
@@ -4224,6 +4339,11 @@ static void showManageAllTracksDialog(void) {
         UIAlertController *manageAlert = [UIAlertController alertControllerWithTitle:@"База данных AntiCensor"
                                                                              message:[NSString stringWithFormat:@"Замен треков: %lu | Текстов: %lu", (unsigned long)allOverrides.count, (unsigned long)allLyrics.count]
                                                                       preferredStyle:UIAlertControllerStyleActionSheet];
+
+        UIAlertAction *otaUpdateAction = [UIAlertAction actionWithTitle:@"🚀 Обновить AntiCensor по воздуху (OTA)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
+            triggerAntiCensorOTACheck(YES);
+        }];
+        [manageAlert addAction:otaUpdateAction];
 
         UIAlertAction *cloudSyncAction = [UIAlertAction actionWithTitle:@"🌐 Синхронизировать всё с ПК" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
             performAntiCensorCloudSync();
@@ -4711,6 +4831,14 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
                 checkAndSyncLyricsOnScreen();
             }];
         }
+
+        // 5.5 Обновление AntiCensor по воздуху
+        UIAlertAction *otaAction = [UIAlertAction actionWithTitle:@"🚀 Обновить AntiCensor по воздуху (OTA)"
+                                                            style:UIAlertActionStyleDefault
+                                                          handler:^(UIAlertAction * _Nonnull a) {
+            triggerAntiCensorOTACheck(YES);
+        }];
+        [sheet addAction:otaAction];
 
         // 6. Список всех замен
         UIAlertAction *manageAction = [UIAlertAction actionWithTitle:@"⚙️ Список всех замен и текстов"
@@ -5474,6 +5602,33 @@ static void cleanupPoisonedLyricsDatabase(void) {
 }
 
 __attribute__((constructor)) static void initAntiCensor(void) {
+    // --- 0. OTA DYNAMIC DYLIB LOADER ---
+    if (getenv("ANTICENSOR_RUNNING_OTA") != NULL) {
+        NSLog(@"[AntiCensor] Running from OTA updated dylib (%@, build %ld).", ANTICENSOR_VERSION_STRING, (long)ANTICENSOR_BUILD_NUMBER);
+    } else {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        NSString *otaDylibPath = [docDir stringByAppendingPathComponent:@"AntiCensor_OTA.dylib"];
+        NSInteger installedOtaBuild = [[NSUserDefaults standardUserDefaults] integerForKey:@"AntiCensor_Installed_OTA_Build"];
+
+        if ([[NSFileManager defaultManager] fileExistsAtPath:otaDylibPath] && installedOtaBuild > ANTICENSOR_BUILD_NUMBER) {
+            NSLog(@"[AntiCensor] Found newer OTA dylib on disk (Build %ld > %ld). Launching via dlopen...", (long)installedOtaBuild, (long)ANTICENSOR_BUILD_NUMBER);
+            setenv("ANTICENSOR_RUNNING_OTA", "1", 1);
+            void *handle = dlopen([otaDylibPath UTF8String], RTLD_NOW);
+            if (handle) {
+                NSLog(@"[AntiCensor] Successfully yielded execution to OTA dylib!");
+                return; // Return early so bundled tweak doesn't double-hook!
+            } else {
+                NSLog(@"[AntiCensor] Failed to dlopen OTA dylib: %s. Using bundled tweak.", dlerror());
+            }
+        }
+    }
+
+    // Фоновая проверка OTA обновлений через 4 секунды после старта
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        triggerAntiCensorOTACheck(NO);
+    });
+
     // Автопереход на следующий трек альбома при завершении текущего
     [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
                                                       object:nil
