@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.1-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110714
+#define ANTICENSOR_VERSION_STRING @"v5.5.2-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110715
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1172,10 +1172,26 @@ static NSTimeInterval g_lastForegroundOrScreenTransitionTimestamp = 0;
 static NSTimer *periodicSyncTimer = nil;
 static UIButton *floatingPillButton = nil;
 
+static NSArray<UIWindow *> *getKeyAppWindows(void) {
+    NSMutableArray<UIWindow *> *res = [NSMutableArray array];
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *winScene = (UIWindowScene *)scene;
+            [res addObjectsFromArray:winScene.windows];
+        }
+    }
+    if (res.count == 0) {
+        NSArray *w = [UIApplication sharedApplication].windows;
+        if (w) [res addObjectsFromArray:w];
+    }
+    return res;
+}
+
 static double getCurrentSpotifyPreciseTime(void) {
     if (isReplacementLoading) {
         return (lastKnownSpotifyPosition > 0.0) ? lastKnownSpotifyPosition : 0.0;
     }
+    // 1. If ourAudioPlayer is active, it is the sole master clock
     if (ourAudioPlayer && ourAudioPlayer.currentItem) {
         double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
         if (!isnan(ourPos) && ourPos >= 0) {
@@ -1188,30 +1204,9 @@ static double getCurrentSpotifyPreciseTime(void) {
         }
     }
 
-    // 1. Check system MPNowPlayingInfoCenter elapsed playback time
-    @try {
-        NSDictionary *npInfo = [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo;
-        if (npInfo) {
-            NSNumber *elapsedNum = npInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime];
-            NSNumber *rateNum = npInfo[MPNowPlayingInfoPropertyPlaybackRate];
-            if (elapsedNum && [elapsedNum doubleValue] >= 0) {
-                double elapsed = [elapsedNum doubleValue];
-                if (rateNum && [rateNum floatValue] > 0.01f) {
-                    lastKnownSpotifyPosition = elapsed;
-                    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-                    return elapsed;
-                } else if (rateNum && [rateNum floatValue] <= 0.01f) {
-                    lastKnownSpotifyPosition = elapsed;
-                    return elapsed;
-                }
-            }
-        }
-    } @catch (...) {}
-
-    // 2. Direct synchronization with Spotify's scrubber slider (UISlider)
+    // 2. Direct synchronization with on-screen Spotify scrubber slider (SPTSlider / UISlider)
     double sliderVal = -1.0;
-    NSArray *windows = [UIApplication sharedApplication].windows;
-    for (UIWindow *win in windows) {
+    for (UIWindow *win in getKeyAppWindows()) {
         if (!win || win.hidden) continue;
         NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
         while (queue.count > 0) {
@@ -1220,7 +1215,7 @@ static double getCurrentSpotifyPreciseTime(void) {
             if ([v isKindOfClass:[UISlider class]]) {
                 UISlider *slider = (UISlider *)v;
                 NSString *cls = NSStringFromClass([slider class]);
-                if (![cls containsString:@"Volume"] && slider.bounds.size.width > 80.0 && !slider.isTracking) {
+                if (![cls containsString:@"Volume"] && slider.bounds.size.width > 60.0) {
                     float maxV = slider.maximumValue;
                     float minV = slider.minimumValue;
                     float val = slider.value;
@@ -1245,6 +1240,8 @@ static double getCurrentSpotifyPreciseTime(void) {
         return sliderVal;
     }
 
+    // 3. For native tracks (local files, standard Spotify tracks):
+    // Calculate running time based on elapsed timestamp
     if (!isSpotifyCurrentlyPlaying) {
         return lastKnownSpotifyPosition;
     }
@@ -2737,29 +2734,10 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Strategy A: MPRemoteCommandCenter changePlaybackPositionCommand
-        @try {
-            MPRemoteCommandCenter *cc = [MPRemoteCommandCenter sharedCommandCenter];
-            Class evtClass = NSClassFromString(@"MPChangePlaybackPositionCommandEvent");
-            if (evtClass && cc.changePlaybackPositionCommand) {
-                id evt = [[evtClass alloc] init];
-                @try { [evt setValue:@(targetSeconds) forKey:@"positionTime"]; } @catch (...) {}
-                @try { [evt setValue:@(targetSeconds) forKey:@"_positionTime"]; } @catch (...) {}
-                SEL remSel = NSSelectorFromString(@"performWithEvent:");
-                if ([cc.changePlaybackPositionCommand respondsToSelector:remSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [cc.changePlaybackPositionCommand performSelector:remSel withObject:evt];
-#pragma clang diagnostic pop
-                }
-            }
-        } @catch (...) {}
-
-        // Strategy B: UISlider touch simulation + direct action trigger
+        // Strategy A: UISlider touch simulation + direct action trigger across all windows
         UISlider *progressSlider = nil;
-        NSArray *windows = [UIApplication sharedApplication].windows;
-        for (UIWindow *win in windows) {
-            if (!win || win.hidden) continue;
+        for (UIWindow *win in getKeyAppWindows()) {
+            if (!win) continue;
             NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
             while (queue.count > 0) {
                 UIView *v = queue.firstObject;
@@ -2767,8 +2745,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 if ([v isKindOfClass:[UISlider class]]) {
                     UISlider *slider = (UISlider *)v;
                     NSString *cls = NSStringFromClass([slider class]);
-                    if (![cls containsString:@"Volume"] && slider.bounds.size.width > 100.0 &&
-                        slider.isUserInteractionEnabled && !slider.isHidden) {
+                    if (![cls containsString:@"Volume"] && slider.bounds.size.width > 60.0) {
                         float maxV = slider.maximumValue;
                         float minV = slider.minimumValue;
                         if (maxV > minV && maxV > 0.0f) {
@@ -2819,6 +2796,24 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 }
             }
         }
+
+        // Strategy B: MPRemoteCommandCenter changePlaybackPositionCommand
+        @try {
+            MPRemoteCommandCenter *cc = [MPRemoteCommandCenter sharedCommandCenter];
+            Class evtClass = NSClassFromString(@"MPChangePlaybackPositionCommandEvent");
+            if (evtClass && cc.changePlaybackPositionCommand) {
+                id evt = [[evtClass alloc] init];
+                @try { [evt setValue:@(targetSeconds) forKey:@"positionTime"]; } @catch (...) {}
+                @try { [evt setValue:@(targetSeconds) forKey:@"_positionTime"]; } @catch (...) {}
+                SEL remSel = NSSelectorFromString(@"performWithEvent:");
+                if ([cc.changePlaybackPositionCommand respondsToSelector:remSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    [cc.changePlaybackPositionCommand performSelector:remSel withObject:evt];
+#pragma clang diagnostic pop
+                }
+            }
+        } @catch (...) {}
     });
 }
 
@@ -4401,7 +4396,7 @@ static void custom_setNowPlayingInfo(id target, SEL _cmd, NSDictionary *info) {
         } else if ([kLower containsString:@"elapsed"]) {
             pos = [info[k] doubleValue];
             hasElapsed = YES;
-        } else if ([kLower containsString:@"rate"]) {
+        } else if ([kLower isEqualToString:@"playbackrate"] || ([kLower containsString:@"rate"] && ![kLower containsString:@"default"])) {
             isPlaying = ([info[k] floatValue] > 0.01f);
             hasRate = YES;
         }
@@ -5846,14 +5841,14 @@ static void cleanupPoisonedLyricsDatabase(void) {
 }
 
 
-// Hook UISlider endTrackingWithTouch:withEvent: so dragging Spotify's scrubber IMMEDIATELY rewinds our player
+// Hook UIControl and UISlider so dragging Spotify's scrubber IMMEDIATELY rewinds our player
 static void (*orig_UISlider_endTrackingWithTouch_withEvent)(id, SEL, UITouch *, UIEvent *) = NULL;
 static void custom_UISlider_endTrackingWithTouch_withEvent(UISlider *self, SEL _cmd, UITouch *touch, UIEvent *event) {
     if (orig_UISlider_endTrackingWithTouch_withEvent) {
         orig_UISlider_endTrackingWithTouch_withEvent(self, _cmd, touch, event);
     }
     NSString *cls = NSStringFromClass([self class]);
-    if (![cls containsString:@"Volume"] && self.bounds.size.width > 80.0) {
+    if (![cls containsString:@"Volume"] && self.bounds.size.width > 60.0) {
         float maxV = self.maximumValue;
         float minV = self.minimumValue;
         float val = self.value;
@@ -5867,6 +5862,8 @@ static void custom_UISlider_endTrackingWithTouch_withEvent(UISlider *self, SEL _
             if (targetSec >= 0) {
                 lastKnownSpotifyPosition = targetSec;
                 lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                g_spotifyLastReportedPosition = targetSec;
+                g_spotifyLastReportedTimestamp = [NSDate timeIntervalSinceReferenceDate];
                 if (ourAudioPlayer) {
                     safeSeekPlayerToTime(targetSec);
                 }
@@ -5876,12 +5873,60 @@ static void custom_UISlider_endTrackingWithTouch_withEvent(UISlider *self, SEL _
     }
 }
 
+static void (*orig_UIControl_sendActionsForControlEvents)(id, SEL, UIControlEvents) = NULL;
+static void custom_UIControl_sendActionsForControlEvents(UIControl *self, SEL _cmd, UIControlEvents events) {
+    if (orig_UIControl_sendActionsForControlEvents) {
+        orig_UIControl_sendActionsForControlEvents(self, _cmd, events);
+    }
+    if ((events & (UIControlEventValueChanged | UIControlEventTouchUpInside | UIControlEventTouchUpOutside)) != 0) {
+        if ([self isKindOfClass:[UISlider class]]) {
+            UISlider *slider = (UISlider *)self;
+            NSString *cls = NSStringFromClass([slider class]);
+            if (![cls containsString:@"Volume"] && slider.bounds.size.width > 60.0) {
+                float maxV = slider.maximumValue;
+                float minV = slider.minimumValue;
+                float val = slider.value;
+                if (maxV > minV) {
+                    double targetSec = (maxV <= 1.05f && maxV >= 0.95f) ? ((double)val * g_currentTrackDuration) : (double)val;
+                    if (targetSec >= 0) {
+                        lastKnownSpotifyPosition = targetSec;
+                        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                        g_spotifyLastReportedPosition = targetSec;
+                        g_spotifyLastReportedTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                        if (ourAudioPlayer) {
+                            safeSeekPlayerToTime(targetSec);
+                        }
+                        checkAndSyncLyricsOnScreen();
+                    }
+                }
+            }
+        }
+    }
+}
+
 __attribute__((constructor)) static void initAntiCensor(void) {
+    Class controlClass = [UIControl class];
+    if (controlClass) {
+        Method mSend = class_getInstanceMethod(controlClass, @selector(sendActionsForControlEvents:));
+        if (mSend) {
+            orig_UIControl_sendActionsForControlEvents = (void *)method_getImplementation(mSend);
+            method_setImplementation(mSend, (IMP)custom_UIControl_sendActionsForControlEvents);
+        }
+    }
+
     Class sliderClass = [UISlider class];
     if (sliderClass) {
         Method mEnd = class_getInstanceMethod(sliderClass, @selector(endTrackingWithTouch:withEvent:));
         if (mEnd) {
             orig_UISlider_endTrackingWithTouch_withEvent = (void *)method_getImplementation(mEnd);
+            method_setImplementation(mEnd, (IMP)custom_UISlider_endTrackingWithTouch_withEvent);
+        }
+    }
+
+    Class sptSliderClass = NSClassFromString(@"SPTSlider");
+    if (sptSliderClass) {
+        Method mEnd = class_getInstanceMethod(sptSliderClass, @selector(endTrackingWithTouch:withEvent:));
+        if (mEnd) {
             method_setImplementation(mEnd, (IMP)custom_UISlider_endTrackingWithTouch_withEvent);
         }
     }
@@ -6113,9 +6158,14 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     [commandCenter.seekForwardCommand setEnabled:NO];
     [commandCenter.seekBackwardCommand setEnabled:NO];
     [commandCenter.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
-        if (ourAudioPlayer && [event isKindOfClass:[MPChangePlaybackPositionCommandEvent class]]) {
+        if ([event isKindOfClass:[MPChangePlaybackPositionCommandEvent class]]) {
             MPChangePlaybackPositionCommandEvent *posEvt = (MPChangePlaybackPositionCommandEvent *)event;
-            safeSeekPlayerToTime(posEvt.positionTime);
+            if (ourAudioPlayer) {
+                safeSeekPlayerToTime(posEvt.positionTime);
+            }
+            lastKnownSpotifyPosition = posEvt.positionTime;
+            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+            checkAndSyncLyricsOnScreen();
             updateNowPlayingCenter();
             return MPRemoteCommandHandlerStatusSuccess;
         }
