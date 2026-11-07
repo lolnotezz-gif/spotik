@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.3.2-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110707
+#define ANTICENSOR_VERSION_STRING @"v5.4.0-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110708
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -410,19 +410,20 @@ static int identifyAlbumTrackIndex(NSString *text) {
     clean = [clean stringByReplacingOccurrencesOfString:@"_" withString:@" "];
     clean = [clean stringByReplacingOccurrencesOfString:@"•" withString:@" "];
     clean = [clean stringByReplacingOccurrencesOfString:@"—" withString:@" "];
+    clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-    if ([clean containsString:@"one week"]) return 0;
+    if ([clean containsString:@"one week record"]) return 0;
     if ([clean containsString:@"needforspeed"] || [clean containsString:@"need for speed"]) return 1;
     if ([clean containsString:@"senpa1"] || [clean containsString:@"senpai"]) return 2;
-    if ([clean containsString:@"хулиеу"] || [clean containsString:@"хули"] || [clean containsString:@"дейти"] || [clean containsString:@"дети"]) return 3;
-    if ([clean containsString:@"крыша"] || [clean containsString:@"krysha"]) return 4;
-    if ([clean containsString:@"твари"] || [clean containsString:@"фантастические"]) return 5;
-    if ([clean containsString:@"не виноват"]) return 6;
+    if ([clean containsString:@"хулиеу"] || [clean containsString:@"хулиёу"]) return 3;
+    if ([clean isEqualToString:@"крыша"] || [clean isEqualToString:@"krysha"] || [clean hasPrefix:@"крыша "] || [clean hasPrefix:@"krysha "]) return 4;
+    if ([clean containsString:@"фантастические твари"]) return 5;
+    if ([clean containsString:@"не виноват что"] || [clean containsString:@"я не виноват"]) return 6;
     if ([clean containsString:@"fuck it"] || [clean containsString:@"fuckit"]) return 7;
     if ([clean containsString:@"shake your a"]) return 8;
-    if ([clean containsString:@"мразотик"] || [clean containsString:@"сон"] || [clean containsString:@"mrazotik"]) return 9;
-    if ([clean containsString:@"notime"] || [clean containsString:@"no time"]) return 10;
-    if ([clean containsString:@"четный"] || [clean containsString:@"bonus track"] || [clean containsString:@"эйфория"] || [clean containsString:@"eyforiya"]) return 11;
+    if ([clean isEqualToString:@"мразотик"] || [clean isEqualToString:@"mrazotik"] || [clean hasPrefix:@"мразотик "] || [clean hasPrefix:@"mrazotik "]) return 9;
+    if ([clean isEqualToString:@"notime"] || [clean isEqualToString:@"no time"] || [clean hasPrefix:@"notime "] || [clean hasPrefix:@"no time "]) return 10;
+    if ([clean containsString:@"четный"] || [clean containsString:@"бонус трек"] || [clean containsString:@"bonus track"] || [clean containsString:@"эйфория"]) return 11;
 
     return -1;
 }
@@ -783,13 +784,13 @@ static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *art
     NSDictionary *dict = loadAllLyrics();
     if (!dict || dict.count == 0) return nil;
 
-    // 1. Strict match by Spotify track URI (e.g. spotify:track:6wLq5...)
-    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
+    // 1. Strict match by URI (supports both spotify:track:... AND mobile spotify:local:...!)
+    if (uri && uri.length > 5) {
         NSString *val = dict[normalizeKey(uri)];
         if (val && val.length > 0) return val;
     }
 
-    // 2. Strict match by Artist - Title (Must have BOTH artist and title to prevent random collisions!)
+    // 2. Strict match by Artist - Title
     if (title && title.length > 1 && artist && artist.length > 1) {
         NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
         NSString *val = dict[normalizeKey(combined)];
@@ -798,9 +799,19 @@ static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *art
         NSString *combined2 = [NSString stringWithFormat:@"%@ • %@", artist, title];
         NSString *val2 = dict[normalizeKey(combined2)];
         if (val2 && val2.length > 0) return val2;
+
+        NSString *combined3 = [NSString stringWithFormat:@"%@ — %@", artist, title];
+        NSString *val3 = dict[normalizeKey(combined3)];
+        if (val3 && val3.length > 0) return val3;
     }
 
-    // Note: NEVER match by naked title alone! Single-word titles caused random lyrics to attach to arbitrary tracks.
+    // 3. Match by track Title (required for tracks added from device/mobile without complete ID3 tags)
+    if (title && title.length >= 3) {
+        NSString *normTitle = normalizeKey(title);
+        NSString *val = dict[normTitle];
+        if (val && val.length > 0) return val;
+    }
+
     return nil;
 }
 
@@ -983,7 +994,9 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
     void (^useRenderFallback)(NSString *) = ^(NSString *urlToFallback) {
         NSString *server = getServerURL();
         NSString *clean = [urlToFallback componentsSeparatedByString:@"?"].firstObject;
-        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+        NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+        [scAllowed removeCharactersInString:@":/?&=#+"];
+        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
         NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
         NSLog(@"[AntiCensor] SoundCloud playback via Render backend: %@", renderUrl);
         if (renderUrl) {
@@ -1016,12 +1029,15 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
             }
         }
 
+        NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+        [scAllowed removeCharactersInString:@":/?&=#+"];
+        NSString *encClean = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
         NSString *endpoint = [NSString stringWithFormat:@"https://api-v2.soundcloud.com/resolve?url=%@&client_id=%@",
-                              [clean stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                              encClean,
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
         [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:2.0]; // Быстрый таймаут: если SC заблокирован провайдером, сразу уходим на Render!
+        [req setTimeoutInterval:5.0];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
@@ -1158,6 +1174,34 @@ static double getCurrentSpotifyPreciseTime(void) {
             return ourPos;
         }
     }
+
+    // Direct synchronization with Spotify's native player progress slider (UISlider)
+    double sliderVal = -1.0;
+    NSArray *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *win in windows) {
+        if (!win || win.hidden) continue;
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UISlider class]]) {
+                UISlider *slider = (UISlider *)v;
+                if (slider.maximumValue > 10.0 && slider.bounds.size.width > 120.0 && !slider.isTracking) {
+                    sliderVal = (double)slider.value;
+                    break;
+                }
+            }
+            [queue addObjectsFromArray:v.subviews];
+        }
+        if (sliderVal >= 0) break;
+    }
+
+    if (sliderVal >= 0) {
+        lastKnownSpotifyPosition = sliderVal;
+        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        return sliderVal;
+    }
+
     if (!isSpotifyCurrentlyPlaying) {
         return lastKnownSpotifyPosition;
     }
@@ -2511,6 +2555,16 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
 static void unGreyAndEnableCell(UIView *cell) {
     if (!cell) return;
 
+    // СТРОЖАЙШАЯ ИЗОЛЯЦИЯ: Никогда не трогать ячейки экрана Медиатеки (Моя медиатека)!
+    UIView *checkParent = cell;
+    while (checkParent) {
+        NSString *pCls = NSStringFromClass([checkParent class]);
+        if ([pCls containsString:@"YourLibrary"] || [pCls containsString:@"Collection"] || [pCls containsString:@"MediaLibrary"]) {
+            return;
+        }
+        checkParent = checkParent.superview;
+    }
+
     int matchedTrackIdx = -1;
     NSString *matchedTrackTitle = nil;
 
@@ -2538,24 +2592,9 @@ static void unGreyAndEnableCell(UIView *cell) {
         [views addObjectsFromArray:v.subviews];
     }
 
-    if (matchedTrackIdx < 0 && s_isAlbumScreenVisible) {
-        UIView *p = cell.superview;
-        while (p && ![p isKindOfClass:[UICollectionView class]] && ![p isKindOfClass:[UITableView class]]) {
-            p = p.superview;
-        }
-        if ([p isKindOfClass:[UICollectionView class]]) {
-            NSIndexPath *ip = [((UICollectionView *)p) indexPathForCell:(UICollectionViewCell *)cell];
-            if (ip && ip.item < 12) {
-                matchedTrackIdx = (int)ip.item;
-                matchedTrackTitle = kAlbumTitles[matchedTrackIdx];
-            }
-        } else if ([p isKindOfClass:[UITableView class]]) {
-            NSIndexPath *ip = [((UITableView *)p) indexPathForCell:(UITableViewCell *)cell];
-            if (ip && ip.row < 12) {
-                matchedTrackIdx = (int)ip.row;
-                matchedTrackTitle = kAlbumTitles[matchedTrackIdx];
-            }
-        }
+    // СТРОГО: НЕ использовать слепой индекс ip.row < 12! Ячейка должна реально иметь совпадающий лейбл трека альбома!
+    if (matchedTrackIdx < 0) {
+        return;
     }
 
     if (matchedTrackIdx >= 0 && matchedTrackIdx < 12) {
@@ -5149,16 +5188,34 @@ static void cleanupRogueBanners(void) {
     s_isAlbumScreenVisible = NO;
     for (UIWindow *win in windows) {
         if (!win || win.hidden) continue;
+
+        // Если открыта вкладка «Моя медиатека» — СТРОГО отключаем режим экрана альбома!
+        BOOL isLibraryActive = NO;
+        NSMutableArray *libQueue = [NSMutableArray arrayWithObject:win];
+        while (libQueue.count > 0) {
+            UIView *v = libQueue.firstObject;
+            [libQueue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UILabel class]]) {
+                NSString *txt = [((UILabel *)v).text lowercaseString] ?: @"";
+                if ([txt isEqualToString:@"моя медиатека"] || [txt isEqualToString:@"your library"] || [txt isEqualToString:@"медиатека"]) {
+                    isLibraryActive = YES;
+                    break;
+                }
+            }
+            [libQueue addObjectsFromArray:v.subviews];
+        }
+        if (isLibraryActive) {
+            s_isAlbumScreenVisible = NO;
+            break;
+        }
+
         NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
         while (queue.count > 0) {
             UIView *v = queue.firstObject;
             [queue removeObjectAtIndex:0];
             if ([v isKindOfClass:[UILabel class]]) {
                 NSString *txt = [((UILabel *)v).text lowercaseString] ?: @"";
-                if ([txt containsString:@"coll. of $hit"] ||
-                    [txt containsString:@"coll. of $hi"] ||
-                    [txt containsString:@"1f1ocxkj43a1qy9qqfnfux"] ||
-                    [txt containsString:@"one week record"] ||
+                if ([txt containsString:@"one week record"] ||
                     [txt containsString:@"needforspeed"] ||
                     [txt containsString:@"senpa1"] ||
                     [txt containsString:@"хулиеу"] ||

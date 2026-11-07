@@ -69,10 +69,10 @@ def resolve_sc_to_file(raw_url):
         except Exception as e:
             print("[AntiCensor] Redirect error:", e)
 
-    clean_url = url.split("?")[0].strip()
+    clean_url = url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
     target_mp3 = get_target_path(clean_url)
 
-    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 100000:
+    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 50000:
         return target_mp3
 
     with in_progress_lock:
@@ -81,19 +81,44 @@ def resolve_sc_to_file(raw_url):
 
     try:
         # Check if already resolved by another concurrent worker
-        if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 100000:
+        if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 50000:
             return target_mp3
 
         # Resolve track metadata via SoundCloud API v2
+        track_data = None
         api_url = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(clean_url)}&client_id={SC_CLIENT_ID}"
-        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-        track_data = json.loads(urllib.request.urlopen(req, timeout=12).read().decode('utf-8'))
+        try:
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            track_data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        except Exception as api_err:
+            print(f"[AntiCensor] API v2 error for {clean_url}: {api_err}")
 
-        trans = track_data.get('media', {}).get('transcodings', [])
+        # If API v2 returned no transcodings or failed, fall back to hydration parsing from HTML
+        trans = track_data.get('media', {}).get('transcodings', []) if track_data else []
+        track_auth = track_data.get('track_authorization') if track_data else None
+
         if not trans:
+            try:
+                html_req = urllib.request.Request(clean_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+                with urllib.request.urlopen(html_req, timeout=8) as h_resp:
+                    html_text = h_resp.read().decode('utf-8', errors='ignore')
+                h_matches = re.findall(r'<script>window\.__sc_hydration\s*=\s*(\[.*?\]);</script>', html_text)
+                if h_matches:
+                    h_json = json.loads(h_matches[0])
+                    for it in h_json:
+                        d = it.get('data')
+                        if isinstance(d, dict) and 'media' in d:
+                            trans = d.get('media', {}).get('transcodings', [])
+                            track_auth = d.get('track_authorization')
+                            break
+            except Exception as h_err:
+                print(f"[AntiCensor] Hydration parse error: {h_err}")
+
+        if not trans:
+            print(f"[AntiCensor] No transcodings found for {clean_url}")
             return None
 
-        unenc = [x for x in trans if 'encrypted' not in x.get('format', {}).get('protocol', '')]
+        unenc = [x for x in trans if 'encrypted' not in x.get('format', {}).get('protocol', '') and 'skd:' not in x.get('url', '')]
         valid_trans = unenc if unenc else trans
 
         prog = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'progressive'), None)
@@ -101,18 +126,32 @@ def resolve_sc_to_file(raw_url):
 
         chosen = prog or hls_trans
         stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
-        if track_data.get('track_authorization'):
-            stream_api += f"&track_authorization={track_data['track_authorization']}"
+        if track_auth:
+            stream_api += f"&track_authorization={track_auth}"
 
-        stream_info = json.loads(urllib.request.urlopen(urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'}), timeout=12).read().decode('utf-8'))
+        stream_info = json.loads(urllib.request.urlopen(urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'}), timeout=10).read().decode('utf-8'))
         media_url = stream_info['url']
 
-        tmp_out = target_mp3 + ".tmp.mp3"
-        cmd = [FFMPEG, "-y", "-i", media_url, "-c:a", "libmp3lame", "-q:a", "2", tmp_out]
-        subprocess.run(cmd, check=True, capture_output=True)
-        if os.path.exists(tmp_out):
+        tmp_out = target_mp3 + ".tmp.mp4"
+        # High speed remux without re-encoding (1-2s instead of 25s!)
+        if prog:
+            cmd = [FFMPEG, "-y", "-i", media_url, "-c", "copy", tmp_out]
+        else:
+            cmd = [FFMPEG, "-y", "-i", media_url, "-c:a", "copy", "-f", "mp4", "-movflags", "+faststart", tmp_out]
+
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 30000:
             os.replace(tmp_out, target_mp3)
-            print(f"[AntiCensor] Successfully converted & cached: {target_mp3}")
+            print(f"[AntiCensor] Fast remux cached: {target_mp3}")
+            return target_mp3
+
+        # Fallback to libmp3lame if copy failed
+        tmp_mp3 = target_mp3 + ".tmp.mp3"
+        cmd2 = [FFMPEG, "-y", "-i", media_url, "-c:a", "libmp3lame", "-q:a", "3", tmp_mp3]
+        subprocess.run(cmd2, check=True, capture_output=True)
+        if os.path.exists(tmp_mp3):
+            os.replace(tmp_mp3, target_mp3)
+            print(f"[AntiCensor] Lame fallback cached: {target_mp3}")
             return target_mp3
     except Exception as e:
         print(f"[AntiCensor] Resolve error for {clean_url}: {e}")
@@ -120,7 +159,7 @@ def resolve_sc_to_file(raw_url):
         with in_progress_lock:
             in_progress_urls.discard(clean_url)
 
-    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 100000:
+    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 50000:
         return target_mp3
     return None
 
@@ -505,7 +544,7 @@ class AudioHandler(BaseHTTPRequestHandler):
 
                     self.send_response(206)
                     self.send_cors()
-                    self.send_header('Content-Type', 'audio/mpeg')
+                    self.send_header('Content-Type', 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) or open(file_to_stream, 'rb').read(8).startswith(b'\x00\x00\x00') else 'audio/mpeg')
                     self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
                     self.send_header('Content-Length', str(length))
                     self.send_header('Accept-Ranges', 'bytes')
@@ -519,7 +558,7 @@ class AudioHandler(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_cors()
-            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Content-Type', 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) or open(file_to_stream, 'rb').read(8).startswith(b'\x00\x00\x00') else 'audio/mpeg')
             self.send_header('Content-Length', str(file_size))
             self.send_header('Accept-Ranges', 'bytes')
             self.end_headers()
