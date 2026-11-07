@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.0-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110713
+#define ANTICENSOR_VERSION_STRING @"v5.5.1-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110714
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -4497,12 +4497,39 @@ static void triggerAntiCensorOTACheck(BOOL isManual) {
                     if (!wErr) {
                         [[NSFileManager defaultManager] removeItemAtPath:targetPath error:nil];
                         [[NSFileManager defaultManager] moveItemAtPath:tmpPath toPath:targetPath error:nil];
+
+                        // Test if dlopen works in this environment (TrollStore/Jailbreak vs Sideloadly sandbox)
+                        void *testHandle = dlopen([targetPath UTF8String], RTLD_NOW);
+                        if (!testHandle) {
+                            NSLog(@"[AntiCensor OTA] dlopen blocked by AMFI (non-jailbreak sideload): %s", dlerror());
+                            [[NSFileManager defaultManager] removeItemAtPath:targetPath error:nil];
+                            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"AntiCensor_Installed_OTA_Build"];
+                            [[NSUserDefaults standardUserDefaults] synchronize];
+
+                            showResult(@"⚠️ Требуется подпись (Sideloadly)",
+                                       @"iOS заблокировала загрузку неподписанного dylib (защита AMFI в песочнице Sideloadly).
+
+"
+                                       @"📦 Свежий AntiCensor.dylib уже отправлен в твой Telegram-канал!
+
+"
+                                       @"💡 КАК ОБНОВЛЯТЬСЯ БЕЗ ПРОВОДА:
+"
+                                       @"В Sideloadly включи галочку 'Wi-Fi Sideloading' — тогда приложение будет устанавливаться с компа по воздуху без кабеля!",
+                                       NO);
+                            return;
+                        } else {
+                            dlclose(testHandle);
+                        }
+
                         [[NSUserDefaults standardUserDefaults] setInteger:remoteBuild forKey:@"AntiCensor_Installed_OTA_Build"];
                         [[NSUserDefaults standardUserDefaults] synchronize];
-                        NSLog(@"[AntiCensor OTA] Update installed successfully! Target: %@", targetPath);
+                        NSLog(@"[AntiCensor OTA] Update verified and installed successfully! Target: %@", targetPath);
 
-                        showResult(@"🎉 Обновление установлено по воздуху!",
-                                   @"Свежая версия AntiCensor.dylib успешно скачана и установлена прямо в приложение без ПК и проводов!\n\nНажмите «Перезапустить Spotify», чтобы применить обновление.",
+                        showResult(@"🎉 Обновление установлено!",
+                                   @"Файл AntiCensor.dylib успешно проверен и готов к работе!
+
+Нажмите <Перезапустить Spotify>, чтобы применить.",
                                    YES);
                     } else {
                         if (isManual) showResult(@"Ошибка записи", @"Не удалось сохранить обновление в память приложения.", NO);
@@ -5883,7 +5910,10 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                 NSLog(@"[AntiCensor] Successfully yielded execution to OTA dylib!");
                 return; // Return early so bundled tweak doesn't double-hook!
             } else {
-                NSLog(@"[AntiCensor] Failed to dlopen OTA dylib: %s. Using bundled tweak.", dlerror());
+                NSLog(@"[AntiCensor] Failed to dlopen OTA dylib: %s. Cleaning poisoned OTA state.", dlerror());
+                [[NSFileManager defaultManager] removeItemAtPath:otaDylibPath error:nil];
+                [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"AntiCensor_Installed_OTA_Build"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
             }
         }
     }
