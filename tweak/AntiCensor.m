@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.3-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110716
+#define ANTICENSOR_VERSION_STRING @"v5.5.4-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110717
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1001,23 +1001,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         }
     }
 
-    // Fast-path: SoundCloud напрямую через Render (минуя блокировки РКН на телефоне и без таймаутов)
-    if ([rawUrl containsString:@"soundcloud.com"] || [rawUrl containsString:@"on.soundcloud.com"]) {
-        NSString *server = getServerURL();
-        NSString *clean = [rawUrl componentsSeparatedByString:@"?"].firstObject;
-        NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
-        [scAllowed removeCharactersInString:@":/?&=#+"];
-        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
-        NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
-        NSLog(@"[AntiCensor] Fast SoundCloud playback via Cloud Bridge: %@", renderUrl);
-        if (renderUrl) {
-            g_streamCache[rawUrl] = renderUrl;
-            g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
-            saveStreamCacheToDisk();
-        }
-        if (completion) completion(renderUrl);
-        return;
-    }
+
 
     // Надежный Render fallback: если прямая ссылка не работает, Render скачает и отдаст MP3!
     void (^useRenderFallback)(NSString *) = ^(NSString *urlToFallback) {
@@ -1419,8 +1403,11 @@ static void safeSeekPlayerToTime(double targetSeconds) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
                 ourAudioPlayer.volume = 1.0f;
-                isSpotifyCurrentlyPlaying = YES;
-                [ourAudioPlayer play];
+                if (isSpotifyCurrentlyPlaying) {
+                    [ourAudioPlayer play];
+                } else {
+                    [ourAudioPlayer pause];
+                }
                 updateNowPlayingCenter();
             });
         } else if (item.status == AVPlayerItemStatusFailed) {
@@ -4307,14 +4294,6 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     if (hasElapsed) {
         lastKnownSpotifyPosition = position;
         lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-        // If user scrubbed in Spotify and ourAudioPlayer is active: SEEK ourAudioPlayer!
-        if (ourAudioPlayer && ourAudioPlayer.currentItem) {
-            double currentOurTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
-            if (isnan(currentOurTime)) currentOurTime = 0.0;
-            if (fabs(position - currentOurTime) > 1.5 && !g_isPlayerSeeking) {
-                safeSeekPlayerToTime(position);
-            }
-        }
     }
     NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
 
@@ -4328,55 +4307,50 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
 
     NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
 
-    // 1. НА СТАРТЕ ПРИЛОЖЕНИЯ: Защита от автозапуска!
-    // Если приложение только открылось и восстановило старый трек без явной команды Play — НЕ НАЧИНАТЬ ВОСПРОИЗВЕДЕНИЕ!
-    if (g_isAppLaunching) {
-        if (!hasRate || !isPlaying) {
-            isSpotifyCurrentlyPlaying = NO;
-            currentPlayingKey = trackKey;
-            currentPlayingUrl = repUrl;
-            return;
-        }
-    }
-
-    // 2. Если Spotify прислал явное изменение состояния воспроизведения (playbackRate)
     if (hasRate) {
         isSpotifyCurrentlyPlaying = isPlaying;
     }
 
-    // 3. Если этот трек УЖЕ играет или прямо сейчас загружается
     BOOL isSameTrackAndUrl = [trackKey isEqualToString:currentPlayingKey] && [repUrl isEqualToString:currentPlayingUrl];
-    if (isSameTrackAndUrl && (ourAudioPlayer != nil || isReplacementLoading)) {
-        if (hasRate && !isPlaying) {
-            // Пользователь явно нажал ПАУЗУ
-            isSpotifyCurrentlyPlaying = NO;
-            if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
-                [ourAudioPlayer pause];
+
+    if (isSameTrackAndUrl) {
+        if (ourAudioPlayer != nil) {
+            if (hasRate && !isPlaying) {
+                // Пользователь явно нажал ПАУЗУ
+                isSpotifyCurrentlyPlaying = NO;
+                if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+                    [ourAudioPlayer pause];
+                }
+            } else if (hasRate && isPlaying) {
+                // Пользователь нажал PLAY
+                isSpotifyCurrentlyPlaying = YES;
+                if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
+                    [ourAudioPlayer play];
+                }
             }
-        } else if (hasRate && isPlaying) {
-            // Пользователь нажал PLAY
-            isSpotifyCurrentlyPlaying = YES;
-            if (ourAudioPlayer && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
-                [ourAudioPlayer play];
-            }
+        } else if (isSpotifyCurrentlyPlaying) {
+            // Трек тот же, плеер еще не был создан (был на паузе), но пришла команда PLAY!
+            isMutingSpotify = YES;
+            applyMuteStateToAllUnits();
+            startReplacementAudio(trackKey, repUrl, 0.0);
         }
         updateNowPlayingCenter();
         return;
     }
 
-    // 4. Если пользователь нажал паузу (hasRate == YES && isPlaying == NO) — не запускаем
-    if (hasRate && !isPlaying) {
-        isSpotifyCurrentlyPlaying = NO;
-        currentPlayingKey = trackKey;
-        currentPlayingUrl = repUrl;
-        if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+    // ВЫБРАН ДРУГОЙ ТРЕК (или начальная загрузка при старте Spotify):
+    // Если трек не воспроизводится (кнопка Play выключена / приложение только открылось):
+    if (!isSpotifyCurrentlyPlaying) {
+        if (ourAudioPlayer) {
             [ourAudioPlayer pause];
         }
+        currentPlayingKey = trackKey;
+        currentPlayingUrl = repUrl;
         updateNowPlayingCenter();
         return;
     }
 
-    // 5. ВЫБРАН НОВЫЙ ТРЕК С ЗАМЕНОЙ: Запускаем воспроизведение немедленно!
+    // Spotify реально воспроизводит звук: стартуем замену с самого начала (0.0)!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
     isSpotifyCurrentlyPlaying = YES;
@@ -4834,16 +4808,7 @@ static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *
                     if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:inputUrl];
                     saveStreamCacheToDisk();
                 }
-                // Немедленно уведомляем Render о новом треке для кэширования в облачное хранилище
-                if ([inputUrl containsString:@"soundcloud.com"] || [inputUrl containsString:@"on.soundcloud.com"]) {
-                    NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
-                    [scAllowed removeCharactersInString:@":/?&=#+"];
-                    NSString *encoded = [inputUrl stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
-                    NSString *preloadUrl = [NSString stringWithFormat:@"%@/preload?url=%@", getServerURL(), encoded];
-                    NSMutableURLRequest *pReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:preloadUrl]];
-                    [pReq setTimeoutInterval:10.0];
-                    [[[NSURLSession sharedSession] dataTaskWithRequest:pReq] resume];
-                }
+
 
                 // Сбрасываем старый плеер для немедленного старта с 0.0 секунды
                 currentPlayingKey = nil;

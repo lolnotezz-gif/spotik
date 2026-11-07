@@ -441,14 +441,10 @@ class AudioHandler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(body)
                 db = load_sync_db()
-                tracks_to_cache = []
                 if "overrides" in payload and isinstance(payload["overrides"], dict):
                     for k, v in payload["overrides"].items():
                         if v and len(str(v).strip()) > 0:
-                            v_str = str(v).strip()
-                            db["overrides"][k] = v_str
-                            if ("soundcloud.com" in v_str or "on.soundcloud.com" in v_str) and not v_str.endswith(".mp3"):
-                                tracks_to_cache.append((k, v_str))
+                            db["overrides"][k] = str(v).strip()
                         elif k in db["overrides"]:
                             del db["overrides"][k]
                 if "lyrics" in payload and isinstance(payload["lyrics"], dict):
@@ -459,8 +455,6 @@ class AudioHandler(BaseHTTPRequestHandler):
                             del db["lyrics"][k]
                 db["updated_at"] = time.time()
                 save_sync_db(db)
-                for t_k, t_u in tracks_to_cache:
-                    threading.Thread(target=auto_cache_sc_track, args=(t_k, t_u), daemon=True).start()
                 self.send_response(200)
                 self.send_cors()
                 self.send_header('Content-Type', 'application/json')
@@ -652,12 +646,6 @@ def _keepalive_pinger():
 if __name__ == '__main__':
     server = ThreadedHTTPServer(('0.0.0.0', PORT), AudioHandler)
     print(f"[AntiCensor] Cloud Bridge listening on 0.0.0.0:{PORT}")
-    def _precache_defaults():
-        time.sleep(3)
-        db = load_sync_db()
-        for k, v in list(db.get("overrides", {}).items()):
-            if ("soundcloud.com" in v or "on.soundcloud.com" in v) and not v.endswith(".mp3"):
-                auto_cache_sc_track(k, v)
-    threading.Thread(target=_precache_defaults, daemon=True).start()
+
     threading.Thread(target=_keepalive_pinger, daemon=True).start()
     server.serve_forever()
