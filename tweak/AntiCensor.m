@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.6-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110719
+#define ANTICENSOR_VERSION_STRING @"v5.5.7-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110720
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1175,6 +1175,7 @@ static AVPlayer *ourAudioPlayer = nil;
 static void *kStatusObserverContext = &kStatusObserverContext;
 static BOOL isObservingPlayerItem = NO;
 
+static NSTimeInterval g_lastReplacementStartTime = 0;
 static NSString *currentPlayingKey = nil;
 static BOOL isReplacementLoading = NO;
 static BOOL g_isAppLaunching = YES;
@@ -4114,6 +4115,38 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
         lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
     }
 
+    // Синхронизируем положение ползунка Спотифая с нашим плеером каждые 0.5 сек для точности текста 1:1
+    static NSTimeInterval s_lastSliderSyncTime = 0;
+    NSTimeInterval nowSync = [NSDate timeIntervalSinceReferenceDate];
+    if (nowSync - s_lastSliderSyncTime >= 0.5) {
+        s_lastSliderSyncTime = nowSync;
+        if (!g_isPlayerSeeking && (nowSync - g_lastUserManualLyricsSeekTimestamp > 1.0)) {
+            for (UIWindow *win in getKeyAppWindows()) {
+                if (!win || win.hidden) continue;
+                NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+                while (queue.count > 0) {
+                    UIView *v = queue.firstObject;
+                    [queue removeObjectAtIndex:0];
+                    if ([v isKindOfClass:[UISlider class]]) {
+                        UISlider *slider = (UISlider *)v;
+                        NSString *cls = NSStringFromClass([slider class]);
+                        if (![cls containsString:@"Volume"] && slider.bounds.size.width > 60.0 && !slider.isTracking) {
+                            float maxV = slider.maximumValue;
+                            float minV = slider.minimumValue;
+                            if (maxV > minV) {
+                                float val = (maxV <= 1.05f && maxV >= 0.95f) ? ((g_currentTrackDuration > 0) ? (float)(ourTime / g_currentTrackDuration) : 0.0f) : (float)ourTime;
+                                if (fabs(slider.value - val) > 0.015f) {
+                                    [slider setValue:val animated:NO];
+                                }
+                            }
+                        }
+                    }
+                    [queue addObjectsFromArray:v.subviews];
+                }
+            }
+        }
+    }
+
     // Гарантируем, что громкость нашего плеера всегда 1.0, когда трек должен играть и не идет плавный переход (crossfade)
     if (ourAudioPlayer && !g_isPlayerFading && ourAudioPlayer.volume < 0.95f) {
         ourAudioPlayer.volume = 1.0f;
@@ -4171,8 +4204,10 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
     }
 
+    g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];
     lastKnownSpotifyPosition = 0.0;
     lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    seekSpotifyPlayback(0.0, g_currentTrackDuration);
 
     if (isSpotifyCurrentlyPlaying) {
         ourAudioPlayer.volume = 1.0f;
@@ -4203,6 +4238,7 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     currentPlayingKey = trackKey;
     currentPlayingUrl = scUrl;
     isReplacementLoading = YES;
+    g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];
 
     // Spotify глушим сразу: Цензурный трек НИКОГДА не прорвется!
     isMutingSpotify = YES;
@@ -4336,6 +4372,26 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
         if (!ourAudioPlayer) {
             lastKnownSpotifyPosition = position;
             lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        } else if (ourAudioPlayer.currentItem) {
+            // КОГДА ИГРАЕТ НАШ КАСТОМНЫЙ ПЛЕЕР (ТРЕК С СК ИЛИ С МОБИЛЫ):
+            // Проверяем: если пользователь нажал на фрагмент текста в Спотифае или перемотал трек!
+            double ourTime = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+            if (isnan(ourTime)) ourTime = 0.0;
+
+            NSTimeInterval timeSinceStart = [NSDate timeIntervalSinceReferenceDate] - g_lastReplacementStartTime;
+            // Игнорируем только стартовый шум первых 2.0 секунд при самом запуске трека
+            BOOL isStartupNoise = (timeSinceStart < 2.0 && position < 4.0 && ourTime < 2.0);
+
+            if (!isStartupNoise && !g_isPlayerSeeking) {
+                // Если разница во времени больше 0.8 сек — ЭТО ТАП ПО ТЕКСТУ В СПОТИФАЕ ИЛИ ПЕРЕМОТКА!
+                if (fabs(position - ourTime) > 0.8) {
+                    NSLog(@"[AntiCensor] >>> SPOTIFY LYRICS TAP DETECTED: %.2f -> %.2f. Seeking custom player! <<<", ourTime, position);
+                    safeSeekPlayerToTime(position);
+                    lastKnownSpotifyPosition = position;
+                    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                    checkAndSyncLyricsOnScreen();
+                }
+            }
         }
     }
 
@@ -5942,10 +5998,6 @@ static void custom_UIControl_sendActionsForControlEvents(UIControl *self, SEL _c
     if ((events & (UIControlEventValueChanged | UIControlEventTouchUpInside | UIControlEventTouchUpOutside)) != 0) {
         if ([self isKindOfClass:[UISlider class]]) {
             UISlider *slider = (UISlider *)self;
-            // Игнорируем программные тики от Spotify — реагируем ТОЛЬКО когда пользователь реально тянет слайдер!
-            if (!slider.isTracking && (events & UIControlEventValueChanged) != 0) {
-                return;
-            }
             NSString *cls = NSStringFromClass([slider class]);
             if (![cls containsString:@"Volume"] && slider.bounds.size.width > 60.0) {
                 float maxV = slider.maximumValue;
@@ -5954,14 +6006,25 @@ static void custom_UIControl_sendActionsForControlEvents(UIControl *self, SEL _c
                 if (maxV > minV) {
                     double targetSec = (maxV <= 1.05f && maxV >= 0.95f) ? ((double)val * g_currentTrackDuration) : (double)val;
                     if (targetSec >= 0) {
-                        lastKnownSpotifyPosition = targetSec;
-                        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-                        g_spotifyLastReportedPosition = targetSec;
-                        g_spotifyLastReportedTimestamp = [NSDate timeIntervalSinceReferenceDate];
-                        if (ourAudioPlayer) {
-                            safeSeekPlayerToTime(targetSec);
+                        if (ourAudioPlayer && ourAudioPlayer.currentItem) {
+                            double ourCurrent = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+                            if (isnan(ourCurrent)) ourCurrent = 0.0;
+                            NSTimeInterval timeSinceStart = [NSDate timeIntervalSinceReferenceDate] - g_lastReplacementStartTime;
+                            BOOL isStartupNoise = (timeSinceStart < 2.0 && targetSec < 4.0 && ourCurrent < 2.0);
+
+                            // Реагируем если пользователь тянет пальцем (isTracking) ИЛИ произошел скачок > 0.8 сек (тап по строке текста в Спотифае):
+                            if ((slider.isTracking || fabs(targetSec - ourCurrent) > 0.8) && !isStartupNoise && !g_isPlayerSeeking) {
+                                NSLog(@"[AntiCensor] >>> SLIDER / LYRICS TAP JUMP: %.2f -> %.2f. Seeking custom player! <<<", ourCurrent, targetSec);
+                                safeSeekPlayerToTime(targetSec);
+                                lastKnownSpotifyPosition = targetSec;
+                                lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                                checkAndSyncLyricsOnScreen();
+                            }
+                        } else {
+                            lastKnownSpotifyPosition = targetSec;
+                            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                            checkAndSyncLyricsOnScreen();
                         }
-                        checkAndSyncLyricsOnScreen();
                     }
                 }
             }
