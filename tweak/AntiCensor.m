@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.3.1-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110706
+#define ANTICENSOR_VERSION_STRING @"v5.3.2-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110707
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -3928,12 +3928,6 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
 
     if (!ourAudioPlayer) return;
 
-    NSString *repUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
-    if (!repUrl || repUrl.length == 0) {
-        stopReplacementAudio();
-        return;
-    }
-
     if (!isSpotifyCurrentlyPlaying) {
         if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
             [ourAudioPlayer pause];
@@ -4010,10 +4004,6 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
     }
 
-    if (initialPosition > 1.0) {
-        [ourAudioPlayer seekToTime:CMTimeMakeWithSeconds(initialPosition, NSEC_PER_SEC)];
-    }
-
     isSpotifyCurrentlyPlaying = YES;
     ourAudioPlayer.volume = 1.0f;
     [ourAudioPlayer play];
@@ -4021,24 +4011,30 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
 }
 
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
-    if (![trackKey isEqualToString:currentPlayingKey]) {
-        initialPosition = 0.0;
-    }
     if (!scUrl || scUrl.length == 0) return;
 
-    if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl] && ourAudioPlayer != nil && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
-        return;
+    // КРИТИЧЕСКИЙ ФИКС: Если мы УЖЕ загружаем или играем этот трек — НИКОГДА не перезапускать его!
+    if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl]) {
+        if (isReplacementLoading) {
+            NSLog(@"[AntiCensor] Already resolving in background for %@, ignoring redundant call.", trackKey);
+            return;
+        }
+        if (ourAudioPlayer != nil) {
+            if (isSpotifyCurrentlyPlaying && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
+                [ourAudioPlayer play];
+            }
+            return;
+        }
     }
 
     currentPlayingKey = trackKey;
     currentPlayingUrl = scUrl;
     isReplacementLoading = YES;
 
-    // Spotify глушим для заменяющего трека: Цензурный трек НИКОГДА не звучит!
+    // Spotify глушим сразу: Цензурный трек НИКОГДА не прорвется!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
 
-    // Быстрый кэш на 2 часа (7100 сек)
     if (!g_streamCache || !g_streamCacheTimestamps) {
         loadStreamCacheFromDisk();
     }
@@ -4046,9 +4042,11 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     NSURL *cached = g_streamCache[scUrl];
     NSNumber *cachedTs = g_streamCacheTimestamps[scUrl];
     if (cached) {
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 7100.0)) {
+        NSString *cStr = cached.absoluteString;
+        double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
             isReplacementLoading = NO;
-            playStreamUrl(cached, trackKey, initialPosition);
+            playStreamUrl(cached, trackKey, 0.0);
             return;
         } else {
             [g_streamCache removeObjectForKey:scUrl];
@@ -4061,6 +4059,7 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
         dispatch_async(dispatch_get_main_queue(), ^{
             isReplacementLoading = NO;
             if (![trackKey isEqualToString:currentPlayingKey]) {
+                NSLog(@"[AntiCensor] Track changed while resolving %@, discarding.", trackKey);
                 return;
             }
             if (!streamUrl) {
@@ -4069,7 +4068,7 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
                 applyMuteStateToAllUnits();
                 return;
             }
-            playStreamUrl(streamUrl, trackKey, initialPosition);
+            playStreamUrl(streamUrl, trackKey, 0.0);
         });
     });
 }
@@ -4175,14 +4174,22 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
 
     NSString *trackKey = currentActiveSpotifyTrackURI ?: currentActiveSpotifyTrackTitle;
 
-    // Заменённый трек обнаружен! Если этот трек ещё не играет — ВСЕГДА запускаем воспроизведение!
-    if (!ourAudioPlayer || ![trackKey isEqualToString:currentPlayingKey]) {
-        isMutingSpotify = YES;
-        applyMuteStateToAllUnits();
-        isSpotifyCurrentlyPlaying = YES;
-        startReplacementAudio(trackKey, repUrl, 0.0);
+    // ПРОВЕРКА: Если этот трек УЖЕ играет или прямо сейчас загружается — НЕ СБРАСЫВАТЬ!
+    BOOL isSameTrackAndUrl = [trackKey isEqualToString:currentPlayingKey] && [repUrl isEqualToString:currentPlayingUrl];
+    if (isSameTrackAndUrl && (ourAudioPlayer != nil || isReplacementLoading)) {
+        if (ourAudioPlayer && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
+            [ourAudioPlayer play];
+        }
+        updateNowPlayingCenter();
         return;
     }
+
+    // Новый трек или смена URL: запускаем замену
+    isMutingSpotify = YES;
+    applyMuteStateToAllUnits();
+    isSpotifyCurrentlyPlaying = YES;
+    startReplacementAudio(trackKey, repUrl, 0.0);
+    return;
 
     // Если трек уже играет — уважаем ручную паузу/воспроизведение пользователя
     if (!isSpotifyCurrentlyPlaying) {
@@ -4597,8 +4604,6 @@ static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *
         UIAlertAction *saveAction = [UIAlertAction actionWithTitle:@"✓ Применить замену" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             NSString *inputUrl = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             if (inputUrl.length > 0) {
-                resolveSoundCloudUrl(inputUrl, ^(NSURL *u) {});
-
                 if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
                     saveOverride(uri, inputUrl);
                 }
@@ -4611,7 +4616,16 @@ static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *
                         saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
                     }
                 }
-                startReplacementAudio(uri ?: (title ?: disp), inputUrl, getCurrentSpotifyPreciseTime());
+                // Очищаем кэш стрима для этой ссылки, чтобы подтянуть свежий живой поток
+                if (g_streamCache) {
+                    [g_streamCache removeObjectForKey:inputUrl];
+                    if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:inputUrl];
+                    saveStreamCacheToDisk();
+                }
+                // Сбрасываем старый плеер для немедленного старта с 0.0 секунды
+                currentPlayingKey = nil;
+                currentPlayingUrl = nil;
+                startReplacementAudio(uri ?: (title ?: disp), inputUrl, 0.0);
             }
         }];
 
