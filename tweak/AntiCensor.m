@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.5-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110718
+#define ANTICENSOR_VERSION_STRING @"v5.5.6-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110719
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -919,13 +919,19 @@ static void loadStreamCacheFromDisk(void) {
     NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if (!dict || ![dict isKindOfClass:[NSDictionary class]]) return;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    BOOL diskPoisonPurged = NO;
     for (NSString *k in dict) {
         NSDictionary *item = dict[k];
         if ([item isKindOfClass:[NSDictionary class]]) {
             NSString *urlStr = item[@"url"];
             NSNumber *ts = item[@"ts"];
             if (urlStr && ts) {
-                // Временные подписанные CloudFront ссылки SoundCloud протухают за 3 минуты!
+                // АВТОМАТИЧЕСКАЯ ОЧИСТКА: Удаляем любые Render ссылки из дискового кеша навсегда!
+                if ([urlStr containsString:@"onrender.com"] || [urlStr containsString:@"/sc?url="]) {
+                    diskPoisonPurged = YES;
+                    continue;
+                }
+                // Временные подписанные CloudFront ссылки SoundCloud протухают за 2 минуты!
                 double maxAge = ([urlStr containsString:@"soundcloud.cloud"] || [urlStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
                 if (now - [ts doubleValue] < maxAge) {
                     NSURL *u = [NSURL URLWithString:urlStr];
@@ -933,9 +939,14 @@ static void loadStreamCacheFromDisk(void) {
                         g_streamCache[k] = u;
                         g_streamCacheTimestamps[k] = ts;
                     }
+                } else {
+                    diskPoisonPurged = YES;
                 }
             }
         }
+    }
+    if (diskPoisonPurged) {
+        saveStreamCacheToDisk();
     }
 }
 
@@ -977,8 +988,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         return;
     }
 
-    // 2. Прямые MP3/M3U8 ссылки или бэкенд Render
-    if ([rawUrl hasSuffix:@".mp3"] || [rawUrl containsString:@"onrender.com"]) {
+    // 2. Прямые MP3/M3U8 ссылки
+    if ([rawUrl hasSuffix:@".mp3"]) {
         NSURL *u = [NSURL URLWithString:rawUrl];
         g_streamCache[rawUrl] = u;
         g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
@@ -986,18 +997,24 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         return;
     }
 
-    // 3. Проверка кэша (с учетом короткого TTL для CloudFront)
+    // 3. Проверка кэша (с немедленной очисткой отравленных Render ссылок)
     NSURL *cached = g_streamCache[rawUrl];
     NSNumber *cachedTs = g_streamCacheTimestamps[rawUrl];
     if (cached) {
         NSString *cachedStr = cached.absoluteString;
-        double maxAge = ([cachedStr containsString:@"soundcloud.cloud"] || [cachedStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
-            if (completion) completion(cached);
-            return;
-        } else {
+        if ([cachedStr containsString:@"onrender.com"] || [cachedStr containsString:@"/sc?url="]) {
             [g_streamCache removeObjectForKey:rawUrl];
             [g_streamCacheTimestamps removeObjectForKey:rawUrl];
+            saveStreamCacheToDisk();
+        } else {
+            double maxAge = ([cachedStr containsString:@"soundcloud.cloud"] || [cachedStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+            if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
+                if (completion) completion(cached);
+                return;
+            } else {
+                [g_streamCache removeObjectForKey:rawUrl];
+                [g_streamCacheTimestamps removeObjectForKey:rawUrl];
+            }
         }
     }
 
@@ -1011,12 +1028,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         [scAllowed removeCharactersInString:@":/?&=#+"];
         NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
         NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
-        NSLog(@"[AntiCensor] SoundCloud playback via Render backend: %@", renderUrl);
-        if (renderUrl) {
-            g_streamCache[rawUrl] = renderUrl;
-            g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
-            saveStreamCacheToDisk();
-        }
+        NSLog(@"[AntiCensor] SoundCloud playback via Render fallback: %@", renderUrl);
+        // СТРОГО: НЕ сохраняем Render ссылки в постоянный диск-кеш!
         if (completion) completion(renderUrl);
     };
 
@@ -1033,12 +1046,17 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         NSNumber *tsClean = g_streamCacheTimestamps[clean];
         if (cClean) {
             NSString *cStr = cClean.absoluteString;
-            double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
-            if (!tsClean || ([NSDate timeIntervalSinceReferenceDate] - [tsClean doubleValue] < maxAge)) {
-                g_streamCache[rawUrl] = cClean;
-                g_streamCacheTimestamps[rawUrl] = tsClean;
-                if (completion) completion(cClean);
-                return;
+            if ([cStr containsString:@"onrender.com"] || [cStr containsString:@"/sc?url="]) {
+                [g_streamCache removeObjectForKey:clean];
+                [g_streamCacheTimestamps removeObjectForKey:clean];
+            } else {
+                double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+                if (!tsClean || ([NSDate timeIntervalSinceReferenceDate] - [tsClean doubleValue] < maxAge)) {
+                    g_streamCache[rawUrl] = cClean;
+                    g_streamCacheTimestamps[rawUrl] = tsClean;
+                    if (completion) completion(cClean);
+                    return;
+                }
             }
         }
 
@@ -1400,6 +1418,13 @@ static void safeSeekPlayerToTime(double targetSeconds) {
     if (context == kStatusObserverContext) {
         AVPlayerItem *item = (AVPlayerItem *)object;
         if (item.status == AVPlayerItemStatusReadyToPlay) {
+            CMTime d = item.duration;
+            if (CMTIME_IS_VALID(d) && !CMTIME_IS_INDEFINITE(d)) {
+                double sec = CMTimeGetSeconds(d);
+                if (sec > 1.0) {
+                    g_currentTrackDuration = sec;
+                }
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
                 ourAudioPlayer.volume = 1.0f;
@@ -3113,6 +3138,11 @@ static NSArray<AntiCensorLyricItem *> *parseLyricsForTrack(NSString *rawLrcOrTex
             }
         }
         items = filtered;
+    } else if (items.count > 0 && duration > 0.0) {
+        double interval = duration / (double)items.count;
+        for (NSUInteger idx = 0; idx < items.count; idx++) {
+            items[idx].time = (double)idx * interval;
+        }
     }
 
     if (items.count == 0) return nil;
@@ -4141,9 +4171,15 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
     }
 
-    isSpotifyCurrentlyPlaying = YES;
-    ourAudioPlayer.volume = 1.0f;
-    [ourAudioPlayer play];
+    lastKnownSpotifyPosition = 0.0;
+    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+
+    if (isSpotifyCurrentlyPlaying) {
+        ourAudioPlayer.volume = 1.0f;
+        [ourAudioPlayer play];
+    } else {
+        [ourAudioPlayer pause];
+    }
     updateNowPlayingCenter();
 }
 
@@ -4180,14 +4216,19 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     NSNumber *cachedTs = g_streamCacheTimestamps[scUrl];
     if (cached) {
         NSString *cStr = cached.absoluteString;
-        double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
-            isReplacementLoading = NO;
-            playStreamUrl(cached, trackKey, 0.0);
-            return;
-        } else {
+        if ([cStr containsString:@"onrender.com"] || [cStr containsString:@"/sc?url="]) {
             [g_streamCache removeObjectForKey:scUrl];
             [g_streamCacheTimestamps removeObjectForKey:scUrl];
+        } else {
+            double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+            if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
+                isReplacementLoading = NO;
+                playStreamUrl(cached, trackKey, 0.0);
+                return;
+            } else {
+                [g_streamCache removeObjectForKey:scUrl];
+                [g_streamCacheTimestamps removeObjectForKey:scUrl];
+            }
         }
     }
 
@@ -4408,6 +4449,11 @@ static void custom_setNowPlayingInfo(id target, SEL _cmd, NSDictionary *info) {
         } else if ([kLower containsString:@"elapsed"]) {
             pos = [info[k] doubleValue];
             hasElapsed = YES;
+        } else if ([kLower containsString:@"duration"]) {
+            double dVal = [info[k] doubleValue];
+            if (dVal > 1.0) {
+                g_currentTrackDuration = dVal;
+            }
         } else if ([kLower isEqualToString:@"playbackrate"] || ([kLower containsString:@"rate"] && ![kLower containsString:@"default"])) {
             isPlaying = ([info[k] floatValue] > 0.01f);
             hasRate = YES;
@@ -5896,6 +5942,10 @@ static void custom_UIControl_sendActionsForControlEvents(UIControl *self, SEL _c
     if ((events & (UIControlEventValueChanged | UIControlEventTouchUpInside | UIControlEventTouchUpOutside)) != 0) {
         if ([self isKindOfClass:[UISlider class]]) {
             UISlider *slider = (UISlider *)self;
+            // Игнорируем программные тики от Spotify — реагируем ТОЛЬКО когда пользователь реально тянет слайдер!
+            if (!slider.isTracking && (events & UIControlEventValueChanged) != 0) {
+                return;
+            }
             NSString *cls = NSStringFromClass([slider class]);
             if (![cls containsString:@"Volume"] && slider.bounds.size.width > 60.0) {
                 float maxV = slider.maximumValue;
