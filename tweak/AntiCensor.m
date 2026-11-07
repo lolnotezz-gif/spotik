@@ -48,6 +48,7 @@ static void showLyricsEditPrompt(NSString *uri, NSString *title, NSString *artis
 static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist);
 static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics);
 static void persistLyrics(NSDictionary *dict);
+static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPosition);
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition);
 static void stopReplacementAudio(void);
 static void safeSeekPlayerToTime(double targetSeconds);
