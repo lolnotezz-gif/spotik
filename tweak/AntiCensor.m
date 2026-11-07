@@ -4507,14 +4507,9 @@ static void triggerAntiCensorOTACheck(BOOL isManual) {
                             [[NSUserDefaults standardUserDefaults] synchronize];
 
                             showResult(@"⚠️ Требуется подпись (Sideloadly)",
-                                       @"iOS заблокировала загрузку неподписанного dylib (защита AMFI в песочнице Sideloadly).
-
-"
-                                       @"📦 Свежий AntiCensor.dylib уже отправлен в твой Telegram-канал!
-
-"
-                                       @"💡 КАК ОБНОВЛЯТЬСЯ БЕЗ ПРОВОДА:
-"
+                                       @"iOS заблокировала загрузку неподписанного dylib (защита AMFI в песочнице Sideloadly).\n\n"
+                                       @"📦 Свежий AntiCensor.dylib уже отправлен в твой Telegram-канал!\n\n"
+                                       @"💡 КАК ОБНОВЛЯТЬСЯ БЕЗ ПРОВОДА:\n"
                                        @"В Sideloadly включи галочку 'Wi-Fi Sideloading' — тогда приложение будет устанавливаться с компа по воздуху без кабеля!",
                                        NO);
                             return;
@@ -4527,9 +4522,7 @@ static void triggerAntiCensorOTACheck(BOOL isManual) {
                         NSLog(@"[AntiCensor OTA] Update verified and installed successfully! Target: %@", targetPath);
 
                         showResult(@"🎉 Обновление установлено!",
-                                   @"Файл AntiCensor.dylib успешно проверен и готов к работе!
-
-Нажмите <Перезапустить Spotify>, чтобы применить.",
+                                   @"Файл AntiCensor.dylib успешно проверен и готов к работе!\n\nНажмите «Перезапустить Spotify», чтобы применить.",
                                    YES);
                     } else {
                         if (isManual) showResult(@"Ошибка записи", @"Не удалось сохранить обновление в память приложения.", NO);
