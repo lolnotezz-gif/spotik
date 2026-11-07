@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.4.3-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110711
+#define ANTICENSOR_VERSION_STRING @"v5.4.4-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110712
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -3186,10 +3186,7 @@ static BOOL isFullScreenLyricsScrollView(UIScrollView *sv) {
                 return NO;
             }
         }
-        if ([resp isKindOfClass:[UITabBarController class]]) {
-            UITabBarController *tbc = (UITabBarController *)resp;
-            if (!tbc.presentedViewController) return NO;
-        }
+// TabBar check removed so non-modal lyrics in Spotify are supported
         resp = resp.nextResponder;
     }
 
@@ -3228,27 +3225,19 @@ static UIScrollView *findLyricsScrollViewInView(UIView *win) {
     if (!win || win.hidden || win.alpha < 0.05) return nil;
     if (win.tag == KARAOKE_CONTAINER_TAG) return nil;
 
-    // Ищем полноэкранный экран слов ТОЛЬКО среди представленных view controller'ов (modal / presented)
-    UIViewController *topVC = getKeyAppWindow().rootViewController;
-    while (topVC.presentedViewController && !topVC.presentedViewController.isBeingDismissed) {
-        topVC = topVC.presentedViewController;
-    }
-    if (topVC && topVC.view && !topVC.view.hidden) {
-        // Проверяем, что это модальный экран (не корневой таббар/навигация)
-        if (topVC != getKeyAppWindow().rootViewController) {
-            NSMutableArray *queue = [NSMutableArray arrayWithObject:topVC.view];
-            while (queue.count > 0) {
-                UIView *v = queue.firstObject;
-                [queue removeObjectAtIndex:0];
-                if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
-                    UIScrollView *sv = (UIScrollView *)v;
-                    if (isFullScreenLyricsScrollView(sv)) {
-                        return sv;
-                    }
-                }
-                [queue addObjectsFromArray:v.subviews];
+    // Search across the window view hierarchy for modern Spotify lyrics scrollviews
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!v || v.hidden || v.alpha < 0.05) continue;
+        if ([v isKindOfClass:[UIScrollView class]] && v.tag != KARAOKE_CONTAINER_TAG) {
+            UIScrollView *sv = (UIScrollView *)v;
+            if (isFullScreenLyricsScrollView(sv)) {
+                return sv;
             }
         }
+        [queue addObjectsFromArray:v.subviews];
     }
 
     return nil;
@@ -4293,14 +4282,32 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
     // ПРОВЕРКА: Если этот трек УЖЕ играет или прямо сейчас загружается — НЕ СБРАСЫВАТЬ!
     BOOL isSameTrackAndUrl = [trackKey isEqualToString:currentPlayingKey] && [repUrl isEqualToString:currentPlayingUrl];
     if (isSameTrackAndUrl && (ourAudioPlayer != nil || isReplacementLoading)) {
-        if (ourAudioPlayer && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
+        if (!isPlaying) {
+            isSpotifyCurrentlyPlaying = NO;
+            if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+                [ourAudioPlayer pause];
+            }
+        } else if (ourAudioPlayer && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
+            isSpotifyCurrentlyPlaying = YES;
             [ourAudioPlayer play];
         }
         updateNowPlayingCenter();
         return;
     }
 
-    // Новый трек или смена URL: запускаем замену
+    // If Spotify is currently PAUSED, do not start audio!
+    if (!isPlaying) {
+        isSpotifyCurrentlyPlaying = NO;
+        currentPlayingKey = trackKey;
+        currentPlayingUrl = repUrl;
+        if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+            [ourAudioPlayer pause];
+        }
+        updateNowPlayingCenter();
+        return;
+    }
+
+    // New replacement track and Spotify is actively playing: start replacement audio
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
     isSpotifyCurrentlyPlaying = YES;
