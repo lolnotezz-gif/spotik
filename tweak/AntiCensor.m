@@ -21,13 +21,13 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.3.0-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110705
+#define ANTICENSOR_VERSION_STRING @"v5.3.1-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110706
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
 #define DEFAULT_SERVER_URL         @"https://spotik-in4b.onrender.com"
-#define SC_CLIENT_ID               @"2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF"
+#define SC_CLIENT_ID               @"39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ"
 #define NOWPLAYING_LYRICS_CARD_TAG 0xAC999
 
 static void cleanupRogueBanners(void);
@@ -901,11 +901,15 @@ static void loadStreamCacheFromDisk(void) {
         if ([item isKindOfClass:[NSDictionary class]]) {
             NSString *urlStr = item[@"url"];
             NSNumber *ts = item[@"ts"];
-            if (urlStr && ts && (now - [ts doubleValue] < 7200.0)) {
-                NSURL *u = [NSURL URLWithString:urlStr];
-                if (u) {
-                    g_streamCache[k] = u;
-                    g_streamCacheTimestamps[k] = ts;
+            if (urlStr && ts) {
+                // Временные подписанные CloudFront ссылки SoundCloud протухают за 3 минуты!
+                double maxAge = ([urlStr containsString:@"soundcloud.cloud"] || [urlStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+                if (now - [ts doubleValue] < maxAge) {
+                    NSURL *u = [NSURL URLWithString:urlStr];
+                    if (u) {
+                        g_streamCache[k] = u;
+                        g_streamCacheTimestamps[k] = ts;
+                    }
                 }
             }
         }
@@ -923,20 +927,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         loadStreamCacheFromDisk();
     }
 
-    // 1. Instant Cache check with 2-hour TTL (7100 seconds)
-    NSURL *cached = g_streamCache[rawUrl];
-    NSNumber *cachedTs = g_streamCacheTimestamps[rawUrl];
-    if (cached) {
-        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < 7100.0)) {
-            if (completion) completion(cached);
-            return;
-        } else {
-            [g_streamCache removeObjectForKey:rawUrl];
-            [g_streamCacheTimestamps removeObjectForKey:rawUrl];
-        }
-    }
-
-    // 2. Direct local file check (from mobile device)
+    // 1. Проверка локального файла с устройства
     if ([rawUrl hasPrefix:@"local://"] || [rawUrl hasPrefix:@"file://"] || [rawUrl containsString:@"AntiCensor_AudioFiles"]) {
         NSString *filename = [rawUrl lastPathComponent];
         NSString *fullPath = [getLocalAudioDirectoryPath() stringByAppendingPathComponent:filename];
@@ -963,8 +954,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         return;
     }
 
-    // 3. Direct audio URLs (MP3 / M3U8) -> ZERO latency!
-    if ([rawUrl hasSuffix:@".mp3"] || [rawUrl hasSuffix:@".m3u8"] || [rawUrl containsString:@"media-streaming.soundcloud.cloud"] || [rawUrl containsString:@"cf-media.sndcdn.com"]) {
+    // 2. Прямые MP3/M3U8 ссылки или бэкенд Render
+    if ([rawUrl hasSuffix:@".mp3"] || [rawUrl containsString:@"onrender.com"]) {
         NSURL *u = [NSURL URLWithString:rawUrl];
         g_streamCache[rawUrl] = u;
         g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
@@ -972,20 +963,37 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         return;
     }
 
-    // Render backend fallback helper (Guarantees playback even if SoundCloud API fails!)
+    // 3. Проверка кэша (с учетом короткого TTL для CloudFront)
+    NSURL *cached = g_streamCache[rawUrl];
+    NSNumber *cachedTs = g_streamCacheTimestamps[rawUrl];
+    if (cached) {
+        NSString *cachedStr = cached.absoluteString;
+        double maxAge = ([cachedStr containsString:@"soundcloud.cloud"] || [cachedStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+        if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
+            if (completion) completion(cached);
+            return;
+        } else {
+            [g_streamCache removeObjectForKey:rawUrl];
+            [g_streamCacheTimestamps removeObjectForKey:rawUrl];
+        }
+    }
+
+    // Надежный Render fallback: если прямая ссылка не работает, Render скачает и отдаст MP3!
     void (^useRenderFallback)(NSString *) = ^(NSString *urlToFallback) {
         NSString *server = getServerURL();
-        NSString *encoded = [urlToFallback stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+        NSString *clean = [urlToFallback componentsSeparatedByString:@"?"].firstObject;
+        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
         NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
-        NSLog(@"[AntiCensor] SoundCloud streaming via Render backend: %@", renderUrl);
+        NSLog(@"[AntiCensor] SoundCloud playback via Render backend: %@", renderUrl);
         if (renderUrl) {
             g_streamCache[rawUrl] = renderUrl;
             g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+            saveStreamCacheToDisk();
         }
         if (completion) completion(renderUrl);
     };
 
-    // SoundCloud API v2 resolver
+    // SoundCloud API v2 резолвер
     void (^doApiResolve)(NSString *) = ^(NSString *canonicalUrl) {
         if (!canonicalUrl || canonicalUrl.length == 0) {
             useRenderFallback(rawUrl);
@@ -994,26 +1002,29 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         NSString *clean = [canonicalUrl componentsSeparatedByString:@"?"].firstObject;
         clean = [clean stringByReplacingOccurrencesOfString:@"m.soundcloud.com" withString:@"soundcloud.com"];
 
-        // Check cache with clean URL
         NSURL *cClean = g_streamCache[clean];
         NSNumber *tsClean = g_streamCacheTimestamps[clean];
-        if (cClean && (!tsClean || ([NSDate timeIntervalSinceReferenceDate] - [tsClean doubleValue] < 7100.0))) {
-            g_streamCache[rawUrl] = cClean;
-            g_streamCacheTimestamps[rawUrl] = tsClean;
-            if (completion) completion(cClean);
-            return;
+        if (cClean) {
+            NSString *cStr = cClean.absoluteString;
+            double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+            if (!tsClean || ([NSDate timeIntervalSinceReferenceDate] - [tsClean doubleValue] < maxAge)) {
+                g_streamCache[rawUrl] = cClean;
+                g_streamCacheTimestamps[rawUrl] = tsClean;
+                if (completion) completion(cClean);
+                return;
+            }
         }
 
         NSString *endpoint = [NSString stringWithFormat:@"https://api-v2.soundcloud.com/resolve?url=%@&client_id=%@",
                               [clean stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
-        [req setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:3.5];
+        [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
+        [req setTimeoutInterval:2.0]; // Быстрый таймаут: если SC заблокирован провайдером, сразу уходим на Render!
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
-                NSLog(@"[AntiCensor] API v2 resolve failed for %@: %@", clean, err);
+                NSLog(@"[AntiCensor] API v2 resolve unreachable (possibly blocked by ISP), falling back to Render: %@", err);
                 useRenderFallback(clean);
                 return;
             }
@@ -1022,15 +1033,31 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                 NSArray *trans = json[@"media"][@"transcodings"];
                 if (trans && [trans isKindOfClass:[NSArray class]] && trans.count > 0) {
                     NSDictionary *chosen = nil;
+                    // 1. Приоритет: progressive (MP3)
                     for (NSDictionary *t in trans) {
-                        if ([t[@"format"][@"protocol"] isEqualToString:@"progressive"]) { chosen = t; break; }
-                    }
-                    if (!chosen) {
-                        for (NSDictionary *t in trans) {
-                            if ([t[@"url"] containsString:@"aac_160k"]) { chosen = t; break; }
+                        if ([t[@"format"][@"protocol"] isEqualToString:@"progressive"]) {
+                            chosen = t;
+                            break;
                         }
                     }
-                    if (!chosen) chosen = trans.firstObject;
+                    // 2. Приоритет: чистый НЕЗАШИФРОВАННЫЙ HLS! Строго исключаем cbc-encrypted и ctr-encrypted!
+                    if (!chosen) {
+                        for (NSDictionary *t in trans) {
+                            NSString *proto = t[@"format"][@"protocol"] ?: @"";
+                            NSString *u = t[@"url"] ?: @"";
+                            if ([proto isEqualToString:@"hls"] && ![u containsString:@"encrypted"] && ![proto containsString:@"cbc"] && ![proto containsString:@"ctr"]) {
+                                chosen = t;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Если все транскодинги зашифрованы FairPlay DRM — отдаем на Render сервер!
+                    if (!chosen) {
+                        NSLog(@"[AntiCensor] All transcodings are DRM-encrypted, using Render fallback for %@", clean);
+                        useRenderFallback(clean);
+                        return;
+                    }
 
                     NSString *sApi = chosen[@"url"];
                     if (sApi) {
@@ -1040,8 +1067,8 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                             fullSApi = [fullSApi stringByAppendingFormat:@"&track_authorization=%@", json[@"track_authorization"]];
                         }
                         NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:fullSApi]];
-                        [req2 setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
-                        [req2 setTimeoutInterval:3.5];
+                        [req2 setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
+                        [req2 setTimeoutInterval:2.0];
 
                         [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
                             if (d2 && !e2) {
@@ -1057,12 +1084,12 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                                         g_streamCacheTimestamps[clean] = nowTs;
                                         saveStreamCacheToDisk();
                                     }
-                                    NSLog(@"[AntiCensor] Resolved stream URL for %@: %@", clean, fastUrl);
+                                    NSLog(@"[AntiCensor] Resolved direct audio stream for %@: %@", clean, fastUrl);
                                     if (completion) completion(fastUrl);
                                     return;
                                 }
                             }
-                            NSLog(@"[AntiCensor] Transcoding media url fetch failed, using Render fallback for %@", clean);
+                            NSLog(@"[AntiCensor] Direct media fetch failed, using Render fallback for %@", clean);
                             useRenderFallback(clean);
                         }] resume];
                         return;
@@ -1075,23 +1102,16 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         }] resume];
     };
 
-    // 4. Follow redirect for on.soundcloud.com, t.co, bit.ly
+    // Редирект для коротких ссылок on.soundcloud.com
     if ([rawUrl containsString:@"on.soundcloud.com"] || [rawUrl containsString:@"t.co"] || [rawUrl containsString:@"bit.ly"]) {
-        NSMutableURLRequest *headReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
-        [headReq setHTTPMethod:@"HEAD"];
-        [headReq setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
-        [headReq setTimeoutInterval:3.5];
+        NSMutableURLRequest *redReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
+        [redReq setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
+        [redReq setTimeoutInterval:2.0];
 
-        [[[NSURLSession sharedSession] dataTaskWithRequest:headReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        [[[NSURLSession sharedSession] dataTaskWithRequest:redReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             NSString *finalUrl = r.URL.absoluteString;
             if (!finalUrl || [finalUrl containsString:@"on.soundcloud.com"] || finalUrl.length < 15) {
-                NSMutableURLRequest *getReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
-                [getReq setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
-                [getReq setTimeoutInterval:4.0];
-                [[[NSURLSession sharedSession] dataTaskWithRequest:getReq completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
-                    NSString *finalUrl2 = r2.URL.absoluteString ?: rawUrl;
-                    doApiResolve(finalUrl2);
-                }] resume];
+                useRenderFallback(rawUrl);
                 return;
             }
             doApiResolve(finalUrl);
@@ -1290,39 +1310,47 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         if (item.status == AVPlayerItemStatusReadyToPlay) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
-                if (!g_isPlayerFading) {
-                    ourAudioPlayer.volume = 1.0f;
-                }
-                double targetSeconds = getCurrentSpotifyPreciseTime();
-                if (targetSeconds > 2.0) {
-                    safeSeekPlayerToTime(targetSeconds);
-                } else {
-                    if (ourAudioPlayer) {
-                        isSpotifyCurrentlyPlaying = YES;
-                        [ourAudioPlayer play];
-                    }
-                }
+                ourAudioPlayer.volume = 1.0f;
+                isSpotifyCurrentlyPlaying = YES;
+                [ourAudioPlayer play];
+                updateNowPlayingCenter();
             });
         } else if (item.status == AVPlayerItemStatusFailed) {
             NSLog(@"[AntiCensor] AVPlayerItem failed: %@. Spotify STAYS MUTED to prevent censorship leak!", item.error);
-            // СТРОГО: Ни в коем случае НЕ размьючиваем Spotify! Цензурный оригинал НИКОГДА не должен прорываться в эфир!
             isMutingSpotify = YES;
             applyMuteStateToAllUnits();
 
-            if (currentPlayingKey) {
-                NSString *currRep = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
-                if (currRep) {
+            NSString *currRep = currentPlayingUrl;
+            if (!currRep && currentPlayingKey) {
+                currRep = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+            }
+
+            if (currRep) {
+                if (g_streamCache) {
                     [g_streamCache removeObjectForKey:currRep];
                     if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:currRep];
+                    saveStreamCacheToDisk();
+                }
+
+                // СПАСАТЕЛЬНЫЙ КРУГ: Если прямой поток с SoundCloud упал — МГНОВЕННО переключаем на Render!
+                if (![currRep containsString:@"onrender.com"]) {
+                    NSString *server = getServerURL();
+                    NSString *encoded = [currRep stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+                    NSURL *renderFallback = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
+                    NSLog(@"[AntiCensor] Direct stream failed, instantly rescuing playback via Render: %@", renderFallback);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        playStreamUrl(renderFallback, currentPlayingKey, 0.0);
+                    });
+                    return;
                 }
             }
 
-            // Перезагружаем заменяющий поток в тишине через 1.0 сек
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Если даже Render на секунду споткнулся — повторить попытку через 1.5 сек
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (currentPlayingKey && isSpotifyCurrentlyPlaying) {
-                    NSString *currRep = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
-                    if (currRep) {
-                        startReplacementAudio(currentPlayingKey, currRep, getCurrentSpotifyPreciseTime());
+                    NSString *rRep = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+                    if (rRep) {
+                        startReplacementAudio(currentPlayingKey, rRep, 0.0);
                     }
                 }
             });

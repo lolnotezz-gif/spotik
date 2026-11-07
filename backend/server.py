@@ -23,7 +23,7 @@ try:
 except Exception:
     pass
 
-SC_CLIENT_ID = os.environ.get("SC_CLIENT_ID", "2yeWkbX88QhTzS3OtZp8cLGaJRrOAWwF")
+SC_CLIENT_ID = os.environ.get("SC_CLIENT_ID", "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ")
 
 in_progress_lock = threading.Lock()
 in_progress_urls = set()
@@ -93,8 +93,11 @@ def resolve_sc_to_file(raw_url):
         if not trans:
             return None
 
-        prog = next((x for x in trans if x.get('format', {}).get('protocol') == 'progressive'), None)
-        hls_trans = next((x for x in trans if x.get('format', {}).get('protocol') == 'hls'), trans[0])
+        unenc = [x for x in trans if 'encrypted' not in x.get('format', {}).get('protocol', '')]
+        valid_trans = unenc if unenc else trans
+
+        prog = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'progressive'), None)
+        hls_trans = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'hls'), valid_trans[0])
 
         chosen = prog or hls_trans
         stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
