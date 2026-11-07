@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.4.1-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110709
+#define ANTICENSOR_VERSION_STRING @"v5.4.3-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110711
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1173,16 +1173,17 @@ static UIButton *floatingPillButton = nil;
 static double getCurrentSpotifyPreciseTime(void) {
     if (isReplacementLoading) {
         lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-        return 0.0;
+        return (lastKnownSpotifyPosition > 0.0) ? lastKnownSpotifyPosition : 0.0;
     }
     if (ourAudioPlayer && ourAudioPlayer.currentItem) {
-        if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate) {
-            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-            return 0.0;
-        }
         double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
         if (!isnan(ourPos) && ourPos >= 0) {
+            lastKnownSpotifyPosition = ourPos;
+            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
             return ourPos;
+        }
+        if (lastKnownSpotifyPosition >= 0.0) {
+            return lastKnownSpotifyPosition;
         }
     }
 
@@ -1308,6 +1309,8 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         }
     }
 
+    lastKnownSpotifyPosition = targetSeconds;
+    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
     g_pendingSeekTarget = targetSeconds;
 
     if (g_isPlayerSeeking) {
@@ -1319,10 +1322,9 @@ static void safeSeekPlayerToTime(double targetSeconds) {
     g_pendingSeekTarget = -1.0;
 
     CMTime seekTime = CMTimeMakeWithSeconds(toSeek, NSEC_PER_SEC);
-    CMTime tolerance = CMTimeMakeWithSeconds(0.3, NSEC_PER_SEC);
 
-    // Сторожевой сброс флага перемотки: если плеер зависнет, не теряем отложенный запрос!
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Watchdog timer to ensure seek flag resets
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (g_isPlayerSeeking) {
             g_isPlayerSeeking = NO;
             if (g_pendingSeekTarget >= 0) {
@@ -1333,9 +1335,11 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         }
     });
 
-    [ourAudioPlayer seekToTime:seekTime toleranceBefore:tolerance toleranceAfter:tolerance completionHandler:^(BOOL finished) {
+    [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             g_isPlayerSeeking = NO;
+            lastKnownSpotifyPosition = toSeek;
+            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
             if (g_pendingSeekTarget >= 0) {
                 double nextPos = g_pendingSeekTarget;
                 g_pendingSeekTarget = -1.0;
@@ -2703,6 +2707,26 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     g_lastUserLyricsInteractionTime = [NSDate timeIntervalSinceReferenceDate];
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Strategy A: MPRemoteCommandCenter changePlaybackPositionCommand
+        @try {
+            MPRemoteCommandCenter *cc = [MPRemoteCommandCenter sharedCommandCenter];
+            Class evtClass = NSClassFromString(@"MPChangePlaybackPositionCommandEvent");
+            if (evtClass && cc.changePlaybackPositionCommand) {
+                id evt = [[evtClass alloc] init];
+                @try { [evt setValue:@(targetSeconds) forKey:@"positionTime"]; } @catch (...) {}
+                @try { [evt setValue:@(targetSeconds) forKey:@"_positionTime"]; } @catch (...) {}
+                SEL remSel = NSSelectorFromString(@"performWithEvent:");
+                if ([cc.changePlaybackPositionCommand respondsToSelector:remSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    [cc.changePlaybackPositionCommand performSelector:remSel withObject:evt];
+#pragma clang diagnostic pop
+                }
+            }
+        } @catch (...) {}
+
+        // Strategy B: UISlider touch simulation + direct action trigger
+        UISlider *progressSlider = nil;
         NSArray *windows = [UIApplication sharedApplication].windows;
         for (UIWindow *win in windows) {
             if (!win || win.hidden) continue;
@@ -2713,27 +2737,56 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
                 if ([v isKindOfClass:[UISlider class]]) {
                     UISlider *slider = (UISlider *)v;
                     NSString *cls = NSStringFromClass([slider class]);
-                    // Пропускаем регуляторы громкости, чтобы не сбивать звук наушников
-                    if (![cls containsString:@"Volume"] && slider.bounds.size.width > 80.0) {
-                        float minV = slider.minimumValue;
+                    if (![cls containsString:@"Volume"] && slider.bounds.size.width > 100.0 &&
+                        slider.isUserInteractionEnabled && !slider.isHidden) {
                         float maxV = slider.maximumValue;
-                        if (maxV > minV) {
-                            float val = 0.0f;
-                            if (maxV <= 1.05f && maxV >= 0.95f) {
-                                val = (duration > 0) ? (float)(targetSeconds / duration) : 0.0f;
-                            } else {
-                                val = (float)targetSeconds;
-                            }
-                            if (val < minV) val = minV;
-                            if (val > maxV) val = maxV;
-                            slider.value = val;
-                            [slider sendActionsForControlEvents:UIControlEventValueChanged];
-                            [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
-                            [slider sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
+                        float minV = slider.minimumValue;
+                        if (maxV > minV && maxV > 0.0f) {
+                            progressSlider = slider;
+                            break;
                         }
                     }
                 }
                 [queue addObjectsFromArray:v.subviews];
+            }
+            if (progressSlider) break;
+        }
+
+        if (progressSlider) {
+            float minV = progressSlider.minimumValue;
+            float maxV = progressSlider.maximumValue;
+            float val = 0.0f;
+            if (maxV <= 1.05f && maxV >= 0.95f) {
+                val = (duration > 0) ? (float)(targetSeconds / duration) : 0.0f;
+            } else {
+                val = (float)targetSeconds;
+            }
+            val = MAX(minV, MIN(maxV, val));
+            [progressSlider setValue:val animated:NO];
+            [progressSlider sendActionsForControlEvents:UIControlEventTouchDown];
+            [progressSlider sendActionsForControlEvents:UIControlEventValueChanged];
+            [progressSlider sendActionsForControlEvents:UIControlEventTouchUpInside];
+
+            // Directly invoke registered targets for UIControlEventValueChanged and TouchUpInside
+            for (id target in [progressSlider allTargets]) {
+                for (NSString *actionStr in [progressSlider actionsForTarget:target forControlEvent:UIControlEventValueChanged]) {
+                    SEL action = NSSelectorFromString(actionStr);
+                    if ([target respondsToSelector:action]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        [target performSelector:action withObject:progressSlider];
+#pragma clang diagnostic pop
+                    }
+                }
+                for (NSString *actionStr in [progressSlider actionsForTarget:target forControlEvent:UIControlEventTouchUpInside]) {
+                    SEL action = NSSelectorFromString(actionStr);
+                    if ([target respondsToSelector:action]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        [target performSelector:action withObject:progressSlider];
+#pragma clang diagnostic pop
+                    }
+                }
             }
         }
     });
@@ -2834,6 +2887,13 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
 
     // 3. Мгновенная визуальная подсветка нажатой строки белым цветом
     g_lastActiveKaraokeIdx = idx;
+    lastKnownSpotifyPosition = seekTarget;
+    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        lastKnownSpotifyPosition = seekTarget;
+        lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        checkAndSyncLyricsOnScreen();
+    });
     [UIView animateWithDuration:0.15 animations:^{
         for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
             UILabel *lbl = g_currentKaraokeLabels[i];
@@ -2877,12 +2937,18 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     if (!g_currentKaraokeLabels || g_currentKaraokeLabels.count == 0) return;
 
     CGPoint pt = [gesture locationInView:gesture.view];
-    for (UILabel *l in g_currentKaraokeLabels) {
-        if (CGRectContainsPoint(l.frame, pt)) {
-            return; // Уже обработано жестом нажатия конкретной строки!
+
+    // 1. Check if user tapped directly on a lyric line (with touch padding)
+    for (NSUInteger i = 0; i < g_currentKaraokeLabels.count; i++) {
+        UILabel *l = g_currentKaraokeLabels[i];
+        CGRect hitBox = CGRectInset(l.frame, -14.0, -10.0);
+        if (CGRectContainsPoint(hitBox, pt)) {
+            [self handleSeekToLyricIndex:(NSInteger)i inView:l];
+            return;
         }
     }
 
+    // 2. If tapped between lines or in padding, find the nearest line
     NSInteger closestIdx = -1;
     CGFloat minDistance = CGFLOAT_MAX;
 
@@ -2896,7 +2962,7 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
         }
     }
 
-    if (closestIdx >= 0 && minDistance < 120.0) {
+    if (closestIdx >= 0 && minDistance < 160.0) {
         [self handleSeekToLyricIndex:closestIdx inView:g_currentKaraokeLabels[closestIdx]];
     }
 }
