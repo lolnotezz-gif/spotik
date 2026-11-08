@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.7-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110720
+#define ANTICENSOR_VERSION_STRING @"v5.5.8-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026110801
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -402,6 +402,7 @@ static BOOL s_isAlbumScreenVisible = NO;
 
 static int identifyAlbumTrackIndex(NSString *text) {
     if (!text || ![text isKindOfClass:[NSString class]] || text.length == 0) return -1;
+    if (text.length > 35) return -1; // СТРОЖАЙШЕ: строка длиннее 35 символов (кусок текста песни) НЕ МОЖЕТ быть названием трека!
     NSString *clean = text.lowercaseString;
     clean = [clean stringByReplacingOccurrencesOfString:@"ё" withString:@"е"];
     clean = [clean stringByReplacingOccurrencesOfString:@"$" withString:@"s"];
@@ -412,18 +413,19 @@ static int identifyAlbumTrackIndex(NSString *text) {
     clean = [clean stringByReplacingOccurrencesOfString:@"—" withString:@" "];
     clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-    if ([clean containsString:@"one week record"]) return 0;
-    if ([clean containsString:@"needforspeed"] || [clean containsString:@"need for speed"]) return 1;
-    if ([clean containsString:@"senpa1"] || [clean containsString:@"senpai"]) return 2;
-    if ([clean containsString:@"хулиеу"] || [clean containsString:@"хулиёу"]) return 3;
+    if ([clean isEqualToString:@"one week record"] || [clean hasPrefix:@"one week record"]) return 0;
+    if ([clean isEqualToString:@"needforspeed"] || [clean isEqualToString:@"need for speed"] || [clean hasPrefix:@"needforspeed "] || [clean hasPrefix:@"need for speed "]) return 1;
+    if ([clean isEqualToString:@"senpa1"] || [clean isEqualToString:@"senpai"]) return 2;
+    if ([clean isEqualToString:@"хулиеу"] || [clean isEqualToString:@"хулиёу"] || [clean hasPrefix:@"хулиеу "] || [clean hasPrefix:@"хулиёу "]) return 3;
     if ([clean isEqualToString:@"крыша"] || [clean isEqualToString:@"krysha"] || [clean hasPrefix:@"крыша "] || [clean hasPrefix:@"krysha "]) return 4;
     if ([clean containsString:@"фантастические твари"]) return 5;
-    if ([clean containsString:@"не виноват что"] || [clean containsString:@"я не виноват"]) return 6;
-    if ([clean containsString:@"fuck it"] || [clean containsString:@"fuckit"]) return 7;
+    if ([clean isEqualToString:@"я не виноват что больше"] || [clean isEqualToString:@"не виноват что больше"] || [clean isEqualToString:@"не виноват что"] || [clean hasPrefix:@"я не виноват что"]) return 6;
+    if ([clean isEqualToString:@"fuck it"] || [clean isEqualToString:@"fuckit"] || [clean hasPrefix:@"fuck it "] || [clean hasPrefix:@"fuckit "]) return 7;
     if ([clean containsString:@"shake your a"]) return 8;
     if ([clean isEqualToString:@"мразотик"] || [clean isEqualToString:@"mrazotik"] || [clean hasPrefix:@"мразотик "] || [clean hasPrefix:@"mrazotik "]) return 9;
     if ([clean isEqualToString:@"notime"] || [clean isEqualToString:@"no time"] || [clean hasPrefix:@"notime "] || [clean hasPrefix:@"no time "]) return 10;
-    if ([clean containsString:@"четный"] || [clean containsString:@"бонус трек"] || [clean containsString:@"bonus track"] || [clean containsString:@"эйфория"]) return 11;
+    // СТРОГО: Исключены любые случайные слова вроде 'эйфория' или 'bonus track'! Только реальное название трека 'четный'!
+    if ([clean isEqualToString:@"четный"] || [clean isEqualToString:@"чётный"] || [clean hasPrefix:@"четный "] || [clean hasPrefix:@"чётный "] || [clean containsString:@"четный bonus"] || [clean containsString:@"чётный bonus"]) return 11;
 
     return -1;
 }
@@ -2561,6 +2563,16 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
     UIView *targetView = gesture.view;
     if (!targetView) return;
 
+    // СТРОЖАЙШАЯ ЗАЩИТА: Если клик произошел внутри экрана текста или караоке — НЕ ТРОГАЕМ!
+    UIView *pCheck = targetView;
+    while (pCheck) {
+        NSString *cls = NSStringFromClass([pCheck class]);
+        if ([cls containsString:@"Lyric"] || [cls containsString:@"lyric"]) {
+            return;
+        }
+        pCheck = pCheck.superview;
+    }
+
     UIView *actualCell = targetView;
     while (actualCell && ![actualCell isKindOfClass:[UICollectionViewCell class]] && ![actualCell isKindOfClass:[UITableViewCell class]]) {
         actualCell = actualCell.superview;
@@ -2629,14 +2641,28 @@ static void custom_UICollectionViewCell_layoutSubviews(UICollectionViewCell *sel
 static void unGreyAndEnableCell(UIView *cell) {
     if (!cell) return;
 
-    // СТРОЖАЙШАЯ ИЗОЛЯЦИЯ: Никогда не трогать ячейки экрана Медиатеки (Моя медиатека)!
+    // СТРОЖАЙШАЯ ИЗОЛЯЦИЯ: Никогда не трогать ячейки экрана Медиатеки, ячейки текста (Lyrics) и Now Playing!
     UIView *checkParent = cell;
     while (checkParent) {
         NSString *pCls = NSStringFromClass([checkParent class]);
         if ([pCls containsString:@"YourLibrary"] || [pCls containsString:@"Collection"] || [pCls containsString:@"MediaLibrary"]) {
             return;
         }
+        if ([pCls containsString:@"Lyric"] || [pCls containsString:@"lyric"] || [pCls containsString:@"NowPlaying"]) {
+            return;
+        }
+        if ([checkParent isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *sv = (UIScrollView *)checkParent;
+            if (isFullScreenLyricsScrollView(sv)) {
+                return;
+            }
+        }
         checkParent = checkParent.superview;
+    }
+
+    // Если экран альбома сейчас НЕ открыт — СТРОГО выходим и не добавляем жесты к чужим ячейкам!
+    if (!s_isAlbumScreenVisible) {
+        return;
     }
 
     int matchedTrackIdx = -1;
