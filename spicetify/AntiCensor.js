@@ -90,100 +90,101 @@
     const style = document.createElement("style");
     style.id = "anticensor-css";
     style.textContent = `
-      /* 1. COMPLETELY UN-GREY AND ENABLE ALL TRACKLIST ROWS */
-      .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .bP3x1wllVQ1e_m3Zso8t>*,
-      .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .VESw5vtnhlL6UMqsWdUi>*,
-      .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .kuBr0neXe5GgP1fzG1G_>*,
-      .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .OpUv9X6_j1GIyZLFemUL>*,
-      .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2,
-      .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 *,
-      .xwwlUJUZLpjPnZByq04Y,
-      .xwwlUJUZLpjPnZByq04Y *,
-      div[role="row"],
-      div[role="row"] *,
-      [aria-disabled="true"],
-      [aria-disabled="true"] * {
+      /* 1. COMPLETELY UN-GREY AND ENABLE ALL TRACKLIST ROWS IN MAIN VIEW (NEVER SIDEBAR!) */
+      main .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .bP3x1wllVQ1e_m3Zso8t>*,
+      main .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .VESw5vtnhlL6UMqsWdUi>*,
+      main .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .kuBr0neXe5GgP1fzG1G_>*,
+      main .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 .OpUv9X6_j1GIyZLFemUL>*,
+      main .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2,
+      main .xwwlUJUZLpjPnZByq04Y.uWhqNrxEmH2qfzeRF1d2 *,
+      main .xwwlUJUZLpjPnZByq04Y,
+      main .xwwlUJUZLpjPnZByq04Y *,
+      main [data-testid="track-list"] div[role="row"],
+      main [data-testid="track-list"] div[role="row"] *,
+      main .main-trackList-trackList div[role="row"],
+      main .main-trackList-trackList div[role="row"] *,
+      main [data-testid="track-list"] [aria-disabled="true"],
+      main [data-testid="track-list"] [aria-disabled="true"] * {
         opacity: 1 !important;
       }
 
-      .xwwlUJUZLpjPnZByq04Y,
-      div[role="row"] {
+      main .xwwlUJUZLpjPnZByq04Y,
+      main [data-testid="track-list"] div[role="row"],
+      main .main-trackList-trackList div[role="row"] {
         cursor: pointer !important;
         pointer-events: auto !important;
       }
 
       /* 2. NON-ACTIVE TRACK TITLES: Bright clean white (#ffffff) */
-      .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) .WefHxIjXRkivXjQbBdqC,
-      .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) [data-encore-id="text"],
-      .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) .standalone-ellipsis-one-line,
-      .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) div[dir="auto"],
-      .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) a[data-testid="internal-track-link"],
-      div[role="row"]:not(.anticensor-active) .WefHxIjXRkivXjQbBdqC,
-      div[role="row"]:not(.anticensor-active) [data-encore-id="text"],
-      div[role="row"]:not(.anticensor-active) .standalone-ellipsis-one-line,
-      div[role="row"]:not(.anticensor-active) div[dir="auto"] {
+      main .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) .WefHxIjXRkivXjQbBdqC,
+      main .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) [data-encore-id="text"],
+      main .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) .standalone-ellipsis-one-line,
+      main .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) div[dir="auto"],
+      main .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) a[data-testid="internal-track-link"],
+      main [data-testid="track-list"] div[role="row"]:not(.anticensor-active) .WefHxIjXRkivXjQbBdqC,
+      main [data-testid="track-list"] div[role="row"]:not(.anticensor-active) [data-encore-id="text"],
+      main [data-testid="track-list"] div[role="row"]:not(.anticensor-active) .standalone-ellipsis-one-line,
+      main [data-testid="track-list"] div[role="row"]:not(.anticensor-active) div[dir="auto"] {
         color: #ffffff !important;
         opacity: 1 !important;
       }
 
       /* 3. ARTIST / SUBTITLES: Standard Spotify gray (#b3b3b3) */
-      .xwwlUJUZLpjPnZByq04Y .whxt7rw253OMte8aB8Je,
-      .xwwlUJUZLpjPnZByq04Y .whxt7rw253OMte8aB8Je a,
-      .xwwlUJUZLpjPnZByq04Y [data-encore-id="textSecondary"],
-      div[role="row"] .whxt7rw253OMte8aB8Je,
-      div[role="row"] .whxt7rw253OMte8aB8Je a,
-      div[role="row"] [data-encore-id="textSecondary"],
-      div[role="row"] a[href*="/artist/"] {
+      main .xwwlUJUZLpjPnZByq04Y .whxt7rw253OMte8aB8Je,
+      main .xwwlUJUZLpjPnZByq04Y .whxt7rw253OMte8aB8Je a,
+      main .xwwlUJUZLpjPnZByq04Y [data-encore-id="textSecondary"],
+      main [data-testid="track-list"] div[role="row"] .whxt7rw253OMte8aB8Je,
+      main [data-testid="track-list"] div[role="row"] .whxt7rw253OMte8aB8Je a,
+      main [data-testid="track-list"] div[role="row"] [data-encore-id="textSecondary"],
+      main [data-testid="track-list"] div[role="row"] a[href*="/artist/"] {
         color: #b3b3b3 !important;
         opacity: 1 !important;
       }
 
       /* 4. TRACK NUMBERS & DURATION: #b3b3b3 by default */
-      .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) .Aa8Q1IvIum3HH4nBBx9U,
-      div[role="row"]:not(.anticensor-active) .Aa8Q1IvIum3HH4nBBx9U,
-      div[role="row"]:not(.anticensor-active) [class*="number"],
-      .xwwlUJUZLpjPnZByq04Y [aria-colindex="3"],
-      .xwwlUJUZLpjPnZByq04Y [aria-colindex="4"],
-      div[role="row"] [aria-colindex="3"],
-      div[role="row"] [aria-colindex="4"],
-      div[role="row"] [class*="duration"] {
+      main .xwwlUJUZLpjPnZByq04Y:not(.anticensor-active) .Aa8Q1IvIum3HH4nBBx9U,
+      main [data-testid="track-list"] div[role="row"]:not(.anticensor-active) .Aa8Q1IvIum3HH4nBBx9U,
+      main [data-testid="track-list"] div[role="row"]:not(.anticensor-active) [class*="number"],
+      main [data-testid="track-list"] [aria-colindex="3"],
+      main [data-testid="track-list"] [aria-colindex="4"],
+      main [data-testid="track-list"] [class*="duration"] {
         color: #b3b3b3 !important;
         opacity: 1 !important;
       }
 
       /* 5. HOVER EFFECTS ON ROW */
-      .xwwlUJUZLpjPnZByq04Y:hover,
-      div[role="row"]:hover {
+      main .xwwlUJUZLpjPnZByq04Y:hover,
+      main [data-testid="track-list"] div[role="row"]:hover {
         background-color: hsla(0, 0%, 100%, 0.1) !important;
       }
-      .xwwlUJUZLpjPnZByq04Y:hover .whxt7rw253OMte8aB8Je a,
-      div[role="row"]:hover .whxt7rw253OMte8aB8Je a {
+      main .xwwlUJUZLpjPnZByq04Y:hover .whxt7rw253OMte8aB8Je a,
+      main [data-testid="track-list"] div[role="row"]:hover .whxt7rw253OMte8aB8Je a {
         color: #ffffff !important;
       }
-      .xwwlUJUZLpjPnZByq04Y:hover .l9kmLysnmcseyWh8xf0E,
-      div[role="row"]:hover .l9kmLysnmcseyWh8xf0E {
+      main .xwwlUJUZLpjPnZByq04Y:hover .l9kmLysnmcseyWh8xf0E,
+      main [data-testid="track-list"] div[role="row"]:hover .l9kmLysnmcseyWh8xf0E {
         opacity: 1 !important;
         pointer-events: auto !important;
         position: absolute !important;
         display: flex !important;
       }
-      .xwwlUJUZLpjPnZByq04Y:hover .Aa8Q1IvIum3HH4nBBx9U,
-      div[role="row"]:hover .Aa8Q1IvIum3HH4nBBx9U {
+      main .xwwlUJUZLpjPnZByq04Y:hover .Aa8Q1IvIum3HH4nBBx9U,
+      main [data-testid="track-list"] div[role="row"]:hover .Aa8Q1IvIum3HH4nBBx9U {
         display: none !important;
       }
 
       /* 6. ONLY CURRENTLY PLAYING/ACTIVE TRACK IS SPOTIFY GREEN (#1ed760) */
-      .xwwlUJUZLpjPnZByq04Y.anticensor-active .WefHxIjXRkivXjQbBdqC,
-      .xwwlUJUZLpjPnZByq04Y.anticensor-active [data-encore-id="text"],
-      .xwwlUJUZLpjPnZByq04Y.anticensor-active .standalone-ellipsis-one-line,
-      .xwwlUJUZLpjPnZByq04Y.anticensor-active div[dir="auto"],
-      .xwwlUJUZLpjPnZByq04Y.anticensor-active a[data-testid="internal-track-link"],
-      .xwwlUJUZLpjPnZByq04Y.anticensor-active .Aa8Q1IvIum3HH4nBBx9U,
-      div[role="row"].anticensor-active .WefHxIjXRkivXjQbBdqC,
-      div[role="row"].anticensor-active [data-encore-id="text"],
-      div[role="row"].anticensor-active .standalone-ellipsis-one-line,
-      div[role="row"].anticensor-active div[dir="auto"],
-      div[role="row"].anticensor-active .Aa8Q1IvIum3HH4nBBx9U {
+      main .xwwlUJUZLpjPnZByq04Y.anticensor-active .WefHxIjXRkivXjQbBdqC,
+      main .xwwlUJUZLpjPnZByq04Y.anticensor-active [data-encore-id="text"],
+      main .xwwlUJUZLpjPnZByq04Y.anticensor-active .standalone-ellipsis-one-line,
+      main .xwwlUJUZLpjPnZByq04Y.anticensor-active div[dir="auto"],
+      main .xwwlUJUZLpjPnZByq04Y.anticensor-active a[data-testid="internal-track-link"],
+      main .xwwlUJUZLpjPnZByq04Y.anticensor-active .Aa8Q1IvIum3HH4nBBx9U,
+      main [data-testid="track-list"] div[role="row"].anticensor-active .WefHxIjXRkivXjQbBdqC,
+      main [data-testid="track-list"] div[role="row"].anticensor-active [data-encore-id="text"],
+      main [data-testid="track-list"] div[role="row"].anticensor-active .standalone-ellipsis-one-line,
+      main [data-testid="track-list"] div[role="row"].anticensor-active div[dir="auto"],
+      main [data-testid="track-list"] div[role="row"].anticensor-active .Aa8Q1IvIum3HH4nBBx9U {
         color: #1ed760 !important;
         opacity: 1 !important;
       }
@@ -216,9 +217,16 @@
 
   function cleanTracklistRows() {
     injectAntiCensorStyles();
-    const rows = document.querySelectorAll('div[role="row"], .xwwlUJUZLpjPnZByq04Y, [class*="trackListRow"], div[aria-rowindex]');
+    const mainArea = document.querySelector('main, [role="main"]');
+    if (!mainArea) return;
+
+    // СТРОГО: ищем строки только внутри основного контента, исключая боковую панель медиатеки!
+    const rows = mainArea.querySelectorAll('.xwwlUJUZLpjPnZByq04Y, [data-testid="track-list"] div[role="row"], .main-trackList-trackList div[role="row"]');
     for (let idx = 0; idx < rows.length; idx++) {
       const r = rows[idx];
+      if (r.closest('aside, nav, .Root__nav-bar, [aria-label*="Library"], [aria-label*="Медиатека"], [aria-label*="Your Library"]')) {
+        continue;
+      }
       if (r.classList.contains("uWhqNrxEmH2qfzeRF1d2")) {
         r.classList.remove("uWhqNrxEmH2qfzeRF1d2");
       }
@@ -430,29 +438,95 @@
     };
   }
 
+  let lastRightClickedTarget = null;
+  window.addEventListener("contextmenu", (e) => {
+    lastRightClickedTarget = e.target;
+  }, true);
+
+  function resolveTrackUriFromTarget(target) {
+    if (!target) return "";
+    const withUri = target.closest('[data-uri]');
+    if (withUri) {
+      const u = withUri.getAttribute('data-uri');
+      if (u) return u;
+    }
+    const withLink = target.closest('a[href*="/track/"], a[href*="/album/"]');
+    if (withLink) {
+      const href = withLink.getAttribute('href') || "";
+      const m = href.match(/\/(track|album)\/([a-zA-Z0-9]+)/);
+      if (m) return `spotify:${m[1]}:${m[2]}`;
+    }
+    const cardOrRow = target.closest('[data-testid*="track"], div[role="row"], [class*="trackListRow"], [data-testid*="card"]');
+    if (cardOrRow) {
+      const internalLink = cardOrRow.querySelector('a[href*="/track/"], a[href*="/album/"]');
+      if (internalLink) {
+        const href = internalLink.getAttribute('href') || "";
+        const m = href.match(/\/(track|album)\/([a-zA-Z0-9]+)/);
+        if (m) return `spotify:${m[1]}:${m[2]}`;
+      }
+    }
+    return Spicetify.Player?.data?.item?.uri || "";
+  }
+
+  function hookDOMContextMenu() {
+    const observer = new MutationObserver(() => {
+      const menus = document.querySelectorAll('ul.main-contextMenu-menu, [role="menu"]');
+      menus.forEach(menu => {
+        if (menu.querySelector(".anticensor-dom-menu-item")) return;
+
+        const text = menu.textContent || "";
+        // Only inject into track/album context menus
+        if (!text.includes("плейлист") && !text.includes("Любимые") && !text.includes("очередь") && !text.includes("playlist") && !text.includes("queue") && !text.includes("Share") && !text.includes("Поделиться")) {
+          return;
+        }
+
+        const li = document.createElement("li");
+        li.className = "main-contextMenu-menuItem anticensor-dom-menu-item";
+        li.setAttribute("role", "presentation");
+        li.style.cssText = "border-top: 1px solid rgba(255,255,255,0.1); margin-top: 4px; padding-top: 4px;";
+
+        const btn = document.createElement("button");
+        btn.className = "main-contextMenu-menuItemButton";
+        btn.setAttribute("role", "menuitem");
+        btn.style.cssText = "color: #1ed760 !important; font-weight: 700; width: 100%; display: flex; align-items: center; gap: 8px; background: none; border: none; cursor: pointer; padding: 10px 14px; text-align: left;";
+        btn.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="#1ed760" style="flex-shrink: 0;"><path d="M12.5 13H3.75A2.75 2.75 0 0 1 1 10.25c0-1.27.87-2.34 2.07-2.65A4.5 4.5 0 0 1 11.83 5.4 3.75 3.75 0 0 1 15 9.07 2.93 2.93 0 0 1 12.5 13z"></path></svg>
+          <span style="color: #1ed760 !important; font-size: 13px;">AntiCensor: Заменить трек (SoundCloud)</span>
+        `;
+
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          menu.remove();
+          const uri = resolveTrackUriFromTarget(lastRightClickedTarget);
+          openAntiCensorModal(uri || "spotify:track:custom");
+        };
+
+        li.appendChild(btn);
+        menu.appendChild(li);
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
   function setupContextMenu() {
+    hookDOMContextMenu();
+
     if (!Spicetify?.ContextMenu?.Item) {
       setTimeout(setupContextMenu, 400);
       return;
     }
 
-    const cloudIcon = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M12.5 13H3.75A2.75 2.75 0 0 1 1 10.25c0-1.27.87-2.34 2.07-2.65A4.5 4.5 0 0 1 11.83 5.4 3.75 3.75 0 0 1 15 9.07 2.93 2.93 0 0 1 12.5 13z"></path></svg>`;
-
-    new Spicetify.ContextMenu.Item(
-      "☁️ AntiCensor: Заменить трек (SoundCloud)",
-      (uris) => {
-        if (!uris || !uris[0]) return;
-        openAntiCensorModal(uris[0]);
-      },
-      (uris) => {
-        if (!uris || !uris[0]) return false;
-        const u = uris[0];
-        return u.startsWith("spotify:track:") || u.startsWith("spotify:episode:") || u.includes("/track/");
-      },
-      cloudIcon
-    ).register();
-
-    console.log("[AntiCensor PC] Context menu item registered successfully!");
+    try {
+      new Spicetify.ContextMenu.Item(
+        "☁️ AntiCensor: Заменить трек (SoundCloud)",
+        (uris) => {
+          const u = (uris && uris[0]) ? uris[0] : resolveTrackUriFromTarget(lastRightClickedTarget);
+          openAntiCensorModal(u);
+        },
+        () => true
+      ).register();
+    } catch (_) {}
   }
 
   function openAntiCensorDashboard() {
@@ -1098,8 +1172,9 @@
       }
     }
 
-    // 2. Tracklist row
-    const row = evt.target && evt.target.closest && evt.target.closest('div[role="row"], .xwwlUJUZLpjPnZByq04Y, [class*="trackListRow"], div[aria-rowindex]');
+    // 2. Tracklist row (NEVER sidebar)
+    if (evt.target.closest('aside, nav, [aria-label*="Library"], [aria-label*="Медиатека"]')) return;
+    const row = evt.target && evt.target.closest && evt.target.closest('main div[role="row"], .xwwlUJUZLpjPnZByq04Y, [class*="trackListRow"], main div[aria-rowindex]');
     if (!row) return;
 
     if (evt.target.closest('button[data-testid*="more"], button[data-testid*="context-menu"], button[aria-haspopup="menu"]')) {
