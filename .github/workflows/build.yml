@@ -7,20 +7,30 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Install Linux iOS Toolchain & iPhoneOS 16.5 SDK
+        run: |
+          mkdir -p "$HOME/toolchain" "$HOME/sdks"
+          curl -fSL "https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-x86_64.tar.xz" | tar -xJ -C "$HOME/toolchain"
+          curl -fSL "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz" | tar -xJ -C "$HOME/sdks"
+          ls -la "$HOME/toolchain" "$HOME/sdks"
+
       - name: Compile AntiCensor.dylib
         run: |
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "Using iOS SDK at: $SDK_PATH"
-          
-          clang -arch arm64 \
+          TOOLCHAIN_BIN=$(dirname "$(find "$HOME/toolchain" -name clang -type f | head -n 1)")
+          SDK_PATH=$(find "$HOME/sdks" -maxdepth 2 -name "iPhoneOS*.sdk" -type d | head -n 1)
+          echo "Using toolchain bin: $TOOLCHAIN_BIN"
+          echo "Using iOS SDK: $SDK_PATH"
+          export PATH="$TOOLCHAIN_BIN:$PATH"
+
+          "$TOOLCHAIN_BIN/clang" \
+            -target arm64-apple-ios14.0 \
             -isysroot "$SDK_PATH" \
-            -miphoneos-version-min=14.0 \
             -fobjc-arc \
             -Wno-deprecated-declarations \
             -Wno-objc-multiple-method-names \
@@ -32,8 +42,13 @@ jobs:
             -framework QuartzCore \
             -framework MediaPlayer \
             -dynamiclib \
+            -install_name @rpath/AntiCensor.dylib \
             -o AntiCensor.dylib \
             tweak/AntiCensor.m
+
+          if command -v ldid >/dev/null 2>&1; then
+            ldid -S AntiCensor.dylib
+          fi
 
           ls -lh AntiCensor.dylib
           file AntiCensor.dylib
