@@ -22,7 +22,7 @@ jobs:
 
       - name: Compile AntiCensor.dylib
         run: |
-          TOOLCHAIN_BIN=$(dirname "$(find "$HOME/toolchain" -name clang -type f | head -n 1)")
+          TOOLCHAIN_BIN=$(dirname "$(find "$HOME/toolchain" -name clang \( -type f -o -type l \) | head -n 1)")
           SDK_PATH=$(find "$HOME/sdks" -maxdepth 2 -name "iPhoneOS*.sdk" -type d | head -n 1)
           echo "Using toolchain bin: $TOOLCHAIN_BIN"
           echo "Using iOS SDK: $SDK_PATH"
@@ -31,6 +31,7 @@ jobs:
           "$TOOLCHAIN_BIN/clang" \
             -target arm64-apple-ios14.0 \
             -isysroot "$SDK_PATH" \
+            -fuse-ld=lld \
             -fobjc-arc \
             -Wno-deprecated-declarations \
             -Wno-objc-multiple-method-names \
