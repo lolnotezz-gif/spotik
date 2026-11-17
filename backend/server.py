@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import time
+import hashlib
 import urllib.request
 import urllib.parse
 import subprocess
@@ -117,6 +118,82 @@ def resolve_kugou_to_file(song_hash):
             print(f"[AntiCensor] KuGou resolve error for {clean_h}: {e}", flush=True)
     return None
 
+def is_real_mp3(path):
+    """Verify file is a real MP3 stream (NOT an MP4/AAC container disguised as .mp3!)."""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) < 15000:
+            return False
+        with open(path, 'rb') as f:
+            head = f.read(16)
+        # Reject MP4/M4A ('ftyp'), Ogg, RIFF/WAV disguised as .mp3
+        if b'ftyp' in head or head.startswith((b'OggS', b'RIFF', b'fLaC')):
+            return False
+        return True
+    except Exception:
+        return False
+
+def detect_content_type(path):
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(16)
+        if b'ftyp' in head:
+            return 'audio/mp4'
+        if head.startswith(b'OggS'):
+            return 'audio/ogg'
+        if head.startswith(b'RIFF'):
+            return 'audio/wav'
+        if head.startswith(b'fLaC'):
+            return 'audio/flac'
+        if head.startswith(b'\xff\xd8\xff'):
+            return 'image/jpeg'
+        if head.startswith(b'\x89PNG'):
+            return 'image/png'
+    except Exception:
+        pass
+    if path.endswith(('.jpg', '.jpeg')):
+        return 'image/jpeg'
+    if path.endswith('.png'):
+        return 'image/png'
+    return 'audio/mpeg'
+
+def save_uploaded_audio_to_mp3(raw_bytes, ext_hint="mp3"):
+    """Save uploaded audio bytes (MP3/WAV/M4A/FLAC/OGG) as universal real MP3 in AUDIO_DIR."""
+    digest = hashlib.sha256(raw_bytes).hexdigest()[:16]
+    filename = f"upload_{digest}.mp3"
+    target_mp3 = os.path.join(AUDIO_DIR, filename)
+    if is_real_mp3(target_mp3):
+        return filename, target_mp3
+
+    clean_ext = re.sub(r'[^a-zA-Z0-9]', '', str(ext_hint or 'mp3').lower())[:6] or 'bin'
+    tmp_in = os.path.join(CACHE_DIR, f"up_{digest}_{threading.get_ident()}.{clean_ext}")
+    tmp_mp3 = os.path.join(AUDIO_DIR, f"{filename}.{threading.get_ident()}.tmp.mp3")
+    try:
+        with open(tmp_in, 'wb') as f:
+            f.write(raw_bytes)
+        # If already valid MP3 (ID3 tag or MPEG sync frame), store directly without re-encoding
+        head = raw_bytes[:16]
+        is_mp3_bytes = (head.startswith(b'ID3') or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0)) and (b'ftyp' not in head)
+        if is_mp3_bytes and len(raw_bytes) > 10000:
+            os.replace(tmp_in, target_mp3)
+            print(f"[AntiCensor] Uploaded direct MP3 saved: {filename} ({len(raw_bytes)} bytes)", flush=True)
+            return filename, target_mp3
+
+        # Convert WAV/M4A/AAC/OGG/FLAC to universal 192kbps MP3 (works in Spotify Desktop CEF + iOS AVPlayer!)
+        cmd = [FFMPEG, "-y", "-i", tmp_in, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", tmp_mp3]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=90)
+        if is_real_mp3(tmp_mp3):
+            os.replace(tmp_mp3, target_mp3)
+            print(f"[AntiCensor] Uploaded audio converted to MP3: {filename}", flush=True)
+            return filename, target_mp3
+    finally:
+        for p in (tmp_in, tmp_mp3):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    return None, None
+
 def resolve_sc_to_file(raw_url):
     url = raw_url.strip()
 
@@ -134,19 +211,24 @@ def resolve_sc_to_file(raw_url):
     slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
     legacy_mp3 = os.path.join(CACHE_DIR, f"{slug}.mp3")
 
-    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 30000:
+    if is_real_mp3(target_mp3):
         return target_mp3
-    if os.path.exists(legacy_mp3) and os.path.getsize(legacy_mp3) > 30000:
+    if is_real_mp3(legacy_mp3):
         return legacy_mp3
 
     with get_url_lock(clean_url):
-        # Double-check after acquiring per-URL lock in case another worker just finished
-        if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 30000:
+        # Double-check after acquiring per-URL lock; purge poisoned MP4-as-MP3 cache!
+        if os.path.exists(target_mp3) and not is_real_mp3(target_mp3):
+            try:
+                os.remove(target_mp3)
+                print(f"[AntiCensor] Purged poisoned non-MP3 cache: {target_mp3}", flush=True)
+            except OSError:
+                pass
+        if is_real_mp3(target_mp3):
             return target_mp3
-        if os.path.exists(legacy_mp3) and os.path.getsize(legacy_mp3) > 30000:
+        if is_real_mp3(legacy_mp3):
             return legacy_mp3
 
-        tmp_out = f"{target_mp3}.{threading.get_ident()}.tmp.mp4"
         tmp_mp3 = f"{target_mp3}.{threading.get_ident()}.tmp.mp3"
         try:
             # Resolve track metadata via SoundCloud API v2
@@ -186,10 +268,14 @@ def resolve_sc_to_file(raw_url):
             unenc = [x for x in trans if 'encrypted' not in x.get('format', {}).get('protocol', '') and 'skd:' not in x.get('url', '')]
             valid_trans = unenc if unenc else trans
 
-            prog = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'progressive'), None)
-            hls_trans = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'hls'), valid_trans[0])
+            # Priority: 1) progressive audio/mpeg (instant), 2) hls audio/mpeg (fast copy), 3) any progressive, 4) any hls (transcode to real MP3)
+            prog_mp3 = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'progressive' and 'mpeg' in x.get('format', {}).get('mime_type', '')), None)
+            hls_mp3 = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'hls' and 'mpeg' in x.get('format', {}).get('mime_type', '') and 'mpegurl' not in x.get('format', {}).get('mime_type', '')), None)
+            prog_any = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'progressive'), None)
+            hls_any = next((x for x in valid_trans if x.get('format', {}).get('protocol') == 'hls'), valid_trans[0])
 
-            chosen = prog or hls_trans
+            chosen = prog_mp3 or hls_mp3 or prog_any or hls_any
+            is_native_mp3 = (chosen in (prog_mp3, hls_mp3))
             stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
             if track_auth:
                 stream_api += f"&track_authorization={track_auth}"
@@ -197,36 +283,32 @@ def resolve_sc_to_file(raw_url):
             stream_info = json.loads(urllib.request.urlopen(urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'}), timeout=10).read().decode('utf-8'))
             media_url = stream_info['url']
 
-            # High speed remux without re-encoding (1-2s instead of 25s!)
-            if prog:
-                cmd = [FFMPEG, "-y", "-i", media_url, "-c", "copy", tmp_out]
-            else:
-                cmd = [FFMPEG, "-y", "-i", media_url, "-c:a", "copy", "-f", "mp4", "-movflags", "+faststart", tmp_out]
+            # If native audio/mpeg, copy directly into REAL MP3 container (-f mp3) in ~1s!
+            if is_native_mp3:
+                cmd = [FFMPEG, "-y", "-i", media_url, "-vn", "-c:a", "copy", "-f", "mp3", tmp_mp3]
+                res = subprocess.run(cmd, capture_output=True, timeout=60)
+                if res.returncode == 0 and is_real_mp3(tmp_mp3):
+                    os.replace(tmp_mp3, target_mp3)
+                    print(f"[AntiCensor] Fast native MP3 cached: {target_mp3}", flush=True)
+                    return target_mp3
 
-            res = subprocess.run(cmd, capture_output=True, timeout=60)
-            if res.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 30000:
-                os.replace(tmp_out, target_mp3)
-                print(f"[AntiCensor] Fast remux cached: {target_mp3}", flush=True)
-                return target_mp3
-
-            # Fallback to libmp3lame if copy failed
-            cmd2 = [FFMPEG, "-y", "-i", media_url, "-c:a", "libmp3lame", "-q:a", "3", tmp_mp3]
+            # For AAC/Opus/HLS streams: transcode to REAL 192k MP3 so BOTH Spotify Desktop CEF and iOS AVPlayer play 100%!
+            cmd2 = [FFMPEG, "-y", "-i", media_url, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", tmp_mp3]
             subprocess.run(cmd2, check=True, capture_output=True, timeout=90)
-            if os.path.exists(tmp_mp3) and os.path.getsize(tmp_mp3) > 30000:
+            if is_real_mp3(tmp_mp3):
                 os.replace(tmp_mp3, target_mp3)
-                print(f"[AntiCensor] Lame fallback cached: {target_mp3}", flush=True)
+                print(f"[AntiCensor] Real MP3 transcoded & cached: {target_mp3}", flush=True)
                 return target_mp3
         except Exception as e:
             print(f"[AntiCensor] Resolve error for {clean_url}: {e}", flush=True)
         finally:
-            for p in (tmp_out, tmp_mp3):
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            if os.path.exists(tmp_mp3):
+                try:
+                    os.remove(tmp_mp3)
+                except OSError:
+                    pass
 
-    if os.path.exists(target_mp3) and os.path.getsize(target_mp3) > 30000:
+    if is_real_mp3(target_mp3):
         return target_mp3
     return None
 
@@ -508,6 +590,12 @@ def merge_sync_payload(payload):
                 k = raw_k.strip()
                 if len(k) < 2:
                     continue
+                # Reject corrupted album/double-prefix keys
+                low_k = k.lower()
+                if "spotify:track:spotify:" in low_k or low_k.startswith(("spotify:album:", "spotify:playlist:", "spotify:artist:")):
+                    _delete_key_variants(db["overrides"], k)
+                    changed = True
+                    continue
                 val = str(raw_v).strip() if raw_v is not None else ""
                 if not val:
                     _delete_key_variants(db["overrides"], k)
@@ -516,6 +604,9 @@ def merge_sync_payload(payload):
                 # Never sync device-local iOS file paths to cloud
                 if val.startswith("local://"):
                     continue
+                # Strip SoundCloud tracking query params (?si=...&utm_...)
+                if "soundcloud.com/" in val and "?" in val and "on.soundcloud.com" not in val:
+                    val = val.split("?")[0].strip()
                 # Store exact key + normalized lowercase + bare track ID for 100% Mobile <-> PC compatibility
                 if db["overrides"].get(k) != val:
                     db["overrides"][k] = val
@@ -525,9 +616,9 @@ def merge_sync_payload(payload):
                 if norm_k and norm_k != k and db["overrides"].get(norm_k) != val:
                     db["overrides"][norm_k] = val
                     changed = True
-                if k.lower().startswith("spotify:track:"):
+                if low_k.startswith("spotify:track:"):
                     parts = k.split(":")
-                    if len(parts) >= 3 and len(parts[2]) >= 10:
+                    if len(parts) == 3 and len(parts[2]) >= 10:
                         tid = parts[2]
                         if db["overrides"].get(tid) != val:
                             db["overrides"][tid] = val
@@ -659,6 +750,34 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": str(e)})
                 return
 
+        if parsed.path == '/api/upload':
+            try:
+                raw_len = self.headers.get('Content-Length', '0')
+                length = int(raw_len)
+                if length <= 0 or length > 35 * 1024 * 1024:
+                    self.send_json(400, {"error": "Invalid file size (max 35MB)"})
+                    return
+                raw_bytes = self.rfile.read(length)
+                params = urllib.parse.parse_qs(parsed.query)
+                fname_param = params.get('filename', ['audio.mp3'])[0]
+                ext_hint = os.path.splitext(fname_param)[1].lstrip('.') or 'mp3'
+                saved_name, saved_path = save_uploaded_audio_to_mp3(raw_bytes, ext_hint)
+                if not saved_name or not saved_path:
+                    self.send_json(500, {"error": "Failed to process uploaded audio"})
+                    return
+                self.send_json(200, {
+                    "status": "ok",
+                    "filename": saved_name,
+                    "local_url": f"/audio/{saved_name}",
+                    "url": f"{PUBLIC_BASE_URL}/audio/{saved_name}",
+                    "size": os.path.getsize(saved_path)
+                })
+                return
+            except Exception as e:
+                print("[AntiCensor] Upload error:", e, flush=True)
+                self.send_json(500, {"error": str(e)})
+                return
+
         self.send_json(404, {"error": "Not found"})
 
     def do_HEAD(self):
@@ -746,11 +865,7 @@ class AudioHandler(BaseHTTPRequestHandler):
 
         file_size = os.path.getsize(file_to_stream)
         range_header = self.headers.get('Range')
-        ct = 'audio/mp4' if file_to_stream.endswith(('.mp4', '.m4a')) else (
-            'image/jpeg' if file_to_stream.endswith(('.jpg', '.jpeg')) else (
-                'image/png' if file_to_stream.endswith('.png') else 'audio/mpeg'
-            )
-        )
+        ct = detect_content_type(file_to_stream)
 
         try:
             # Handle HTTP 206 Partial Content (required for instant scrub & lyrics click)

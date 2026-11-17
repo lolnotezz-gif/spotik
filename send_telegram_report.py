@@ -5,27 +5,26 @@ TOKEN = "9229103805:AAGg97RS7iF9qfkypwjxYUTHyt883ZZpTvM"
 CHAT_ID = -1004210923223
 API_BASE = f"https://api.telegram.org/bot{TOKEN}"
 
-SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.1-OTA: ФИКС МЁРТВОГО ДЕДЛОКА ПИТОНА + НАСТОЯЩЕЕ ДВУСТОРОННЕЕ СОПРЯЖЕНИЕ (МОБИЛКА ↔ ПК)!</b> ⚡️
+SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.2-OTA: ФИКС ЗВУКА SOUNDCLOUD (MP4→MP3) + ЗАГРУЗКА ФАЙЛОВ С УСТРОЙСТВА НА ПК И iPHONE + ФИКС ОКНА ЗАМЕНЫ!</b> ⚡️
 
 ══════════════════════════════
 🛠 <b>ЧТО НАЙДЕНО И ПОФИКШЕНО:</b>
 
-1. 🐍 <b>ПОЛНЫЙ АУДИТ PYTHON-БЭКЕНДА (<code>backend/server.py</code> + локальный <code>AntiCensorBridge.py</code>):</b>
-   • <b>Найден критический дедлок:</b> В <code>backend/server.py</code> стоял обычный <code>threading.Lock()</code> (не реентерабельный), а функция <code>auto_cache_sc_track()</code> брала <code>sync_lock</code> и внутри вызывала <code>load_sync_db()</code>, которая снова пыталась взять тот же <code>sync_lock</code> → сервер вешал <code>/api/sync</code> намертво на 10+ минут!
-   • <b>Исправлено:</b> Заменено на <code>threading.RLock()</code>, добавлены атомарные записи базы (<code>tmp + os.replace</code>), отдельные per-URL локи для SoundCloud (без порчи файлов при параллельных запросах), фильтрация <code>local://</code> и зеркалирование ключей <code>spotify:track:ID ↔ ID</code>.
-   • Локальный <code>AntiCensorBridge.py</code> на ПК также полностью переписан, обновлен и перезапущен.
+1. 🔊 <b>ГЛАВНЫЙ БАГ — ПОЧЕМУ НЕ ИГРАЛ SOUNDCLOUD (на ПК и iPhone):</b>
+   • Сервер <code>backend/server.py</code> паковал AAC-потоки с SoundCloud в MP4-контейнер (<code>ftypisom</code>), но переименовывал файл в <code>.mp3</code> и отдавал как <code>audio/mpeg</code>!
+   • Spotify Desktop (CEF) вообще не умеет декодировать AAC/MP4, а iOS AVPlayer сбрасывал такой файл с ошибкой.
+   • <b>Исправлено:</b> Теперь и облако Render, и локальный мост на ПК отдают <b>100% настоящий MP3 (ID3 / audio/mpeg)</b> + автоматически чистят старый битый кэш.
 
-2. 📱➡️💻 <b>СОПРЯЖЕНИЕ МОБИЛКА → ПК:</b>
-   • Раньше кнопка синхронизации на iPhone делала ТОЛЬКО скачивание (<code>GET /api/sync</code>) и НЕ отправляла твои замены на ПК! Плюс таймаут отправки был 7 сек.
-   • Теперь при нажатии <b>«🌐 Сопряжение Мобилка ↔ ПК»</b>, при запуске и каждые 60 сек iPhone отправляет ВСЕ твои замены и тексты одним пакетом в облако (с таймаутом 35с и авто-ретраем).
-   • На ПК исправлено сопоставление ключей по названию и «Артист - Название», а также добавлен <b>автоперехват треков по событию <code>songchange</code></b> (очередь, поиск, автоплей, Spotify Connect).
+2. 📁 <b>ЗАМЕНА ФАЙЛОМ С УСТРОЙСТВА (ПК + iPhone + СИНХРОНИЗАЦИЯ):</b>
+   • <b>На iPhone:</b> После выбора файла в «Файлах» iOS ставила Spotify на паузу, из-за чего плеер AntiCensor тоже не стартовал — починил мгновенный автозапуск + добавил фоновую выгрузку файла в облако <code>/api/upload</code>, чтобы файл с айфона играл и на ПК!
+   • <b>На ПК:</b> В окне замены добавлена кнопка <b>«📁 Загрузить аудиофайл с ПК (MP3 / WAV / M4A / OGG)»</b> — файл конвертируется в MP3, мгновенно играет на ПК и синхронизируется с iPhone!
 
-3. 💻➡️📱 <b>СОПРЯЖЕНИЕ ПК → МОБИЛКА (ОБРАТНОЕ НАПРАВЛЕНИЕ):</b>
-   • При добавлении замены на ПК теперь сохраняются и отправляются в облако сразу все варианты ключей (<code>spotify:track:ID</code>, <code>ID</code>, <code>Артист - Название</code>, <code>Название</code>), чтобы iPhone находил их 100%.
-   • В AntiCensor Dashboard на ПК появилась кнопка <b>«🔄 Сопряжение ПК ↔ Мобилка»</b> (отправляет все ПК-замены на iPhone и забирает все с iPhone за 1 клик) + кнопка <b>«➕ Заменить текущий трек»</b>.
+3. 🧩 <b>ФИКС БАГОВ ОКНА ЗАМЕНЫ НА ПК:</b>
+   • Исправлен баг <code>spotify:track:spotify:album:...</code> (раньше при ПКМ по треку мог цепляться URI альбома) — теперь достаёт строго URI/название/артиста трека (включая React fiber для серых/зацензуренных треков!) и вычищает старые битые ключи.
+   • Исправлено вылезание длинной зелёной ссылки за пределы модального окна + автоматическая очистка <code>?si=...&amp;utm_...</code> хвостов SoundCloud.
 
 ══════════════════════════════
-📦 <b>Файл AntiCensor.dylib (v5.6.1-OTA, Build 2026111702) прикреплён ниже!</b>"""
+📦 <b>Файл AntiCensor.dylib (v5.6.2-OTA, Build 2026111703) прикреплён ниже!</b>"""
 
 def send_report(dylib_path):
     print("Posting report to Telegram...")
@@ -44,7 +43,7 @@ def send_report(dylib_path):
             files = {"document": ("AntiCensor.dylib", f, "application/octet-stream")}
             data = {
                 "chat_id": CHAT_ID,
-                "caption": "🚀 <b>AntiCensor.dylib (v5.6.1-OTA, Build 2026111702)</b>\nФикс дедлока Python • Двустороннее сопряжение Мобилка ↔ ПК • Автоперехват треков на ПК",
+                "caption": "🚀 <b>AntiCensor.dylib (v5.6.2-OTA, Build 2026111703)</b>\nНастоящий MP3 для SoundCloud • Файлы с устройства (ПК ↔ iPhone) • Фикс окна замены",
                 "parse_mode": "HTML"
             }
             r_doc = requests.post(f"{API_BASE}/sendDocument", data=data, files=files)

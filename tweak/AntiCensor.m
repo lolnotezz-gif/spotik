@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.1-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026111702
+#define ANTICENSOR_VERSION_STRING @"v5.6.2-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026111703
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -4957,8 +4957,10 @@ static void showManageAllTracksDialog(void) {
     if (effectiveTitle.length > 0) currentActiveSpotifyTrackTitle = effectiveTitle;
     if (effectiveArtist.length > 0) currentActiveSpotifyTrackArtist = effectiveArtist;
     if (effectiveUri.length > 0) currentActiveSpotifyTrackURI = effectiveUri;
-    currentPlayingKey = effectiveUri ?: effectiveTitle;
+    NSString *playKey = effectiveUri ?: (effectiveTitle ?: self.displayTrack);
+    currentPlayingKey = nil;
     currentPlayingUrl = nil;
+    isSpotifyCurrentlyPlaying = YES;
 
     // Сбрасываем кэш караоке, чтобы текст мгновенно обновился и связался с аудио
     g_currentKaraokeTrackKey = nil;
@@ -4976,13 +4978,47 @@ static void showManageAllTracksDialog(void) {
     }
 
     // Мгновенный плавный запуск локального аудиофайла
-    startReplacementAudio(currentPlayingKey, storedUrl, 0.0);
+    startReplacementAudio(playKey, storedUrl, 0.0);
+
+    // В фоне загружаем файл на облачный сервер, чтобы трек с устройства iPhone также играл на ПК!
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        @try {
+            NSData *fileData = [NSData dataWithContentsOfFile:destPath];
+            if (!fileData || fileData.length < 1000 || fileData.length > 35 * 1024 * 1024) return;
+            NSString *server = getServerURL();
+            NSString *encName = [filename stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: @"track.mp3";
+            NSURL *upUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/upload?filename=%@", server, encName]];
+            if (!upUrl) return;
+            NSMutableURLRequest *upReq = [NSMutableURLRequest requestWithURL:upUrl];
+            upReq.HTTPMethod = @"POST";
+            [upReq setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+            upReq.HTTPBody = fileData;
+            upReq.timeoutInterval = 60.0;
+            [[[NSURLSession sharedSession] dataTaskWithRequest:upReq completionHandler:^(NSData *respData, NSURLResponse *resp, NSError *err) {
+                if (err || !respData) return;
+                NSDictionary *j = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
+                NSString *cloudAudioUrl = [j isKindOfClass:[NSDictionary class]] ? j[@"url"] : nil;
+                if (cloudAudioUrl && cloudAudioUrl.length > 10) {
+                    if (effectiveUri && [effectiveUri hasPrefix:@"spotify:track:"] && effectiveUri.length > 15) {
+                        syncPushToCloud(normalizeKey(effectiveUri), cloudAudioUrl, NO);
+                    }
+                    if (effectiveTitle && effectiveTitle.length > 1) {
+                        syncPushToCloud(normalizeKey(effectiveTitle), cloudAudioUrl, NO);
+                        if (effectiveArtist.length > 1) {
+                            syncPushToCloud(normalizeKey([NSString stringWithFormat:@"%@ - %@", effectiveArtist, effectiveTitle]), cloudAudioUrl, NO);
+                        }
+                    }
+                    NSLog(@"[AntiCensor] Uploaded iOS local file to cloud for PC sync: %@", cloudAudioUrl);
+                }
+            }] resume];
+        } @catch (id ex) {}
+    });
 
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = getTopViewController();
         if (top) {
             UIAlertController *succ = [UIAlertController alertControllerWithTitle:@"⚡ AntiCensor"
-                                                                          message:@"Аудиофайл успешно сохранён с устройства и подключен к треку!"
+                                                                          message:@"Аудиофайл сохранён, запущен и отправлен на синхронизацию с ПК!"
                                                                    preferredStyle:UIAlertControllerStyleAlert];
             [succ addAction:[UIAlertAction actionWithTitle:@"Отлично!" style:UIAlertActionStyleDefault handler:nil]];
             [top presentViewController:succ animated:YES completion:nil];
@@ -5062,6 +5098,9 @@ static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *
 
         UIAlertAction *saveAction = [UIAlertAction actionWithTitle:@"✓ Применить замену" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             NSString *inputUrl = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([inputUrl containsString:@"soundcloud.com/"] && ![inputUrl containsString:@"on.soundcloud.com"] && [inputUrl containsString:@"?"]) {
+                inputUrl = [inputUrl componentsSeparatedByString:@"?"].firstObject;
+            }
             if (inputUrl.length > 0) {
                 if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
                     saveOverride(uri, inputUrl);
