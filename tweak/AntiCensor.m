@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.0-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026111701
+#define ANTICENSOR_VERSION_STRING @"v5.6.1-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026111702
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -41,6 +41,7 @@ static BOOL isFullScreenLyricsScrollView(UIScrollView *sv);
 static NSString *getServerURL(void);
 static void addAntiCensorRowToContextMenu(UIViewController *sheetVC);
 static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count));
+static void syncBidirectionalWithCloud(void (^completion)(BOOL success, NSUInteger pushedCount, NSUInteger totalCount));
 static void performAntiCensorCloudSync(void);
 static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics);
 static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targetTitle, NSString *targetArtist);
@@ -705,8 +706,62 @@ static void persistLyrics(NSDictionary *dict) {
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
-static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
+static void applyCloudSyncJSON(NSDictionary *json, NSUInteger *outUpdated, NSUInteger *outTotal) {
+    NSUInteger updatedCount = 0;
+    NSUInteger totalCount = 0;
+
+    // 1. Оверрайды треков из облака (ПК ↔ Мобилка)
+    NSDictionary *remoteOverrides = json[@"overrides"];
+    if (remoteOverrides && [remoteOverrides isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *localOverrides = loadAllOverrides();
+        for (NSString *k in remoteOverrides) {
+            NSString *normK = normalizeKey(k);
+            if (normK.length < 2) continue;
+            NSString *remoteVal = [remoteOverrides[k] description];
+            if (remoteVal.length > 0 && ![remoteVal hasPrefix:@"local://"]) {
+                totalCount++;
+                NSString *curr = localOverrides[normK];
+                if (!curr || ![curr hasPrefix:@"local://"]) {
+                    if (![curr isEqualToString:remoteVal]) {
+                        localOverrides[normK] = remoteVal;
+                        updatedCount++;
+                    }
+                }
+            }
+        }
+        persistOverrides(localOverrides);
+    }
+
+    // 2. Тексты песен из облака (ПК ↔ Мобилка)
+    NSDictionary *remoteLyrics = json[@"lyrics"];
+    if (remoteLyrics && [remoteLyrics isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *localLyrics = loadAllLyrics();
+        for (NSString *k in remoteLyrics) {
+            NSString *normK = normalizeKey(k);
+            if (normK.length < 2) continue;
+            NSString *remoteTxt = [remoteLyrics[k] description];
+            if (remoteTxt.length > 0) {
+                totalCount++;
+                NSString *currTxt = localLyrics[normK];
+                if (![currTxt isEqualToString:remoteTxt]) {
+                    localLyrics[normK] = remoteTxt;
+                    updatedCount++;
+                }
+            }
+        }
+        persistLyrics(localLyrics);
+    }
+
+    if (outUpdated) *outUpdated = updatedCount;
+    if (outTotal) *outTotal = totalCount;
+}
+
+static void syncPushToCloudWithRetry(NSString *key, NSString *value, BOOL isLyrics, int attempt) {
     if (!key || key.length == 0) return;
+    if (!isLyrics && value && [value hasPrefix:@"local://"]) {
+        // Не отправляем локальные пути iPhone в облако
+        return;
+    }
     NSString *server = getServerURL();
     NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
     if (!syncUrl) return;
@@ -724,103 +779,126 @@ static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
     req.HTTPBody = bodyData;
-    req.timeoutInterval = 7.0;
+    req.timeoutInterval = 35.0;
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (!err) {
+        NSHTTPURLResponse *httpResp = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+        if (!err && httpResp && httpResp.statusCode == 200) {
             NSLog(@"[AntiCensor] Cloud sync push SUCCESS for key: %@", key);
         } else {
-            NSLog(@"[AntiCensor] Cloud sync push failed: %@", err);
+            NSLog(@"[AntiCensor] Cloud sync push failed (attempt %d): %@ status=%ld", attempt, err, (long)httpResp.statusCode);
+            if (attempt < 2) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+                    syncPushToCloudWithRetry(key, value, isLyrics, attempt + 1);
+                });
+            }
         }
     }] resume];
 }
 
-static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count)) {
+static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
+    syncPushToCloudWithRetry(key, value, isLyrics, 1);
+}
+
+static void syncBidirectionalWithRetry(int attempt, void (^completion)(BOOL success, NSUInteger pushedCount, NSUInteger totalCount)) {
     NSString *server = getServerURL();
     NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
     if (!syncUrl) {
-        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0, 0); });
+        return;
+    }
+
+    // Собираем все локальные замены (кроме local://) и все тексты с iPhone для отправки на ПК!
+    NSDictionary *allLocalOverrides = loadAllOverrides();
+    NSMutableDictionary *pushableOverrides = [NSMutableDictionary dictionary];
+    for (NSString *k in allLocalOverrides) {
+        NSString *val = [allLocalOverrides[k] description];
+        if (k.length >= 2 && val.length > 0 && ![val hasPrefix:@"local://"]) {
+            pushableOverrides[k] = val;
+        }
+    }
+    NSDictionary *allLocalLyrics = loadAllLyrics();
+    NSMutableDictionary *pushableLyrics = [NSMutableDictionary dictionary];
+    for (NSString *k in allLocalLyrics) {
+        NSString *val = [allLocalLyrics[k] description];
+        if (k.length >= 2 && val.length > 0) {
+            pushableLyrics[k] = val;
+        }
+    }
+
+    NSUInteger localPushItems = pushableOverrides.count + pushableLyrics.count;
+    NSDictionary *payload = @{
+        @"overrides": pushableOverrides,
+        @"lyrics": pushableLyrics,
+        @"client": @"ios"
+    };
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!bodyData) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0, 0); });
         return;
     }
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
-    req.HTTPMethod = @"GET";
-    // 35 секунд таймаут для гарантированного холодного старта Render.com контейнера
-    req.timeoutInterval = 35.0;
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+    req.HTTPBody = bodyData;
+    req.timeoutInterval = 35.0;
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (!data || err) {
-            NSLog(@"[AntiCensor] Cloud sync pull failed or timed out: %@", err);
-            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+        NSHTTPURLResponse *httpResp = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+        if (!data || err || !httpResp || httpResp.statusCode != 200) {
+            NSLog(@"[AntiCensor] Bidirectional cloud sync failed (attempt %d): %@ status=%ld", attempt, err, (long)httpResp.statusCode);
+            if (attempt < 2) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+                    syncBidirectionalWithRetry(attempt + 1, completion);
+                });
+                return;
+            }
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0, 0); });
             return;
         }
 
         @try {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if (!json || ![json isKindOfClass:[NSDictionary class]]) {
-                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0); });
+                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, 0, 0); });
                 return;
             }
 
-            __block NSUInteger updatedCount = 0;
-            __block NSUInteger totalCount = 0;
+            NSUInteger updatedCount = 0;
+            NSUInteger totalCount = 0;
+            applyCloudSyncJSON(json, &updatedCount, &totalCount);
 
-            // 1. Оверрайды треков с ПК
-            NSDictionary *remoteOverrides = json[@"overrides"];
-            if (remoteOverrides && [remoteOverrides isKindOfClass:[NSDictionary class]]) {
-                NSMutableDictionary *localOverrides = loadAllOverrides();
-                for (NSString *k in remoteOverrides) {
-                    NSString *normK = normalizeKey(k);
-                    NSString *remoteVal = [remoteOverrides[k] description];
-                    if (remoteVal.length > 0) {
-                        totalCount++;
-                        NSString *curr = localOverrides[normK];
-                        if (!curr || ![curr hasPrefix:@"local://"]) {
-                            if (![curr isEqualToString:remoteVal]) {
-                                localOverrides[normK] = remoteVal;
-                                updatedCount++;
-                            }
-                        }
-                    }
-                }
-                persistOverrides(localOverrides);
-            }
-
-            // 2. Тексты песен с ПК
-            NSDictionary *remoteLyrics = json[@"lyrics"];
-            if (remoteLyrics && [remoteLyrics isKindOfClass:[NSDictionary class]]) {
-                NSMutableDictionary *localLyrics = loadAllLyrics();
-                for (NSString *k in remoteLyrics) {
-                    NSString *normK = normalizeKey(k);
-                    NSString *remoteTxt = [remoteLyrics[k] description];
-                    if (remoteTxt.length > 0) {
-                        totalCount++;
-                        NSString *currTxt = localLyrics[normK];
-                        if (![currTxt isEqualToString:remoteTxt]) {
-                            localLyrics[normK] = remoteTxt;
-                            updatedCount++;
-                        }
-                    }
-                }
-                persistLyrics(localLyrics);
-            }
-
-            NSLog(@"[AntiCensor] Cloud sync pull SUCCESS, updated: %lu, total items: %lu", (unsigned long)updatedCount, (unsigned long)totalCount);
+            NSLog(@"[AntiCensor] Bidirectional sync SUCCESS! Pushed=%lu UpdatedFromPC=%lu Total=%lu",
+                  (unsigned long)localPushItems, (unsigned long)updatedCount, (unsigned long)totalCount);
             if (completion) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(YES, (updatedCount > 0) ? updatedCount : totalCount);
+                    completion(YES, localPushItems, totalCount);
                 });
             }
         } @catch (id ex) {
             if (completion) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(NO, 0);
+                    completion(NO, 0, 0);
                 });
             }
         }
     }] resume];
+}
+
+static void syncBidirectionalWithCloud(void (^completion)(BOOL success, NSUInteger pushedCount, NSUInteger totalCount)) {
+    syncBidirectionalWithRetry(1, completion);
+}
+
+static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count)) {
+    syncBidirectionalWithCloud(^(BOOL success, NSUInteger pushedCount, NSUInteger totalCount) {
+        if (completion) {
+            completion(success, totalCount);
+        }
+    });
 }
 
 static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics) {
@@ -5075,8 +5153,8 @@ static void performAntiCensorCloudSync(void) {
         }
         if (!topVC) return;
 
-        UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"🌐 AntiCensor Cloud"
-                                                                              message:@"Подключение к серверу и загрузка данных с ПК...\n\n(Пожалуйста, подождите)"
+        UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"🌐 Сопряжение Мобилка ↔ ПК"
+                                                                              message:@"Отправка замен с iPhone и загрузка с ПК...\n\n(Пожалуйста, подождите)"
                                                                        preferredStyle:UIAlertControllerStyleAlert];
 
         UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
@@ -5089,20 +5167,20 @@ static void performAntiCensorCloudSync(void) {
         ]];
 
         [topVC presentViewController:loadingAlert animated:YES completion:^{
-            syncPullFromCloud(^(BOOL success, NSUInteger count) {
+            syncBidirectionalWithCloud(^(BOOL success, NSUInteger pushedCount, NSUInteger totalCount) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [spinner stopAnimating];
                     [spinner removeFromSuperview];
                     if (success) {
-                        loadingAlert.title = @"🌐 AntiCensor Cloud";
-                        loadingAlert.message = [NSString stringWithFormat:@"✓ Синхронизация успешно завершена!\nВсего элементов в базе: %lu\n(Тексты и замены актуализированы)", (unsigned long)count];
+                        loadingAlert.title = @"🌐 Сопряжение Мобилка ↔ ПК";
+                        loadingAlert.message = [NSString stringWithFormat:@"✓ Двустороннее сопряжение успешно!\nОтправлено с iPhone на ПК: %lu\nВсего в общей базе: %lu\n(Замены и тексты синхронизированы в обе стороны)", (unsigned long)pushedCount, (unsigned long)totalCount];
                         g_currentKaraokeTrackKey = nil;
                         g_currentKaraokeItems = nil;
                         g_currentKaraokeLabels = nil;
                         g_lastActiveKaraokeIdx = -1;
                         checkAndSyncLyricsOnScreen();
                     } else {
-                        loadingAlert.title = @"🌐 Ошибка синхронизации";
+                        loadingAlert.title = @"🌐 Ошибка сопряжения";
                         loadingAlert.message = @"Не удалось подключиться к облачному серверу.\nПроверьте подключение к интернету или попробуйте ещё раз через несколько секунд.";
                     }
                     [loadingAlert addAction:[UIAlertAction actionWithTitle:@"Отлично" style:UIAlertActionStyleDefault handler:nil]];
@@ -5218,8 +5296,8 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
             showLyricsManagerDialog(uri, title, artist, displayTrack);
         }];
 
-        // 4. Синхронизация с ПК
-        UIAlertAction *cloudSyncAction = [UIAlertAction actionWithTitle:@"🌐 Синхронизировать с ПК прямо сейчас"
+        // 4. Двустороннее сопряжение Мобилка <-> ПК
+        UIAlertAction *cloudSyncAction = [UIAlertAction actionWithTitle:@"🌐 Сопряжение Мобилка ↔ ПК (Синхронизация)"
                                                                  style:UIAlertActionStyleDefault
                                                                handler:^(UIAlertAction * _Nonnull a) {
             performAntiCensorCloudSync();
@@ -6527,7 +6605,17 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         }
     }
 
-        syncPullFromCloud(nil);
+        syncBidirectionalWithCloud(nil);
+    });
+
+    // 5.5 Фоновое автоматическое двустороннее сопряжение Мобилка <-> ПК каждые 60 сек
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSTimer *bgCloudTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+                syncBidirectionalWithCloud(nil);
+            }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:bgCloudTimer forMode:NSRunLoopCommonModes];
     });
 
     // 6. Фоновый высокочастотный таймер синхронизации и смены треков (каждые 250 мс)

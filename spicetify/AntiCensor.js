@@ -274,82 +274,193 @@
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   }
 
+  const LOCAL_BRIDGE_URL = "http://127.0.0.1:8989";
   let cloudOverrides = {};
+  let cloudConnected = false;
+  let lastSyncTimestamp = 0;
 
-  async function syncFromCloud() {
+  function getLocalOverridesOnly() {
     try {
-      const res = await fetch(`${activeServerUrl}/api/sync`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.overrides && typeof data.overrides === "object") {
-          cloudOverrides = data.overrides;
-          console.log("[AntiCensor PC] Synced overrides with mobile:", Object.keys(cloudOverrides).length);
+      const raw = localStorage.getItem(OVERRIDES_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return (parsed && typeof parsed === "object") ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+      .finally(() => clearTimeout(timer));
+  }
+
+  async function syncBidirectionalWithCloud(showNotificationOnResult = false, attempt = 1) {
+    try {
+      const localOnly = getLocalOverridesOnly();
+      const pushable = {};
+      for (const [k, v] of Object.entries(localOnly)) {
+        if (typeof k === "string" && k.trim().length >= 2 && typeof v === "string" && v.trim().length > 0 && !v.trim().startsWith("local://")) {
+          pushable[k.trim()] = v.trim();
         }
       }
+
+      const res = await fetchWithTimeout(`${activeServerUrl}/api/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+        body: JSON.stringify({ overrides: pushable, client: "pc" })
+      }, 35000);
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data && data.overrides && typeof data.overrides === "object") {
+        cloudOverrides = data.overrides;
+        cloudConnected = true;
+        lastSyncTimestamp = Date.now();
+        console.log("[AntiCensor PC] Bidirectional sync OK! Cloud total:", Object.keys(cloudOverrides).length, "PC pushed:", Object.keys(pushable).length);
+
+        // Mirror to local Python bridge in background (non-blocking)
+        try {
+          fetch(`${LOCAL_BRIDGE_URL}/api/sync`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ overrides: cloudOverrides })
+          }).catch(() => {});
+        } catch (_) {}
+
+        if (showNotificationOnResult && Spicetify.showNotification) {
+          Spicetify.showNotification(`☁️ AntiCensor: Сопряжено ПК ↔ Мобилка (${Object.keys(cloudOverrides).length} правил)`);
+        }
+        return { ok: true, count: Object.keys(cloudOverrides).length, pushed: Object.keys(pushable).length };
+      }
+      throw new Error("Invalid sync response");
     } catch (e) {
-      console.warn("[AntiCensor PC] Cloud sync error:", e);
+      console.warn(`[AntiCensor PC] Bidirectional sync failed (attempt ${attempt}):`, e);
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 2500));
+        return syncBidirectionalWithCloud(showNotificationOnResult, attempt + 1);
+      }
+      cloudConnected = false;
+      if (showNotificationOnResult && Spicetify.showNotification) {
+        Spicetify.showNotification("⚠️ AntiCensor: Ошибка подключения к облаку, попробуй ещё раз", true);
+      }
+      return { ok: false, count: Object.keys(cloudOverrides).length, pushed: 0 };
+    }
+  }
+
+  async function syncFromCloud() {
+    return syncBidirectionalWithCloud(false, 1);
+  }
+
+  async function syncPushBatchToCloud(overridesMap, attempt = 1) {
+    try {
+      const res = await fetchWithTimeout(`${activeServerUrl}/api/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+        body: JSON.stringify({ overrides: overridesMap, client: "pc" })
+      }, 35000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data && data.overrides && typeof data.overrides === "object") {
+        cloudOverrides = data.overrides;
+        cloudConnected = true;
+        lastSyncTimestamp = Date.now();
+      }
+      console.log("[AntiCensor PC] Pushed batch to cloud:", Object.keys(overridesMap));
+      return true;
+    } catch (e) {
+      console.warn(`[AntiCensor PC] Push batch failed (attempt ${attempt}):`, e);
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 2500));
+        return syncPushBatchToCloud(overridesMap, attempt + 1);
+      }
+      return false;
     }
   }
 
   async function syncPushToCloud(key, value) {
-    try {
-      await fetch(`${activeServerUrl}/api/sync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ overrides: { [key]: value || "" } })
-      });
-      console.log("[AntiCensor PC] Pushed override to cloud:", key, value);
-    } catch (e) {
-      console.warn("[AntiCensor PC] Push override failed:", e);
+    return syncPushBatchToCloud({ [key]: value || "" });
+  }
+
+  function buildTrackSyncKeys(uri, trackId, title, artist) {
+    const keys = [];
+    if (uri && uri.startsWith("spotify:track:")) {
+      keys.push(uri);
+      keys.push(uri.toLowerCase());
     }
+    if (trackId && trackId.length >= 10 && trackId !== "custom") {
+      keys.push(trackId);
+      keys.push(trackId.toLowerCase());
+    }
+    if (artist && title) {
+      const full = normalizeKey(`${artist} - ${title}`);
+      if (full.length >= 3) keys.push(full);
+      const firstArtist = artist.split(",")[0].trim();
+      if (firstArtist && firstArtist !== artist) {
+        const firstFull = normalizeKey(`${firstArtist} - ${title}`);
+        if (firstFull.length >= 3) keys.push(firstFull);
+      }
+    }
+    if (title && title.length >= 3 && title !== trackId && title !== "Трек") {
+      const normT = normalizeKey(title);
+      if (normT.length >= 3) keys.push(normT);
+    }
+    return [...new Set(keys)];
   }
 
-  function saveLocalOverride(uri, trackId, val) {
-    let local = {};
-    try {
-      const raw = localStorage.getItem(OVERRIDES_KEY);
-      local = raw ? JSON.parse(raw) : {};
-    } catch (_) { local = {}; }
-    local[uri] = val;
-    if (trackId) local[trackId] = val;
+  function saveLocalOverride(uri, trackId, val, title = "", artist = "") {
+    const local = getLocalOverridesOnly();
+    const keys = buildTrackSyncKeys(uri, trackId, title, artist);
+    for (const k of keys) {
+      local[k] = val;
+      cloudOverrides[k] = val;
+    }
     localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
-    cloudOverrides[uri] = val;
-    if (trackId) cloudOverrides[trackId] = val;
     cleanTracklistRows();
+    return keys;
   }
 
-  function deleteLocalOverride(uri, trackId) {
-    let local = {};
-    try {
-      const raw = localStorage.getItem(OVERRIDES_KEY);
-      local = raw ? JSON.parse(raw) : {};
-    } catch (_) { local = {}; }
-    delete local[uri];
-    if (trackId) delete local[trackId];
+  function deleteLocalOverride(uri, trackId, title = "", artist = "") {
+    const local = getLocalOverridesOnly();
+    const keys = buildTrackSyncKeys(uri, trackId, title, artist);
+    if (uri) keys.push(uri);
+    const uniqueKeys = [...new Set(keys)];
+    for (const k of uniqueKeys) {
+      delete local[k];
+      delete cloudOverrides[k];
+    }
     localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
-    delete cloudOverrides[uri];
-    if (trackId) delete cloudOverrides[trackId];
     cleanTracklistRows();
+    return uniqueKeys;
   }
 
   async function openAntiCensorModal(rawUri) {
-    const trackId = trackIdFromUri(rawUri);
-    const uri = (rawUri && rawUri.startsWith("spotify:track:")) ? rawUri : `spotify:track:${trackId}`;
-    const overrides = getOverrides();
-    const existingUrl = overrides[uri] || (trackId ? overrides[trackId] : "") || "";
+    const currentItem = Spicetify.Player?.data?.item;
+    const effectiveRawUri = (rawUri && rawUri !== "spotify:track:custom") ? rawUri : (currentItem?.uri || "");
+    const trackId = trackIdFromUri(effectiveRawUri);
+    const uri = (effectiveRawUri && effectiveRawUri.startsWith("spotify:track:"))
+      ? effectiveRawUri
+      : (trackId ? `spotify:track:${trackId}` : "");
 
-    let trackTitle = trackId || "Трек";
-    let trackArtist = "";
+    let trackTitle = (currentItem && currentItem.uri === uri && currentItem.name) ? currentItem.name : (trackId || "Трек");
+    let trackArtist = (currentItem && currentItem.uri === uri && currentItem.artists)
+      ? currentItem.artists.map(a => a.name).join(", ")
+      : "";
 
-    try {
-      if (Spicetify.CosmosAsync?.get) {
-        const meta = await Spicetify.CosmosAsync.get(`https://api.spotify.com/v1/tracks/${trackId}`);
-        if (meta) {
-          trackTitle = meta.name || trackTitle;
-          trackArtist = meta.artists?.map(a => a.name).join(", ") || "";
+    if (trackId && trackId.length === 22) {
+      try {
+        if (Spicetify.CosmosAsync?.get) {
+          const meta = await Spicetify.CosmosAsync.get(`https://api.spotify.com/v1/tracks/${trackId}`);
+          if (meta) {
+            trackTitle = meta.name || trackTitle;
+            trackArtist = meta.artists?.map(a => a.name).join(", ") || trackArtist;
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
+
+    const existingUrl = getReplacementUrlForInfo({ id: trackId, uri, title: trackTitle, artist: trackArtist }) || "";
 
     const oldOverlay = document.getElementById("anticensor-modal-overlay");
     if (oldOverlay) oldOverlay.remove();
@@ -372,7 +483,7 @@
       <div style="background: rgba(255,255,255,0.06); padding: 12px 14px; border-radius: 8px;">
         <div style="font-weight: 700; font-size: 15px; color: #fff;">${trackTitle}</div>
         <div style="font-size: 12px; color: #b3b3b3; margin-top: 3px;">${trackArtist || uri}</div>
-        <div style="font-size: 12px; color: ${existingUrl ? "#1ed760" : "#a7a7a7"}; margin-top: 8px; font-weight: 600;">
+        <div style="font-size: 12px; color: ${existingUrl ? "#1ed760" : "#a7a7a7"}; margin-top: 8px; font-weight: 600; word-break: break-all;">
           ${existingUrl ? "✅ Активная замена: " + existingUrl : "⚪️ Замена не установлена"}
         </div>
       </div>
@@ -388,7 +499,7 @@
         </div>
         <div style="display: flex; gap: 10px;">
           <button id="anticensor-cancel-btn" style="background: transparent; color: #b3b3b3; border: 1px solid #727272; padding: 8px 18px; border-radius: 20px; font-weight: 700; font-size: 12px; cursor: pointer;">Отмена</button>
-          <button id="anticensor-save-btn" style="background: #1ed760; color: #000; border: none; padding: 8px 22px; border-radius: 20px; font-weight: 700; font-size: 12px; cursor: pointer;">💾 Сохранить</button>
+          <button id="anticensor-save-btn" style="background: #1ed760; color: #000; border: none; padding: 8px 22px; border-radius: 20px; font-weight: 700; font-size: 12px; cursor: pointer;">💾 Сохранить (ПК → Мобилка)</button>
         </div>
       </div>
     `;
@@ -409,9 +520,11 @@
     const deleteBtn = modal.querySelector("#anticensor-delete-btn");
     if (deleteBtn) {
       deleteBtn.onclick = async () => {
-        deleteLocalOverride(uri, trackId);
-        await syncPushToCloud(uri, "");
-        if (Spicetify.showNotification) Spicetify.showNotification("🗑️ AntiCensor: Замена удалена");
+        const delKeys = deleteLocalOverride(uri, trackId, trackTitle, trackArtist);
+        const delPayload = {};
+        for (const k of delKeys) delPayload[k] = "";
+        await syncPushBatchToCloud(delPayload);
+        if (Spicetify.showNotification) Spicetify.showNotification("🗑️ AntiCensor: Замена удалена на ПК и мобилке");
         closeModal();
       };
     }
@@ -422,17 +535,21 @@
         alert("Введите ссылку на трек из SoundCloud!");
         return;
       }
-      saveLocalOverride(uri, trackId, val);
-      await syncPushToCloud(uri, val);
+      const savedKeys = saveLocalOverride(uri, trackId, val, trackTitle, trackArtist);
+      const batchPayload = {};
+      for (const k of savedKeys) batchPayload[k] = val;
+      const ok = await syncPushBatchToCloud(batchPayload);
       try {
         fetch(`${activeServerUrl}/api/add_track`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ key: uri, url: val })
-        });
+          body: JSON.stringify({ key: uri || savedKeys[0], url: val })
+        }).catch(() => {});
       } catch (_) {}
       if (Spicetify.showNotification) {
-        Spicetify.showNotification("☁️ AntiCensor: Замена сохранена и синхронизирована с мобилкой!");
+        Spicetify.showNotification(ok
+          ? "☁️ AntiCensor: Сохранено и отправлено на iPhone (ПК → Мобилка)!"
+          : "⚠️ Сохранено на ПК (облако временно недоступно, синхронизируется автоматически)");
       }
       closeModal();
     };
@@ -475,7 +592,6 @@
         if (menu.querySelector(".anticensor-dom-menu-item")) return;
 
         const text = menu.textContent || "";
-        // Only inject into track/album context menus
         if (!text.includes("плейлист") && !text.includes("Любимые") && !text.includes("очередь") && !text.includes("playlist") && !text.includes("queue") && !text.includes("Share") && !text.includes("Поделиться")) {
           return;
         }
@@ -536,26 +652,46 @@
     const overrides = getOverrides();
     const count = Object.keys(overrides).length;
 
+    // Group unique replacement entries cleanly (show both spotify:track:... AND mobile "artist - title" entries!)
+    const seenUrls = new Map();
+    for (const [k, v] of Object.entries(overrides)) {
+      if (!v || typeof v !== "string" || v.startsWith("local://")) continue;
+      if (!seenUrls.has(v)) {
+        seenUrls.set(v, [k]);
+      } else {
+        seenUrls.get(v).push(k);
+      }
+    }
+
+    let rowsHtml = "";
+    const entries = Array.from(seenUrls.entries());
+    for (const [targetUrl, keyList] of entries.slice(0, 50)) {
+      // Pick the most human-readable key for display
+      const humanKey = keyList.find(k => !k.startsWith("spotify:track:") && k.length !== 22 && k.includes(" - "))
+        || keyList.find(k => !k.startsWith("spotify:track:") && k.length !== 22)
+        || keyList.find(k => k.startsWith("spotify:track:"))
+        || keyList[0];
+      const safeKeysAttr = encodeURIComponent(JSON.stringify(keyList));
+      rowsHtml += `
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 4px; font-size: 12px;">
+          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 370px;">
+            <div style="color: #fff; font-weight: 600;" title="${keyList.join(', ')}">${humanKey}</div>
+            <div style="color: #1ed760; font-size: 11px;">${targetUrl}</div>
+          </div>
+          <button class="anticensor-row-del" data-keys="${safeKeysAttr}" style="background: none; border: 1px solid #e91429; color: #e91429; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">✕</button>
+        </div>
+      `;
+    }
+
     const overlay = document.createElement("div");
     overlay.id = "anticensor-modal-overlay";
     overlay.style.cssText = "position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 99999; backdrop-filter: blur(4px); font-family: var(--font-family, sans-serif);";
 
     const modal = document.createElement("div");
-    modal.style.cssText = "background: #242424; color: #fff; width: 520px; max-width: 90vw; max-height: 80vh; border-radius: 10px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.9); display: flex; flex-direction: column; gap: 16px; border: 1px solid rgba(255,255,255,0.15);";
+    modal.style.cssText = "background: #242424; color: #fff; width: 540px; max-width: 90vw; max-height: 82vh; border-radius: 10px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.9); display: flex; flex-direction: column; gap: 14px; border: 1px solid rgba(255,255,255,0.15);";
 
-    let rowsHtml = "";
-    const keys = Object.keys(overrides).filter(k => k.startsWith("spotify:track:") || k.length === 22);
-    for (const k of keys.slice(0, 30)) {
-      rowsHtml += `
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 4px; font-size: 12px;">
-          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px;">
-            <div style="color: #fff; font-weight: 600;">${k}</div>
-            <div style="color: #1ed760; font-size: 11px;">${overrides[k]}</div>
-          </div>
-          <button class="anticensor-row-del" data-key="${k}" style="background: none; border: 1px solid #e91429; color: #e91429; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">✕</button>
-        </div>
-      `;
-    }
+    const statusDot = cloudConnected ? "🟢 Сопряжено (ПК ↔ Мобилка)" : "🟡 Ожидание синхронизации с облаком";
+    const syncTimeStr = lastSyncTimestamp ? new Date(lastSyncTimestamp).toLocaleTimeString() : "ещё не было";
 
     modal.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -565,20 +701,24 @@
         <button id="anticensor-dash-close" style="background: none; border: none; color: #b3b3b3; font-size: 20px; cursor: pointer;">✕</button>
       </div>
 
-      <div style="background: rgba(30, 215, 96, 0.1); border: 1px solid rgba(30, 215, 96, 0.3); padding: 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+      <div style="background: rgba(30, 215, 96, 0.1); border: 1px solid rgba(30, 215, 96, 0.3); padding: 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; gap: 10px;">
         <div>
-          <div style="font-size: 13px; font-weight: 700; color: #1ed760;">🟢 Облачный сервер: Подключен</div>
-          <div style="font-size: 11px; color: #b3b3b3; margin-top: 2px;">Сопряжение с мобилкой: Активно (${count} правил)</div>
+          <div id="anticensor-dash-status" style="font-size: 13px; font-weight: 700; color: #1ed760;">${statusDot}</div>
+          <div style="font-size: 11px; color: #b3b3b3; margin-top: 2px;">Треков: ${entries.length} (${count} ключей) • Синхр: ${syncTimeStr}</div>
         </div>
-        <button id="anticensor-sync-now" style="background: #1ed760; color: #000; border: none; padding: 6px 14px; border-radius: 16px; font-weight: 700; font-size: 11px; cursor: pointer;">🔄 Синхронизировать</button>
+        <button id="anticensor-sync-now" style="background: #1ed760; color: #000; border: none; padding: 7px 14px; border-radius: 16px; font-weight: 700; font-size: 11px; cursor: pointer; white-space: nowrap;">🔄 Сопряжение ПК ↔ Мобилка</button>
       </div>
 
-      <div style="font-size: 12px; color: #b3b3b3; font-weight: 600;">Список активных замен треков:</div>
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="font-size: 12px; color: #b3b3b3; font-weight: 600;">Активные замены (Мобилка + ПК):</div>
+        <button id="anticensor-replace-current" style="background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.2); padding: 4px 12px; border-radius: 14px; font-size: 11px; font-weight: 600; cursor: pointer;">➕ Заменить текущий трек</button>
+      </div>
+
       <div style="display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 280px; padding-right: 4px;">
-        ${rowsHtml || '<div style="color: #727272; font-size: 12px; text-align: center; padding: 20px;">Нет пользовательских замен. Кликните правой кнопкой мыши по любому треку -> "☁️ AntiCensor: Заменить трек"</div>'}
+        ${rowsHtml || '<div style="color: #727272; font-size: 12px; text-align: center; padding: 20px;">Нет замен. Кликните ПКМ по треку → "AntiCensor: Заменить трек" или нажмите "➕ Заменить текущий трек"</div>'}
       </div>
 
-      <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+      <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
         <button id="anticensor-dash-ok" style="background: #333; color: #fff; border: 1px solid #555; padding: 6px 18px; border-radius: 16px; font-weight: 600; font-size: 12px; cursor: pointer;">Закрыть</button>
       </div>
     `;
@@ -591,18 +731,42 @@
     modal.querySelector("#anticensor-dash-ok").onclick = closeDash;
     overlay.onclick = (e) => { if (e.target === overlay) closeDash(); };
 
-    modal.querySelector("#anticensor-sync-now").onclick = async () => {
-      await syncFromCloud();
-      if (Spicetify.showNotification) Spicetify.showNotification("☁️ AntiCensor: Синхронизировано с облаком!");
+    modal.querySelector("#anticensor-replace-current").onclick = () => {
       closeDash();
+      const curUri = Spicetify.Player?.data?.item?.uri || "spotify:track:custom";
+      openAntiCensorModal(curUri);
+    };
+
+    const syncBtn = modal.querySelector("#anticensor-sync-now");
+    syncBtn.onclick = async () => {
+      syncBtn.disabled = true;
+      syncBtn.textContent = "⏳ Синхронизация...";
+      const res = await syncBidirectionalWithCloud(true, 1);
+      if (res.ok) {
+        closeDash();
+        openAntiCensorDashboard();
+      } else {
+        syncBtn.disabled = false;
+        syncBtn.textContent = "🔄 Повторить сопряжение";
+      }
     };
 
     modal.querySelectorAll(".anticensor-row-del").forEach(btn => {
-      btn.onclick = async (e) => {
-        const k = btn.getAttribute("data-key");
-        deleteLocalOverride(k, k.replace("spotify:track:", ""));
-        await syncPushToCloud(k, "");
-        btn.parentElement.remove();
+      btn.onclick = async () => {
+        try {
+          const keyList = JSON.parse(decodeURIComponent(btn.getAttribute("data-keys")));
+          const delPayload = {};
+          const local = getLocalOverridesOnly();
+          for (const k of keyList) {
+            delete local[k];
+            delete cloudOverrides[k];
+            delPayload[k] = "";
+          }
+          localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
+          await syncPushBatchToCloud(delPayload);
+          btn.parentElement.remove();
+          if (Spicetify.showNotification) Spicetify.showNotification("🗑️ Удалено на ПК и мобилке");
+        } catch (_) {}
       };
     });
   }
@@ -626,11 +790,7 @@
   }
 
   function getOverrides() {
-    let local = {};
-    try {
-      const raw = localStorage.getItem(OVERRIDES_KEY);
-      local = raw ? JSON.parse(raw) : {};
-    } catch (_) { local = {}; }
+    const local = getLocalOverridesOnly();
     return Object.assign({}, BUILTIN_OVERRIDES, cloudOverrides, local);
   }
 
@@ -638,17 +798,47 @@
     if (!info) return undefined;
     const ov = getOverrides();
 
-    if (info.id && ov[info.id]) return ov[info.id];
-    if (info.uri && ov[info.uri]) return ov[info.uri];
-    if (info.uri && ov[info.uri.toLowerCase()]) return ov[info.uri.toLowerCase()];
+    const isPlayable = (u) => typeof u === "string" && u.trim().length > 3 && !u.trim().startsWith("local://");
+
+    // Build normalized lookup table for case/bullet/space-insensitive matching with iPhone!
+    const normMap = {};
+    for (const [k, v] of Object.entries(ov)) {
+      if (!isPlayable(v)) continue;
+      normMap[k] = v;
+      const nk = normalizeKey(k);
+      if (nk && !normMap[nk]) normMap[nk] = v;
+    }
+
+    if (info.uri) {
+      if (isPlayable(normMap[info.uri])) return normMap[info.uri];
+      const lowUri = info.uri.toLowerCase();
+      if (isPlayable(normMap[lowUri])) return normMap[lowUri];
+      const normUri = normalizeKey(info.uri);
+      if (isPlayable(normMap[normUri])) return normMap[normUri];
+    }
+
+    if (info.id) {
+      if (isPlayable(normMap[info.id])) return normMap[info.id];
+      const lowId = info.id.toLowerCase();
+      if (isPlayable(normMap[lowId])) return normMap[lowId];
+    }
 
     if (info.artist && info.title) {
       const fullKey = normalizeKey(`${info.artist} - ${info.title}`);
-      if (ov[fullKey]) return ov[fullKey];
+      if (isPlayable(normMap[fullKey])) return normMap[fullKey];
+
+      const firstArtist = info.artist.split(",")[0].trim();
+      if (firstArtist) {
+        const firstKey = normalizeKey(`${firstArtist} - ${info.title}`);
+        if (isPlayable(normMap[firstKey])) return normMap[firstKey];
+      }
     }
 
     if (info.title) {
       const titleLower = normalizeKey(info.title);
+      if (titleLower.length >= 2 && isPlayable(normMap[titleLower])) {
+        return normMap[titleLower];
+      }
       for (const tr of BUILTIN_ALBUM_TRACKS) {
         if (titleLower === normalizeKey(tr.title) || tr.aliases.some(a => titleLower === normalizeKey(a))) {
           return `/audio/${tr.file}`;
@@ -679,6 +869,8 @@
   let currentPlayingTrackId = null;
   let currentPlayingTrackIndex = -1;
   let currentPlayingTrackTitle = "";
+  let currentPlayingTrackArtist = "m1raOnTheBlock";
+  let currentPlayingTrackCover = ALBUM_COVER_URL;
   let userVolume = 1.0;
   let progressInterval = null;
   let isDraggingProgress = false;
@@ -1000,6 +1192,16 @@
         customTitle.setAttribute("title", currentPlayingTrackTitle);
       }
 
+      const customArtist = document.getElementById("anticensor-track-artist");
+      if (customArtist && customArtist.textContent !== currentPlayingTrackArtist) {
+        customArtist.textContent = currentPlayingTrackArtist;
+      }
+
+      const customCover = document.getElementById("anticensor-cover-img");
+      if (customCover && currentPlayingTrackCover && customCover.src !== currentPlayingTrackCover) {
+        customCover.src = currentPlayingTrackCover;
+      }
+
       const customPos = document.getElementById("anticensor-time-pos");
       if (customPos) customPos.textContent = formatTime(curTime);
 
@@ -1043,7 +1245,7 @@
   }
 
   // --- START REPLACEMENT PLAYBACK ---
-  function startReplacement(trackId, url, retryCount = 0, albumIndex = -1, explicitTitle = "") {
+  function startReplacement(trackId, url, retryCount = 0, albumIndex = -1, explicitTitle = "", explicitArtist = "", explicitCover = "") {
     const sessionId = ++activeSessionId;
     currentPlayingTrackId = trackId;
 
@@ -1051,13 +1253,17 @@
       currentPlayingTrackIndex = albumIndex;
     } else {
       const foundIdx = BUILTIN_ALBUM_TRACKS.findIndex(t => t.id === trackId || t.uri === trackId || (explicitTitle && t.title.toLowerCase() === explicitTitle.toLowerCase()));
-      if (foundIdx >= 0) currentPlayingTrackIndex = foundIdx;
+      currentPlayingTrackIndex = foundIdx >= 0 ? foundIdx : -1;
     }
 
     if (currentPlayingTrackIndex >= 0 && currentPlayingTrackIndex < BUILTIN_ALBUM_TRACKS.length) {
       currentPlayingTrackTitle = explicitTitle || BUILTIN_ALBUM_TRACKS[currentPlayingTrackIndex].title;
+      currentPlayingTrackArtist = explicitArtist || "m1raOnTheBlock";
+      currentPlayingTrackCover = explicitCover || ALBUM_COVER_URL;
     } else {
       currentPlayingTrackTitle = explicitTitle || trackId;
+      currentPlayingTrackArtist = explicitArtist || "AntiCensor (SoundCloud)";
+      currentPlayingTrackCover = explicitCover || ALBUM_COVER_URL;
     }
 
     const streamUrl = getStreamUrl(url);
@@ -1078,7 +1284,7 @@
       ourAudio = null;
     }
 
-    console.log("[AntiCensor PC] Starting playback:", currentPlayingTrackTitle, "URL:", streamUrl);
+    console.log("[AntiCensor PC] Starting playback:", currentPlayingTrackTitle, "Artist:", currentPlayingTrackArtist, "URL:", streamUrl);
 
     // Stop and pause ALL native / remote Spotify playback!
     pauseAllSpotifyPlayback();
@@ -1098,7 +1304,7 @@
       if (retryCount < 2) {
         setTimeout(() => {
           if (sessionId === activeSessionId) {
-            startReplacement(trackId, url, retryCount + 1, albumIndex, explicitTitle);
+            startReplacement(trackId, url, retryCount + 1, albumIndex, explicitTitle, explicitArtist, explicitCover);
           }
         }, 1500);
         return;
@@ -1200,6 +1406,16 @@
       }
     }
 
+    let artist = "";
+    const artistLinks = row.querySelectorAll('a[href*="/artist/"]');
+    if (artistLinks && artistLinks.length > 0) {
+      artist = Array.from(artistLinks).map(a => (a.textContent || "").trim()).filter(Boolean).join(", ");
+    }
+
+    let coverUrl = "";
+    const rowImg = row.querySelector('img[src]');
+    if (rowImg && rowImg.src) coverUrl = rowImg.src;
+
     let uri = row.getAttribute("data-uri");
     let id = null;
     if (uri) {
@@ -1222,15 +1438,16 @@
       id = tr.id;
       uri = tr.uri;
       title = title || tr.title;
+      artist = artist || "m1raOnTheBlock";
     }
 
-    const repUrl = getReplacementUrlForInfo({ id, uri, title });
+    const repUrl = getReplacementUrlForInfo({ id, uri, title, artist });
     if (repUrl) {
       evt.preventDefault();
       evt.stopPropagation();
       evt.stopImmediatePropagation();
 
-      if (ourAudio && (currentPlayingTrackId === (id || uri || title) || (rowIndex >= 0 && rowIndex === currentPlayingTrackIndex))) {
+      if (ourAudio && (currentPlayingTrackId === (id || uri || title) || (isAlbumPage && rowIndex >= 0 && rowIndex === currentPlayingTrackIndex))) {
         if (ourAudio.paused) {
           pauseAllSpotifyPlayback();
           ourAudio.play().catch(() => {});
@@ -1240,7 +1457,7 @@
         return;
       }
 
-      startReplacement(id || uri || title, repUrl, 0, rowIndex, title);
+      startReplacement(id || uri || title, repUrl, 0, isAlbumPage ? rowIndex : -1, title, artist, coverUrl);
     }
   }
 
@@ -1250,11 +1467,32 @@
     }
   }
 
+  function checkAndHandleCurrentSpotifyTrack() {
+    const track = Spicetify.Player?.data?.item;
+    if (!track) return;
+    const uri = track.uri || "";
+    const id = trackIdFromUri(uri);
+    const title = track.name || "";
+    const artist = track.artists ? track.artists.map(a => a.name).join(", ") : "";
+    const cover = (track.images && track.images[0] && track.images[0].url) ? track.images[0].url : "";
+
+    const rep = getReplacementUrlForInfo({ uri, id, title, artist });
+    if (rep) {
+      const targetKey = id || uri || title;
+      if (!ourAudio || currentPlayingTrackId !== targetKey) {
+        console.log("[AntiCensor PC] Auto-intercepting synced track on songchange:", artist, "-", title);
+        startReplacement(targetKey, rep, 0, -1, title, artist, cover);
+      }
+    } else if (ourAudio) {
+      stopReplacement();
+    }
+  }
+
   async function init() {
     await waitReady();
 
-    syncFromCloud();
-    setInterval(syncFromCloud, 30000);
+    syncBidirectionalWithCloud(false, 1);
+    setInterval(() => syncBidirectionalWithCloud(false, 1), 20000);
 
     setupContextMenu();
     setupTopbarButton();
@@ -1273,15 +1511,9 @@
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
-    // Stop replacement if user plays normal Spotify music outside this album
+    // Auto-start synced replacements (Mobile -> PC & PC -> PC) OR stop replacement when normal track plays
     Spicetify.Player.addEventListener("songchange", () => {
-      const track = Spicetify.Player.data?.item;
-      if (track && ourAudio) {
-        const rep = getReplacementUrlForInfo({ uri: track.uri, id: trackIdFromUri(track.uri), title: track.name });
-        if (!rep) {
-          stopReplacement();
-        }
-      }
+      checkAndHandleCurrentSpotifyTrack();
     });
 
     // Volume slider input
