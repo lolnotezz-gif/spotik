@@ -31,7 +31,6 @@ jobs:
           "$TOOLCHAIN_BIN/clang" \
             -target arm64-apple-ios14.0 \
             -isysroot "$SDK_PATH" \
-            -fuse-ld=lld \
             -fobjc-arc \
             -Wno-deprecated-declarations \
             -Wno-objc-multiple-method-names \
