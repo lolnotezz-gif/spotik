@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.5.8-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026110801
+#define ANTICENSOR_VERSION_STRING @"v5.6.0-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026111701
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -56,6 +56,64 @@ static void safeSeekPlayerToTime(double targetSeconds);
 static NSURLSessionDataTask *(*orig_dataTaskWithRequest_completionHandler)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
 static NSURLSessionDataTask *custom_dataTaskWithRequest_completionHandler(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *));
 static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *) = NULL;
+
+// --- Weak Internet Adaptive Timeout System ---
+static BOOL g_renderServerWarmedUp = NO;
+static NSTimeInterval g_lastNetworkLatencyMs = 200.0; // Adaptive: measured round-trip time
+
+static NSTimeInterval getAdaptiveSCTimeout(void) {
+    // On slow connections (>500ms latency), increase timeout to give SC API time to respond
+    if (g_lastNetworkLatencyMs > 2000.0) return 12.0;  // Very slow (2G/EDGE)
+    if (g_lastNetworkLatencyMs > 800.0)  return 8.0;   // Slow (3G)
+    if (g_lastNetworkLatencyMs > 400.0)  return 5.0;   // Medium
+    return 3.0;                                         // Fast (LTE/WiFi) — was 1.0, now 3.0 baseline
+}
+
+static NSTimeInterval getAdaptiveRedirectTimeout(void) {
+    if (g_lastNetworkLatencyMs > 2000.0) return 10.0;
+    if (g_lastNetworkLatencyMs > 800.0)  return 7.0;
+    return 5.0;  // Was 1.0 — way too aggressive!
+}
+
+static void warmUpRenderServer(void) {
+    if (g_renderServerWarmedUp) return;
+    NSString *server = getServerURL();
+    NSURL *healthUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/health", server]];
+    if (!healthUrl) return;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:healthUrl];
+    req.timeoutInterval = 45.0; // Render cold start can take 30+ sec
+    NSTimeInterval startTime = [NSDate timeIntervalSinceReferenceDate];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSTimeInterval elapsed = ([NSDate timeIntervalSinceReferenceDate] - startTime) * 1000.0;
+        if (!err) {
+            g_renderServerWarmedUp = YES;
+            g_lastNetworkLatencyMs = elapsed;
+            NSLog(@"[AntiCensor] Render server warmed up in %.0fms", elapsed);
+        } else {
+            NSLog(@"[AntiCensor] Render server warm-up failed (%.0fms): %@", elapsed, err);
+        }
+    }] resume];
+    NSLog(@"[AntiCensor] Warming up Render server at %@...", server);
+}
+
+static void measureNetworkLatency(void) {
+    // Quick HEAD request to SoundCloud to measure real network speed
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://soundcloud.com"]];
+    req.HTTPMethod = @"HEAD";
+    req.timeoutInterval = 10.0;
+    [req setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
+    NSTimeInterval startTime = [NSDate timeIntervalSinceReferenceDate];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSTimeInterval elapsed = ([NSDate timeIntervalSinceReferenceDate] - startTime) * 1000.0;
+        if (!err) {
+            g_lastNetworkLatencyMs = elapsed;
+            NSLog(@"[AntiCensor] Network latency measured: %.0fms (timeout will be %.1fs)", elapsed, getAdaptiveSCTimeout());
+        } else {
+            g_lastNetworkLatencyMs = 5000.0; // Assume very slow if SC unreachable
+            NSLog(@"[AntiCensor] Network latency measurement failed, assuming slow connection");
+        }
+    }] resume];
+}
 
 
 static double g_spotifyLastReportedPosition = 0.0;
@@ -1071,7 +1129,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                               SC_CLIENT_ID];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
         [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
-        [req setTimeoutInterval:1.0];
+        [req setTimeoutInterval:getAdaptiveSCTimeout()];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (!data || err) {
@@ -1119,7 +1177,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
                         }
                         NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:fullSApi]];
                         [req2 setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-                        [req2 setTimeoutInterval:1.0];
+                        [req2 setTimeoutInterval:getAdaptiveSCTimeout()];
 
                         [[[NSURLSession sharedSession] dataTaskWithRequest:req2 completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
                             if (d2 && !e2) {
@@ -1157,7 +1215,7 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
     if ([rawUrl containsString:@"on.soundcloud.com"] || [rawUrl containsString:@"t.co"] || [rawUrl containsString:@"bit.ly"]) {
         NSMutableURLRequest *redReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:rawUrl]];
         [redReq setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-        [redReq setTimeoutInterval:1.0];
+        [redReq setTimeoutInterval:getAdaptiveRedirectTimeout()];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:redReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             NSString *finalUrl = r.URL.absoluteString;
@@ -4226,9 +4284,13 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
 
     [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
     isObservingPlayerItem = YES;
+    if (@available(iOS 10.0, *)) {
+        // Адаптивный буфер вперед для слабого интернета
+        item.preferredForwardBufferDuration = (g_lastNetworkLatencyMs > 500.0) ? 6.0 : 2.0;
+    }
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
     if (@available(iOS 10.0, *)) {
-        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
+        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = (g_lastNetworkLatencyMs > 500.0) ? YES : NO;
     }
 
     g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];
@@ -6155,7 +6217,9 @@ __attribute__((constructor)) static void initAntiCensor(void) {
 
     cleanupPoisonedLyricsDatabase();
     preResolveAllOverridesInBackground();
-    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v4.0 (Cloud Sync + Native Context Menu + Lyrics Karaoke)...");
+    warmUpRenderServer();
+    measureNetworkLatency();
+    NSLog(@"[AntiCensor] Initializing AntiCensor iOS Tweak v5.6.0 (Weak Internet Adaptive Engine + Cloud Sync)...");
 
     // Инициализация аудиосессии для гарантированной поддержки Dynamic Island и экрана блокировки
     AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -6180,14 +6244,17 @@ __attribute__((constructor)) static void initAntiCensor(void) {
         }
     }];
 
-    // Восстановление после буферизации
+    // Восстановление после буферизации (адаптивная задержка для слабого интернета)
     [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemPlaybackStalledNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
-        if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
-            [ourAudioPlayer play];
-        }
+        NSLog(@"[AntiCensor] Playback stalled due to slow network, buffering...");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
+                [ourAudioPlayer play];
+            }
+        });
     }];
 
     // Защита от отката на ~5 сек при выходе из фона или сворачивании
@@ -6195,6 +6262,8 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
+        warmUpRenderServer();
+        measureNetworkLatency();
         g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
         if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
             if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {

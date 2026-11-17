@@ -266,13 +266,30 @@
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   }
 
+  let cloudOverrides = {};
+
+  async function syncFromCloud() {
+    try {
+      const res = await fetch(`${activeServerUrl}/api/sync`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.overrides && typeof data.overrides === "object") {
+          cloudOverrides = data.overrides;
+          console.log("[AntiCensor PC] Synced overrides with mobile:", Object.keys(cloudOverrides).length);
+        }
+      }
+    } catch (e) {
+      console.warn("[AntiCensor PC] Cloud sync error:", e);
+    }
+  }
+
   function getOverrides() {
     let local = {};
     try {
       const raw = localStorage.getItem(OVERRIDES_KEY);
       local = raw ? JSON.parse(raw) : {};
     } catch (_) { local = {}; }
-    return Object.assign({}, BUILTIN_OVERRIDES, local);
+    return Object.assign({}, BUILTIN_OVERRIDES, cloudOverrides, local);
   }
 
   function getReplacementUrlForInfo(info) {
@@ -892,6 +909,9 @@
 
   async function init() {
     await waitReady();
+
+    syncFromCloud();
+    setInterval(syncFromCloud, 30000);
 
     injectAntiCensorStyles();
     cleanTracklistRows();
