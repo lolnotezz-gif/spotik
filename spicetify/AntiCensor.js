@@ -283,6 +283,274 @@
     }
   }
 
+  async function syncPushToCloud(key, value) {
+    try {
+      await fetch(`${activeServerUrl}/api/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overrides: { [key]: value || "" } })
+      });
+      console.log("[AntiCensor PC] Pushed override to cloud:", key, value);
+    } catch (e) {
+      console.warn("[AntiCensor PC] Push override failed:", e);
+    }
+  }
+
+  function saveLocalOverride(uri, trackId, val) {
+    let local = {};
+    try {
+      const raw = localStorage.getItem(OVERRIDES_KEY);
+      local = raw ? JSON.parse(raw) : {};
+    } catch (_) { local = {}; }
+    local[uri] = val;
+    if (trackId) local[trackId] = val;
+    localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
+    cloudOverrides[uri] = val;
+    if (trackId) cloudOverrides[trackId] = val;
+    cleanTracklistRows();
+  }
+
+  function deleteLocalOverride(uri, trackId) {
+    let local = {};
+    try {
+      const raw = localStorage.getItem(OVERRIDES_KEY);
+      local = raw ? JSON.parse(raw) : {};
+    } catch (_) { local = {}; }
+    delete local[uri];
+    if (trackId) delete local[trackId];
+    localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
+    delete cloudOverrides[uri];
+    if (trackId) delete cloudOverrides[trackId];
+    cleanTracklistRows();
+  }
+
+  async function openAntiCensorModal(rawUri) {
+    const trackId = trackIdFromUri(rawUri);
+    const uri = (rawUri && rawUri.startsWith("spotify:track:")) ? rawUri : `spotify:track:${trackId}`;
+    const overrides = getOverrides();
+    const existingUrl = overrides[uri] || (trackId ? overrides[trackId] : "") || "";
+
+    let trackTitle = trackId || "Трек";
+    let trackArtist = "";
+
+    try {
+      if (Spicetify.CosmosAsync?.get) {
+        const meta = await Spicetify.CosmosAsync.get(`https://api.spotify.com/v1/tracks/${trackId}`);
+        if (meta) {
+          trackTitle = meta.name || trackTitle;
+          trackArtist = meta.artists?.map(a => a.name).join(", ") || "";
+        }
+      }
+    } catch (_) {}
+
+    const oldOverlay = document.getElementById("anticensor-modal-overlay");
+    if (oldOverlay) oldOverlay.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "anticensor-modal-overlay";
+    overlay.style.cssText = "position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 99999; backdrop-filter: blur(4px); font-family: var(--font-family, sans-serif);";
+
+    const modal = document.createElement("div");
+    modal.style.cssText = "background: #242424; color: #fff; width: 480px; max-width: 90vw; border-radius: 10px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.9); display: flex; flex-direction: column; gap: 16px; border: 1px solid rgba(255,255,255,0.15);";
+
+    modal.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin: 0; font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+          <span>☁️</span> AntiCensor — Замена трека
+        </h2>
+        <button id="anticensor-close-btn" style="background: none; border: none; color: #b3b3b3; font-size: 20px; cursor: pointer; padding: 4px;">✕</button>
+      </div>
+
+      <div style="background: rgba(255,255,255,0.06); padding: 12px 14px; border-radius: 8px;">
+        <div style="font-weight: 700; font-size: 15px; color: #fff;">${trackTitle}</div>
+        <div style="font-size: 12px; color: #b3b3b3; margin-top: 3px;">${trackArtist || uri}</div>
+        <div style="font-size: 12px; color: ${existingUrl ? "#1ed760" : "#a7a7a7"}; margin-top: 8px; font-weight: 600;">
+          ${existingUrl ? "✅ Активная замена: " + existingUrl : "⚪️ Замена не установлена"}
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <label style="font-size: 12px; color: #b3b3b3; font-weight: 600;">Ссылка на трек (SoundCloud / MP3):</label>
+        <input id="anticensor-url-input" type="text" placeholder="https://soundcloud.com/... или https://on.soundcloud.com/..." value="${existingUrl}" style="background: #333; border: 1px solid #555; color: #fff; padding: 10px 14px; border-radius: 6px; font-size: 13px; outline: none; width: 100%; box-sizing: border-box;" />
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+        <div>
+          ${existingUrl ? `<button id="anticensor-delete-btn" style="background: #e91429; color: #fff; border: none; padding: 8px 16px; border-radius: 20px; font-weight: 700; font-size: 12px; cursor: pointer;">Удалить замену</button>` : ""}
+        </div>
+        <div style="display: flex; gap: 10px;">
+          <button id="anticensor-cancel-btn" style="background: transparent; color: #b3b3b3; border: 1px solid #727272; padding: 8px 18px; border-radius: 20px; font-weight: 700; font-size: 12px; cursor: pointer;">Отмена</button>
+          <button id="anticensor-save-btn" style="background: #1ed760; color: #000; border: none; padding: 8px 22px; border-radius: 20px; font-weight: 700; font-size: 12px; cursor: pointer;">💾 Сохранить</button>
+        </div>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const input = modal.querySelector("#anticensor-url-input");
+    input.focus();
+    input.select();
+
+    const closeModal = () => overlay.remove();
+
+    modal.querySelector("#anticensor-close-btn").onclick = closeModal;
+    modal.querySelector("#anticensor-cancel-btn").onclick = closeModal;
+    overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+
+    const deleteBtn = modal.querySelector("#anticensor-delete-btn");
+    if (deleteBtn) {
+      deleteBtn.onclick = async () => {
+        deleteLocalOverride(uri, trackId);
+        await syncPushToCloud(uri, "");
+        if (Spicetify.showNotification) Spicetify.showNotification("🗑️ AntiCensor: Замена удалена");
+        closeModal();
+      };
+    }
+
+    modal.querySelector("#anticensor-save-btn").onclick = async () => {
+      const val = input.value.trim();
+      if (!val) {
+        alert("Введите ссылку на трек из SoundCloud!");
+        return;
+      }
+      saveLocalOverride(uri, trackId, val);
+      await syncPushToCloud(uri, val);
+      try {
+        fetch(`${activeServerUrl}/api/add_track`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: uri, url: val })
+        });
+      } catch (_) {}
+      if (Spicetify.showNotification) {
+        Spicetify.showNotification("☁️ AntiCensor: Замена сохранена и синхронизирована с мобилкой!");
+      }
+      closeModal();
+    };
+  }
+
+  function setupContextMenu() {
+    if (!Spicetify?.ContextMenu?.Item) {
+      setTimeout(setupContextMenu, 400);
+      return;
+    }
+
+    const cloudIcon = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M12.5 13H3.75A2.75 2.75 0 0 1 1 10.25c0-1.27.87-2.34 2.07-2.65A4.5 4.5 0 0 1 11.83 5.4 3.75 3.75 0 0 1 15 9.07 2.93 2.93 0 0 1 12.5 13z"></path></svg>`;
+
+    new Spicetify.ContextMenu.Item(
+      "☁️ AntiCensor: Заменить трек (SoundCloud)",
+      (uris) => {
+        if (!uris || !uris[0]) return;
+        openAntiCensorModal(uris[0]);
+      },
+      (uris) => {
+        if (!uris || !uris[0]) return false;
+        const u = uris[0];
+        return u.startsWith("spotify:track:") || u.startsWith("spotify:episode:") || u.includes("/track/");
+      },
+      cloudIcon
+    ).register();
+
+    console.log("[AntiCensor PC] Context menu item registered successfully!");
+  }
+
+  function openAntiCensorDashboard() {
+    const oldOverlay = document.getElementById("anticensor-modal-overlay");
+    if (oldOverlay) oldOverlay.remove();
+
+    const overrides = getOverrides();
+    const count = Object.keys(overrides).length;
+
+    const overlay = document.createElement("div");
+    overlay.id = "anticensor-modal-overlay";
+    overlay.style.cssText = "position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 99999; backdrop-filter: blur(4px); font-family: var(--font-family, sans-serif);";
+
+    const modal = document.createElement("div");
+    modal.style.cssText = "background: #242424; color: #fff; width: 520px; max-width: 90vw; max-height: 80vh; border-radius: 10px; padding: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.9); display: flex; flex-direction: column; gap: 16px; border: 1px solid rgba(255,255,255,0.15);";
+
+    let rowsHtml = "";
+    const keys = Object.keys(overrides).filter(k => k.startsWith("spotify:track:") || k.length === 22);
+    for (const k of keys.slice(0, 30)) {
+      rowsHtml += `
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 4px; font-size: 12px;">
+          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px;">
+            <div style="color: #fff; font-weight: 600;">${k}</div>
+            <div style="color: #1ed760; font-size: 11px;">${overrides[k]}</div>
+          </div>
+          <button class="anticensor-row-del" data-key="${k}" style="background: none; border: 1px solid #e91429; color: #e91429; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">✕</button>
+        </div>
+      `;
+    }
+
+    modal.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin: 0; font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+          <span>☁️</span> AntiCensor Dashboard
+        </h2>
+        <button id="anticensor-dash-close" style="background: none; border: none; color: #b3b3b3; font-size: 20px; cursor: pointer;">✕</button>
+      </div>
+
+      <div style="background: rgba(30, 215, 96, 0.1); border: 1px solid rgba(30, 215, 96, 0.3); padding: 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <div style="font-size: 13px; font-weight: 700; color: #1ed760;">🟢 Облачный сервер: Подключен</div>
+          <div style="font-size: 11px; color: #b3b3b3; margin-top: 2px;">Сопряжение с мобилкой: Активно (${count} правил)</div>
+        </div>
+        <button id="anticensor-sync-now" style="background: #1ed760; color: #000; border: none; padding: 6px 14px; border-radius: 16px; font-weight: 700; font-size: 11px; cursor: pointer;">🔄 Синхронизировать</button>
+      </div>
+
+      <div style="font-size: 12px; color: #b3b3b3; font-weight: 600;">Список активных замен треков:</div>
+      <div style="display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 280px; padding-right: 4px;">
+        ${rowsHtml || '<div style="color: #727272; font-size: 12px; text-align: center; padding: 20px;">Нет пользовательских замен. Кликните правой кнопкой мыши по любому треку -> "☁️ AntiCensor: Заменить трек"</div>'}
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+        <button id="anticensor-dash-ok" style="background: #333; color: #fff; border: 1px solid #555; padding: 6px 18px; border-radius: 16px; font-weight: 600; font-size: 12px; cursor: pointer;">Закрыть</button>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const closeDash = () => overlay.remove();
+    modal.querySelector("#anticensor-dash-close").onclick = closeDash;
+    modal.querySelector("#anticensor-dash-ok").onclick = closeDash;
+    overlay.onclick = (e) => { if (e.target === overlay) closeDash(); };
+
+    modal.querySelector("#anticensor-sync-now").onclick = async () => {
+      await syncFromCloud();
+      if (Spicetify.showNotification) Spicetify.showNotification("☁️ AntiCensor: Синхронизировано с облаком!");
+      closeDash();
+    };
+
+    modal.querySelectorAll(".anticensor-row-del").forEach(btn => {
+      btn.onclick = async (e) => {
+        const k = btn.getAttribute("data-key");
+        deleteLocalOverride(k, k.replace("spotify:track:", ""));
+        await syncPushToCloud(k, "");
+        btn.parentElement.remove();
+      };
+    });
+  }
+
+  function setupTopbarButton() {
+    if (!Spicetify?.Topbar?.Button) {
+      setTimeout(setupTopbarButton, 400);
+      return;
+    }
+
+    const cloudIcon = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M12.5 13H3.75A2.75 2.75 0 0 1 1 10.25c0-1.27.87-2.34 2.07-2.65A4.5 4.5 0 0 1 11.83 5.4 3.75 3.75 0 0 1 15 9.07 2.93 2.93 0 0 1 12.5 13z"></path></svg>`;
+
+    new Spicetify.Topbar.Button(
+      "AntiCensor",
+      cloudIcon,
+      () => {
+        openAntiCensorDashboard();
+      }
+    );
+    console.log("[AntiCensor PC] Topbar button registered successfully!");
+  }
+
   function getOverrides() {
     let local = {};
     try {
@@ -912,6 +1180,9 @@
 
     syncFromCloud();
     setInterval(syncFromCloud, 30000);
+
+    setupContextMenu();
+    setupTopbarButton();
 
     injectAntiCensorStyles();
     cleanTracklistRows();
