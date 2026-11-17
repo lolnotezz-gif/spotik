@@ -38,6 +38,7 @@ static void setupFloatingBadge(void);
 static void checkAndInjectProfileDrawerButton(void);
 static void checkAndSyncLyricsOnScreen(void);
 static BOOL isFullScreenLyricsScrollView(UIScrollView *sv);
+static NSString *getServerURL(void);
 static void addAntiCensorRowToContextMenu(UIViewController *sheetVC);
 static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count));
 static void performAntiCensorCloudSync(void);
