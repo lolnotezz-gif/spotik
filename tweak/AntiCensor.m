@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.2-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026111703
+#define ANTICENSOR_VERSION_STRING @"v5.6.3-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112101
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -113,6 +113,30 @@ static void measureNetworkLatency(void) {
         } else {
             g_lastNetworkLatencyMs = 5000.0; // Assume very slow if SC unreachable
             NSLog(@"[AntiCensor] Network latency measurement failed, assuming slow connection");
+        }
+    }] resume];
+}
+
+static void prewarmServerForSoundCloud(NSString *scUrl) {
+    // Предзагрузка SoundCloud-трека на Render сервере в фоне.
+    // Убирает задержку при первом воспроизведении: сервер заранее резолвит
+    // SC и транскодирует в MP3, пока пользователь ещё не нажал Play.
+    if (!scUrl || scUrl.length == 0) return;
+    if (![scUrl containsString:@"soundcloud.com"]) return;
+    NSString *clean = [scUrl componentsSeparatedByString:@"?"].firstObject;
+    NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+    [allowed removeCharactersInString:@":/?&=#+"];
+    NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    NSString *server = getServerURL();
+    NSURL *preloadUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/preload?url=%@", server, encoded]];
+    if (!preloadUrl) return;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:preloadUrl];
+    req.timeoutInterval = 10.0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err) {
+            NSLog(@"[AntiCensor] Preload (Render) request failed: %@", err);
+        } else {
+            NSLog(@"[AntiCensor] Preload (Render) started for: %@", clean);
         }
     }] resume];
 }
@@ -720,6 +744,9 @@ static void applyCloudSyncJSON(NSDictionary *json, NSUInteger *outUpdated, NSUIn
             NSString *remoteVal = [remoteOverrides[k] description];
             if (remoteVal.length > 0 && ![remoteVal hasPrefix:@"local://"]) {
                 totalCount++;
+                if ([remoteVal containsString:@"soundcloud.com"]) {
+                    prewarmServerForSoundCloud(remoteVal);
+                }
                 NSString *curr = localOverrides[normK];
                 if (!curr || ![curr hasPrefix:@"local://"]) {
                     if (![curr isEqualToString:remoteVal]) {
@@ -5114,6 +5141,8 @@ static void showSoundCloudInputPrompt(NSString *uri, NSString *title, NSString *
                         saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], inputUrl);
                     }
                 }
+                // Предзагружаем SoundCloud-трек на Render сервере в фоне, чтобы убрать задержку при первом Play
+                prewarmServerForSoundCloud(inputUrl);
                 // Очищаем кэш стрима для этой ссылки, чтобы подтянуть свежий живой поток
                 if (g_streamCache) {
                     [g_streamCache removeObjectForKey:inputUrl];
@@ -6144,6 +6173,7 @@ static void preResolveAllOverridesInBackground(void) {
             NSString *url = all[k];
             if ([url containsString:@"soundcloud.com"]) {
                 resolveSoundCloudUrl(url, nil);
+                prewarmServerForSoundCloud(url);
             }
         }
     });
