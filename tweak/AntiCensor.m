@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.4-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112102
+#define ANTICENSOR_VERSION_STRING @"v5.6.5-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112103
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -4506,8 +4506,10 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
 #pragma mark - Universal Playback & Accurate Sync
 
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate) {
+    BOOL didTrackChange = NO;
     if (title && title.length > 0) {
         if (![title isEqualToString:currentActiveSpotifyTrackTitle]) {
+            didTrackChange = YES;
             currentActiveSpotifyTrackTitle = title;
             currentActiveSpotifyTrackArtist = artist ?: @"";
             currentActiveSpotifyTrackURI = trackURI;
@@ -4598,7 +4600,7 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
             // Игнорируем только стартовый шум первых 2.0 секунд при самом запуске трека
             BOOL isStartupNoise = (timeSinceStart < 2.0 && position < 4.0 && ourTime < 2.0);
 
-            if (!isStartupNoise && !g_isPlayerSeeking) {
+            if (!isStartupNoise && !g_isPlayerSeeking && !didTrackChange) {
                 // Если разница во времени больше 0.8 сек — ЭТО ТАП ПО ТЕКСТУ В СПОТИФАЕ ИЛИ ПЕРЕМОТКА!
                 if (fabs(position - ourTime) > 0.8) {
                     NSLog(@"[AntiCensor] >>> SPOTIFY LYRICS TAP DETECTED: %.2f -> %.2f. Seeking custom player! <<<", ourTime, position);
@@ -5221,6 +5223,13 @@ static void showLyricsEditPrompt(NSString *uri, NSString *title, NSString *artis
                 if (artist && title) saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], text);
                 if (displayTrack && displayTrack.length > 0) saveLyricsForTrack(displayTrack, text);
                 g_currentKaraokeTrackKey = nil;
+                g_currentKaraokeItems = nil;
+                g_currentKaraokeLabels = nil;
+                g_lastActiveKaraokeIdx = -1;
+                // Показываем текст сразу после закрытия алерта
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    checkAndSyncLyricsOnScreen();
+                });
             }
         }];
 
@@ -5315,6 +5324,12 @@ static void showLyricsManagerDialog(NSString *targetURI, NSString *targetTitle, 
                 if (title && title.length > 0) saveLyricsForTrack(title, nil);
                 if (artist && title) saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
                 g_currentKaraokeTrackKey = nil;
+                g_currentKaraokeItems = nil;
+                g_currentKaraokeLabels = nil;
+                g_lastActiveKaraokeIdx = -1;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    checkAndSyncLyricsOnScreen();
+                });
             }];
         }
 
