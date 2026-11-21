@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.3-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112101
+#define ANTICENSOR_VERSION_STRING @"v5.6.4-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112102
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1194,7 +1194,9 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
         [scAllowed removeCharactersInString:@":/?&=#+"];
         NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
-        NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@", server, encoded]];
+        // Адаптация под слабый интернет: на медленной связи просим меньший битрейт
+        int br = (g_lastNetworkLatencyMs > 2000.0) ? 96 : (g_lastNetworkLatencyMs > 800.0) ? 128 : 192;
+        NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@&br=%d", server, encoded, br]];
         NSLog(@"[AntiCensor] SoundCloud playback via Render fallback: %@", renderUrl);
         // СТРОГО: НЕ сохраняем Render ссылки в постоянный диск-кеш!
         if (completion) completion(renderUrl);
@@ -4343,7 +4345,7 @@ static void onPeriodicSyncCheck(NSTimer *timer) {
         ourAudioPlayer.volume = 1.0f;
     }
 
-    if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
+    if (ourAudioPlayer && !isReplacementLoading && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && isSpotifyCurrentlyPlaying && !g_isPlayerSeeking) {
         [ourAudioPlayer play];
     }
 
@@ -4391,12 +4393,20 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
     isObservingPlayerItem = YES;
     if (@available(iOS 10.0, *)) {
-        // Адаптивный буфер вперед для слабого интернета
-        item.preferredForwardBufferDuration = (g_lastNetworkLatencyMs > 500.0) ? 6.0 : 2.0;
+        // Адаптивный буфер вперед для слабого интернета (чем хуже связь — тем больше буфер)
+        if (g_lastNetworkLatencyMs > 2000.0) {
+            item.preferredForwardBufferDuration = 12.0;   // 2G/EDGE
+        } else if (g_lastNetworkLatencyMs > 800.0) {
+            item.preferredForwardBufferDuration = 8.0;    // 3G
+        } else if (g_lastNetworkLatencyMs > 400.0) {
+            item.preferredForwardBufferDuration = 4.0;    // средняя связь
+        } else {
+            item.preferredForwardBufferDuration = 2.0;    // LTE/WiFi
+        }
     }
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
     if (@available(iOS 10.0, *)) {
-        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = (g_lastNetworkLatencyMs > 500.0) ? YES : NO;
+        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = (g_lastNetworkLatencyMs > 400.0) ? YES : NO;
     }
 
     g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];
@@ -4405,8 +4415,8 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     seekSpotifyPlayback(0.0, g_currentTrackDuration);
 
     if (isSpotifyCurrentlyPlaying) {
-        ourAudioPlayer.volume = 1.0f;
-        [ourAudioPlayer play];
+        // Плавное нарастание громкости нового трека (crossfade-in) вместо резкого старта
+        fadeInPlayer(ourAudioPlayer, 0.8);
     } else {
         [ourAudioPlayer pause];
     }
@@ -4438,6 +4448,17 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
     // Spotify глушим сразу: Цензурный трек НИКОГДА не прорвется!
     isMutingSpotify = YES;
     applyMuteStateToAllUnits();
+
+    // Плавный переход: сразу гасим предыдущий трек, чтобы периодический тик
+    // не перезапускал его с начала во время асинхронного резолва нового.
+    if (ourAudioPlayer) {
+        if (isObservingPlayerItem) {
+            @try { [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:kStatusObserverContext]; } @catch (id ex) {}
+            isObservingPlayerItem = NO;
+        }
+        [ourAudioPlayer pause];
+        ourAudioPlayer = nil;
+    }
 
     if (!g_streamCache || !g_streamCacheTimestamps) {
         loadStreamCacheFromDisk();

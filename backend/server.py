@@ -53,9 +53,9 @@ def normalize_sync_key(key):
     s = re.sub(r'\s+', ' ', s).strip()
     return s
 
-def get_target_path(clean_url):
+def get_target_path(clean_url, bitrate=192):
     slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
-    return os.path.join(AUDIO_DIR, f"sc_{slug}.mp3")
+    return os.path.join(AUDIO_DIR, f"sc_{slug}_{bitrate}.mp3")
 
 def auto_cache_sc_track(track_key, sc_url):
     try:
@@ -194,7 +194,7 @@ def save_uploaded_audio_to_mp3(raw_bytes, ext_hint="mp3"):
                     pass
     return None, None
 
-def resolve_sc_to_file(raw_url):
+def resolve_sc_to_file(raw_url, bitrate=192):
     url = raw_url.strip()
 
     # Follow redirects for on.soundcloud.com shortlinks or any shortened URLs
@@ -207,7 +207,7 @@ def resolve_sc_to_file(raw_url):
             print("[AntiCensor] Redirect error:", e, flush=True)
 
     clean_url = url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
-    target_mp3 = get_target_path(clean_url)
+    target_mp3 = get_target_path(clean_url, bitrate)
     slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
     legacy_mp3 = os.path.join(CACHE_DIR, f"{slug}.mp3")
 
@@ -283,8 +283,8 @@ def resolve_sc_to_file(raw_url):
             stream_info = json.loads(urllib.request.urlopen(urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'}), timeout=10).read().decode('utf-8'))
             media_url = stream_info['url']
 
-            # If native audio/mpeg, copy directly into REAL MP3 container (-f mp3) in ~1s!
-            if is_native_mp3:
+            # If native audio/mpeg AND high bitrate requested, copy directly (~1s)
+            if is_native_mp3 and bitrate >= 192:
                 cmd = [FFMPEG, "-y", "-i", media_url, "-vn", "-c:a", "copy", "-f", "mp3", tmp_mp3]
                 res = subprocess.run(cmd, capture_output=True, timeout=60)
                 if res.returncode == 0 and is_real_mp3(tmp_mp3):
@@ -292,8 +292,8 @@ def resolve_sc_to_file(raw_url):
                     print(f"[AntiCensor] Fast native MP3 cached: {target_mp3}", flush=True)
                     return target_mp3
 
-            # For AAC/Opus/HLS streams: transcode to REAL 192k MP3 so BOTH Spotify Desktop CEF and iOS AVPlayer play 100%!
-            cmd2 = [FFMPEG, "-y", "-i", media_url, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", tmp_mp3]
+            # Transcode to requested bitrate MP3 (weak internet -> lower bitrate; default 192k)
+            cmd2 = [FFMPEG, "-y", "-i", media_url, "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k", "-f", "mp3", tmp_mp3]
             subprocess.run(cmd2, check=True, capture_output=True, timeout=90)
             if is_real_mp3(tmp_mp3):
                 os.replace(tmp_mp3, target_mp3)
@@ -852,7 +852,12 @@ class AudioHandler(BaseHTTPRequestHandler):
         elif parsed.path == '/sc' and 'url' in params:
             try:
                 sc_url = params['url'][0]
-                file_to_stream = resolve_sc_to_file(sc_url)
+                try:
+                    bitrate = int(params.get('br', ['192'])[0])
+                except (ValueError, TypeError):
+                    bitrate = 192
+                bitrate = max(64, min(320, bitrate))
+                file_to_stream = resolve_sc_to_file(sc_url, bitrate)
             except Exception as e:
                 print("[AntiCensor] SC Resolve Error:", e, flush=True)
 
