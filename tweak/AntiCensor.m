@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.5-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112103
+#define ANTICENSOR_VERSION_STRING @"v5.6.6-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112104
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -139,6 +139,28 @@ static void prewarmServerForSoundCloud(NSString *scUrl) {
             NSLog(@"[AntiCensor] Preload (Render) started for: %@", clean);
         }
     }] resume];
+}
+
+// --- SoundCloud preload cache (устраняет задержку старта ~2с) ---
+static NSMutableDictionary *g_preloadedAssets = nil;
+
+static void preloadAssetForURLString(NSString *urlStr) {
+    if (!urlStr || ![urlStr hasPrefix:@"http"]) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_preloadedAssets) g_preloadedAssets = [NSMutableDictionary dictionary];
+        if (g_preloadedAssets[urlStr]) return;
+        if (g_preloadedAssets.count >= 16) [g_preloadedAssets removeAllObjects];
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:urlStr] options:nil];
+        if (!asset) return;
+        g_preloadedAssets[urlStr] = asset;
+        // Прогреваем DNS/TLS и метаданные заранее, чтобы плеер стартовал мгновенно
+        [asset loadValuesAsynchronouslyForKeys:@[@"playable", @"duration"] completionHandler:^{}];
+    });
+}
+
+static AVURLAsset *preloadedAssetForURLString(NSString *urlStr) {
+    if (!urlStr || !g_preloadedAssets) return nil;
+    return g_preloadedAssets[urlStr];
 }
 
 
@@ -4374,7 +4396,8 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
                    error:nil];
     [session setActive:YES error:nil];
 
-    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:streamUrl];
+    AVURLAsset *preloaded = preloadedAssetForURLString(streamUrl.absoluteString);
+    AVPlayerItem *item = preloaded ? [AVPlayerItem playerItemWithAsset:preloaded] : [AVPlayerItem playerItemWithURL:streamUrl];
 
     if (!g_playerObserver) {
         g_playerObserver = [[AntiCensorPlayerObserver alloc] init];
@@ -4599,10 +4622,15 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
             NSTimeInterval timeSinceStart = [NSDate timeIntervalSinceReferenceDate] - g_lastReplacementStartTime;
             // Игнорируем только стартовый шум первых 2.0 секунд при самом запуске трека
             BOOL isStartupNoise = (timeSinceStart < 2.0 && position < 4.0 && ourTime < 2.0);
+            // Не перематываем сразу после возврата из фона/другого приложения — Spotify может отдать
+            // устаревшую/нулевую позицию, из-за чего трек прыгал в начало.
+            NSTimeInterval sinceFg = [NSDate timeIntervalSinceReferenceDate] - g_lastForegroundOrScreenTransitionTimestamp;
+            BOOL justReturnedFromBg = (sinceFg >= 0.0 && sinceFg < 2.0);
 
-            if (!isStartupNoise && !g_isPlayerSeeking && !didTrackChange) {
+            if (!isStartupNoise && !g_isPlayerSeeking && !didTrackChange && !justReturnedFromBg) {
                 // Если разница во времени больше 0.8 сек — ЭТО ТАП ПО ТЕКСТУ В СПОТИФАЕ ИЛИ ПЕРЕМОТКА!
-                if (fabs(position - ourTime) > 0.8) {
+                BOOL spuriousZero = (position < 1.0 && ourTime > 15.0);
+                if (!spuriousZero && fabs(position - ourTime) > 0.8) {
                     NSLog(@"[AntiCensor] >>> SPOTIFY LYRICS TAP DETECTED: %.2f -> %.2f. Seeking custom player! <<<", ourTime, position);
                     safeSeekPlayerToTime(position);
                     lastKnownSpotifyPosition = position;
@@ -4735,6 +4763,8 @@ static void custom_setNowPlayingInfo(id target, SEL _cmd, NSDictionary *info) {
     }
 
     handleTrackPlaybackUpdate(title, artist, trackURI, pos, isPlaying, hasElapsed, hasRate);
+    // Держим Now Playing в синхроне с НАШИМ плеером (иначе Dynamic Island шлёт неверные позиции)
+    if (ourAudioPlayer) updateNowPlayingCenter();
 }
 
 #pragma mark - Settings & Replacement Dialog
@@ -6208,8 +6238,10 @@ static void preResolveAllOverridesInBackground(void) {
         for (NSString *k in all) {
             NSString *url = all[k];
             if ([url containsString:@"soundcloud.com"]) {
-                resolveSoundCloudUrl(url, nil);
                 prewarmServerForSoundCloud(url);
+                resolveSoundCloudUrl(url, ^(NSURL *streamUrl) {
+                    if (streamUrl) preloadAssetForURLString(streamUrl.absoluteString);
+                });
             }
         }
     });
@@ -6448,9 +6480,11 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         warmUpRenderServer();
         measureNetworkLatency();
+        preResolveAllOverridesInBackground();
         g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-        if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
-            if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+        if (ourAudioPlayer) {
+            [[AVAudioSession sharedInstance] setActive:YES error:nil];
+            if (isSpotifyCurrentlyPlaying && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
                 [ourAudioPlayer play];
             }
             updateNowPlayingCenter();
@@ -6462,8 +6496,9 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-        if (ourAudioPlayer && isSpotifyCurrentlyPlaying) {
-            if (ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+        if (ourAudioPlayer) {
+            [[AVAudioSession sharedInstance] setActive:YES error:nil];
+            if (isSpotifyCurrentlyPlaying && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
                 [ourAudioPlayer play];
             }
             updateNowPlayingCenter();
@@ -6574,12 +6609,21 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     [commandCenter.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
         if ([event isKindOfClass:[MPChangePlaybackPositionCommandEvent class]]) {
             MPChangePlaybackPositionCommandEvent *posEvt = (MPChangePlaybackPositionCommandEvent *)event;
+            double target = posEvt.positionTime;
             if (ourAudioPlayer) {
-                safeSeekPlayerToTime(posEvt.positionTime);
+                double cur = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+                if (isnan(cur)) cur = 0.0;
+                // Защита от ложных перемоток при тапе по Dynamic Island / Lock Screen:
+                // игнорируем почти-текущие позиции и ложный "откат в начало" посреди трека.
+                BOOL nearCurrent = (fabs(target - cur) < 1.5);
+                BOOL spuriousStart = (target < 1.0 && cur > 8.0);
+                if (!nearCurrent && !spuriousStart) {
+                    safeSeekPlayerToTime(target);
+                    lastKnownSpotifyPosition = target;
+                    lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+                    checkAndSyncLyricsOnScreen();
+                }
             }
-            lastKnownSpotifyPosition = posEvt.positionTime;
-            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
-            checkAndSyncLyricsOnScreen();
             updateNowPlayingCenter();
             return MPRemoteCommandHandlerStatusSuccess;
         }
@@ -6589,6 +6633,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
     [commandCenter.playCommand setEnabled:YES];
     [commandCenter.playCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
         if (ourAudioPlayer) {
+            [[AVAudioSession sharedInstance] setActive:YES error:nil];
             [ourAudioPlayer play];
             isSpotifyCurrentlyPlaying = YES;
             updateNowPlayingCenter();
@@ -6615,6 +6660,7 @@ __attribute__((constructor)) static void initAntiCensor(void) {
                 [ourAudioPlayer pause];
                 isSpotifyCurrentlyPlaying = NO;
             } else {
+                [[AVAudioSession sharedInstance] setActive:YES error:nil];
                 [ourAudioPlayer play];
                 isSpotifyCurrentlyPlaying = YES;
             }

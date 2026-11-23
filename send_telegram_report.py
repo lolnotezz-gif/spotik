@@ -5,20 +5,22 @@ TOKEN = "9229103805:AAGg97RS7iF9qfkypwjxYUTHyt883ZZpTvM"
 CHAT_ID = -1004210923223
 API_BASE = f"https://api.telegram.org/bot{TOKEN}"
 
-SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.5-OTA: ФИКС ПЕРЕКЛЮЧЕНИЯ ТРЕКОВ + СВОИ ТЕКСТЫ!</b> ⚡️
+SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.6-OTA: ФИКС ПАУЗЫ/ФОНА + DYNAMIC ISLAND + ПРЕДЗАГРУЗКА SoundCloud!</b> ⚡️
 
 ══════════════════════════════
 🛠 <b>ЧТО ПОФИКШЕНО:</b>
 
-1. 🔄 <b>ФИКС ПЕРЕКЛЮЧЕНИЯ ТРЕКОВ:</b>
-   • Раньше при ручном переключении на другой трек (не дослушав) могло заново проиграться начало ПРЕДЫДУЩЕГО трека.
-   • Теперь при смене трека перемотка не применяется к старому плееру — переход чистый.
+1. ⏯ <b>ПАУЗА / ФОН / ВОЗВРАТ В СПОТИК:</b>
+   • После сворачивания и возврата звук больше не пропадает и трек не прыгает в начало — плеер заново активирует аудиосессию и не реагирует на устаревшую позицию.
 
-2. 📝 <b>СВОИ ТЕКСТЫ РАБОТАЮТ:</b>
-   • Добавление и удаление текста теперь сразу отображается на экране (раньше не вызывалась перерисовка после сохранения).
+2. 🏝 <b>DYNAMIC ISLAND / LOCK SCREEN:</b>
+   • Тап по Dynamic Island больше не откатывает трек на секунду или в начало — ложные команды перемотки игнорируются.
+
+3. ⚡ <b>ПРЕДЗАГРУЗКА SoundCloud:</b>
+   • Треки прогреваются заранее (AVURLAsset + обновление кэша при возврате в приложение), поэтому старт быстрее — меньше ожидания 2+ сек.
 
 ══════════════════════════════
-📦 <b>Файл AntiCensor.dylib (v5.6.5-OTA, Build 2026112103) прикреплён ниже!</b>"""
+📦 <b>Файл AntiCensor.dylib (v5.6.6-OTA, Build 2026112104) прикреплён ниже!</b>"""
 
 def send_report(dylib_path):
     print("Posting report to Telegram...")
@@ -37,7 +39,7 @@ def send_report(dylib_path):
             files = {"document": ("AntiCensor.dylib", f, "application/octet-stream")}
             data = {
                 "chat_id": CHAT_ID,
-                "caption": "🚀 <b>AntiCensor.dylib (v5.6.5-OTA, Build 2026112103)</b>\nФикс переключения треков + свои тексты отображаются сразу",
+                "caption": "🚀 <b>AntiCensor.dylib (v5.6.6-OTA, Build 2026112104)</b>\nФикс паузы/фона + Dynamic Island + предзагрузка SoundCloud",
                 "parse_mode": "HTML"
             }
             r_doc = requests.post(f"{API_BASE}/sendDocument", data=data, files=files)
