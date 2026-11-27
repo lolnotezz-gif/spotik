@@ -296,34 +296,48 @@ def resolve_sc_stream_info(raw_url, bitrate=192):
     if not trans:
         return None
 
-    def pick(proto, mime_part=None):
-        for t in trans:
-            f = t.get('format', {}) or {}
-            if f.get('protocol') != proto:
-                continue
-            if mime_part and mime_part not in (f.get('mime_type') or ''):
-                continue
-            if 'encrypted' in (f.get('protocol') or '') or 'skd:' in (t.get('url') or ''):
-                continue
-            return t
-        return None
+    def usable(t):
+        f = t.get('format', {}) or {}
+        url = t.get('url') or ''
+        if 'encrypted' in (f.get('protocol') or '') or 'skd:' in url:
+            return False
+        # audio/mpegurl — это не аудио, а плейлист-индекс; прямой запрос отдаёт 404
+        if 'mpegurl' in (f.get('mime_type') or ''):
+            return False
+        return True
 
-    chosen = pick('progressive', 'mpeg') or pick('progressive') or pick('hls', 'mpeg') or pick('hls')
-    if not chosen:
-        return None
+    def mime(t):
+        return ((t.get('format', {}) or {}).get('mime_type') or '')
 
-    progressive = (chosen.get('format', {}).get('protocol') == 'progressive')
-    stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
-    if auth:
-        stream_api += f"&track_authorization={auth}"
+    def preset_kbps(t):
+        try:
+            return int(((t.get('format', {}) or {}).get('preset') or '0').replace('kbps', '').replace('k', ''))
+        except Exception:
+            return 0
 
-    try:
-        req = urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'})
-        info = json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
-        media = info.get('url')
-    except Exception as e:
-        print(f"[AntiCensor] fast stream-url error: {e}", flush=True)
-        return None
+    candidates = [t for t in trans if usable(t)]
+    candidates.sort(key=lambda t: (
+        0 if (t.get('format', {}) or {}).get('protocol') == 'progressive' else 1,
+        0 if 'mpeg' in mime(t) and 'mp4' not in mime(t) else 1,
+        -preset_kbps(t),
+    ))
+
+    media = None
+    progressive = False
+    for chosen in candidates:
+        progressive = (chosen.get('format', {}).get('protocol') == 'progressive')
+        stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
+        if auth:
+            stream_api += f"&track_authorization={auth}"
+        try:
+            req = urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'})
+            info = json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
+            media = info.get('url')
+        except Exception as e:
+            print(f"[AntiCensor] stream-url candidate failed ({mime(chosen)}): {e}", flush=True)
+            media = None
+        if media:
+            break
     if not media:
         return None
 
@@ -1202,7 +1216,8 @@ class AudioHandler(BaseHTTPRequestHandler):
             file_to_stream = resolve_kugou_to_file(params['hash'][0])
         elif parsed.path == '/sc' and 'url' in params:
             # Instant-start path: cached file -> direct proxy -> chunked transcode.
-            # Never block the first byte on a full transcode.
+            # The first byte never waits for a full transcode; concurrent requests for
+            # the same track wait on the per-URL lock instead of starting a duplicate.
             try:
                 sc_url = params['url'][0]
                 try:
@@ -1211,20 +1226,28 @@ class AudioHandler(BaseHTTPRequestHandler):
                     bitrate = 128
                 bitrate = max(64, min(320, bitrate))
                 range_header = self.headers.get('Range')
+                lock_url = sc_url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
 
-                cached_file = find_cached_sc_file(sc_url, bitrate)
-                if cached_file:
-                    file_to_stream = cached_file
-                else:
+                file_to_stream = find_cached_sc_file(sc_url, bitrate)
+
+                if not file_to_stream and not is_head:
                     info = resolve_sc_stream_info(sc_url, bitrate)
-                    if info and info.get('progressive') and not is_head:
-                        if stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path')):
+                    if info:
+                        handled = False
+                        with get_url_lock(lock_url):
+                            cached_now = find_cached_sc_file(sc_url, bitrate)
+                            if cached_now:
+                                file_to_stream = cached_now
+                            elif info.get('progressive'):
+                                handled = stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path'))
+                            elif not range_header:
+                                stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
+                                handled = True
+                        if handled:
                             return
-                    if info and not is_head and not range_header:
-                        stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
-                        return
-                    # last resort: old blocking behaviour (also caches for next time)
-                    file_to_stream = resolve_sc_to_file(sc_url, bitrate)
+                    if not file_to_stream:
+                        # last resort: blocking transcode (also caches for the next request)
+                        file_to_stream = resolve_sc_to_file(sc_url, bitrate)
             except Exception as e:
                 print("[AntiCensor] SC Resolve Error:", e, flush=True)
 
