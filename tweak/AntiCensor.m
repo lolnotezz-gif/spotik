@@ -5296,6 +5296,22 @@ static void triggerAntiCensorOTACheck(BOOL isManual) {
     });
 }
 
+// Небольшой тост-подтверждение, чтобы удаление было видно сразу (а не «молча ничего»)
+static void showAntiCensorToast(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = getTopViewController();
+        if (!top) return;
+        UIAlertController *toast = [UIAlertController alertControllerWithTitle:nil
+                                                                      message:text
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [top presentViewController:toast animated:YES completion:^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [toast dismissViewControllerAnimated:YES completion:nil];
+            });
+        }];
+    });
+}
+
 static void showManageAllTracksDialog(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *topVC = getTopViewController();
@@ -5396,6 +5412,7 @@ static void showManageAllTracksDialog(void) {
                 stopReplacementAudio();
                 g_activeInjectedLyricsTrackKey = nil;
                 checkAndSyncLyricsOnScreen();
+                showAntiCensorToast(@"🗑️ Замена удалена навсегда (звук — оригинал Spotify)");
                 NSLog(@"[AntiCensor] Group override deleted (%lu keys): %@", (unsigned long)toDelete.count, rowTitle);
             }]];
         }
@@ -5928,6 +5945,7 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
                 g_currentKaraokeTrackKey = nil;
                 g_activeInjectedLyricsTrackKey = nil;
                 checkAndSyncLyricsOnScreen();
+                showAntiCensorToast(@"🗑️ Замена удалена навсегда (звук — оригинал Spotify)");
             }];
         }
 
