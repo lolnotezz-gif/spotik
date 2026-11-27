@@ -1353,6 +1353,21 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.send_json(500, {"error": str(e)}, is_head=is_head)
             return
 
+        if parsed.path == '/expand' and 'url' in params:
+            # Разворачиваем короткую ссылку on.soundcloud.com в каноническую.
+            # Не трогаем api-v2 (его Render блокирует), только редирект страницы.
+            out = {"url": None}
+            try:
+                raw = params['url'][0]
+                req = urllib.request.Request(raw, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    out["url"] = r.geturl()
+                    out["status"] = r.status
+            except Exception as e:
+                out["error"] = str(e)
+            self.send_json(200, out, is_head=is_head)
+            return
+
         if parsed.path == '/debug2' and 'url' in params:
             out = {"stage": "start"}
             try:

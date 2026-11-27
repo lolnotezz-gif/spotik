@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.15-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112113
+#define ANTICENSOR_VERSION_STRING @"v5.6.16-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112114
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -2210,11 +2210,37 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:redReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             NSString *finalUrl = r.URL.absoluteString;
-            if (!finalUrl || [finalUrl containsString:@"on.soundcloud.com"] || finalUrl.length < 15) {
+            if (finalUrl && ![finalUrl containsString:@"on.soundcloud.com"] && finalUrl.length >= 15) {
+                doApiResolve(finalUrl);
+                return;
+            }
+            // Локальный редирект не сработал (звук.клауд режут на этом операторе) —
+            // просим мост только РАЗВЕРНУТЬ ссылку, без резолва аудио.
+            NSString *server = getServerURL();
+            NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+            [allowed removeCharactersInString:@":/?&=#+"];
+            NSString *enc = [rawUrl stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+            NSURL *expandURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@/expand?url=%@", server, enc]];
+            if (!expandURL) {
                 useRenderFallback(rawUrl);
                 return;
             }
-            doApiResolve(finalUrl);
+            NSMutableURLRequest *er = [NSMutableURLRequest requestWithURL:expandURL];
+            [er setTimeoutInterval:10.0];
+            [[[NSURLSession sharedSession] dataTaskWithRequest:er completionHandler:^(NSData *ed, NSURLResponse *erp, NSError *ee) {
+                NSString *canonical = nil;
+                if (ed) {
+                    NSDictionary *j = [NSJSONSerialization JSONObjectWithData:ed options:0 error:nil];
+                    id u = [j isKindOfClass:[NSDictionary class]] ? j[@"url"] : nil;
+                    if ([u isKindOfClass:[NSString class]] && [(NSString *)u length] > 15) canonical = u;
+                }
+                if (canonical) {
+                    NSLog(@"[AntiCensor] shortlink expanded via bridge: %@", canonical);
+                    doApiResolve(canonical);
+                } else {
+                    useRenderFallback(rawUrl);
+                }
+            }] resume];
         }] resume];
     } else {
         doApiResolve(rawUrl);
@@ -5319,6 +5345,24 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     }
 
     [item addObserver:g_playerObserver forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:kStatusObserverContext];
+
+    // Если поток «завис» (буфер кончился на слабой сети) — толкаем воспроизведение.
+    static id s_stallObserver = nil;
+    if (s_stallObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:s_stallObserver];
+        s_stallObserver = nil;
+    }
+    s_stallObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemPlaybackStalledNotification
+                                                                       object:item
+                                                                        queue:[NSOperationQueue mainQueue]
+                                                                   usingBlock:^(NSNotification * _Nonnull note) {
+        NSLog(@"[AntiCensor] playback stalled — nudging player");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (ourAudioPlayer && isSpotifyCurrentlyPlaying && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+                [ourAudioPlayer play];
+            }
+        });
+    }];
     isObservingPlayerItem = YES;
     if (@available(iOS 10.0, *)) {
         // Адаптивный буфер вперед для слабого интернета (чем хуже связь — тем больше буфер)
@@ -5334,10 +5378,10 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     }
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
     if (@available(iOS 10.0, *)) {
-        // СТАРТ ВАЖНЕЕ ИДЕАЛЬНОГО БУФЕРА: раньше на слабом интернете включался
-        // automaticallyWaitsToMinimizeStalling = YES и плеер ЖДАЛ накопления буфера —
-        // отсюда «по 30-60 секунд до старта». Стартуем сразу, догружаем на ходу.
-        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
+        // Компромисс: на слабой сети AVPlayer ДОЛЖЕН ждать минимальный буфер,
+        // иначе он стартует за секунду, проигрывает 4-6 с и встаёт намертво
+        // (именно это и происходило). На быстрой сети ждать не нужно.
+        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = (g_lastNetworkLatencyMs > 400.0);
     }
 
     // Прямой HLS обычно стартует за 1-3 с. Если за 3.5 с звук не пошёл —
