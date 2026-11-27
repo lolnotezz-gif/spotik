@@ -226,6 +226,35 @@ def save_uploaded_audio_to_mp3(raw_bytes, ext_hint="mp3"):
     return None, None
 
 # --- Instant-start streaming helpers -------------------------------------
+_sc_cid_cache = {"id": None, "ts": 0.0}
+
+
+def get_sc_client_id(force_refresh=False):
+    """SoundCloud client_id соскабливается с сайта и кэшируется на час.
+
+    Захардкоженный id рано или поздно протухает — тогда ЛЮБОЙ трек перестаёт
+    резолвиться. Принудительный refresh спасает без пересборки приложения.
+    """
+    now = time.time()
+    if not force_refresh:
+        cached = _sc_cid_cache.get("id")
+        if cached and now - _sc_cid_cache.get("ts", 0) < 3600:
+            return cached
+        return cached or SC_CLIENT_ID
+    try:
+        req = urllib.request.Request("https://soundcloud.com/", headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        html = urllib.request.urlopen(req, timeout=8).read().decode('utf-8', errors='ignore')
+        m = re.search(r'"client_id"\s*:\s*"([A-Za-z0-9]{20,40})"', html)
+        if m:
+            _sc_cid_cache["id"] = m.group(1)
+            _sc_cid_cache["ts"] = now
+            print(f"[AntiCensor] refreshed SoundCloud client_id: {m.group(1)[:8]}...", flush=True)
+            return m.group(1)
+    except Exception as e:
+        print(f"[AntiCensor] client_id refresh failed: {e}", flush=True)
+    return _sc_cid_cache.get("id") or SC_CLIENT_ID
+
+
 _sc_stream_cache = {}
 # cache_path -> {"part": path, "done": Event}: allows Range requests to attach to a
 # running transcode instead of starting a duplicate (or blocking for a minute).
@@ -249,10 +278,11 @@ def find_cached_sc_file(raw_url, bitrate=192):
     return None
 
 
-def resolve_sc_stream_info(raw_url, bitrate=192):
+def resolve_sc_stream_info(raw_url, bitrate=192, force_refresh=False):
     """Resolve SoundCloud -> direct media URL WITHOUT downloading/transcoding.
 
-    Returns dict(url=..., progressive=bool) or None. Cached for SC_STREAM_TTL.
+    Picks the variant closest to `bitrate` (weak mobile -> lower preset).
+    Returns dict(url=..., progressive=bool, preset=int) or None.
     """
     url = raw_url.strip()
     if any(d in url for d in ("on.soundcloud.com", "t.co", "bit.ly")):
@@ -264,14 +294,17 @@ def resolve_sc_stream_info(raw_url, bitrate=192):
             print("[AntiCensor] shortlink error:", e, flush=True)
 
     clean = url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
+    target_br = max(64, min(320, int(bitrate or 128)))
+    cache_key = f"{clean}|{target_br}"
     now = time.time()
     with _sc_stream_lock:
-        hit = _sc_stream_cache.get(clean)
+        hit = _sc_stream_cache.get(cache_key)
         if hit and now - hit["ts"] < SC_STREAM_TTL:
             return hit
 
     track_data = None
-    api = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(clean)}&client_id={SC_CLIENT_ID}"
+    cid = get_sc_client_id(force_refresh=force_refresh)
+    api = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(clean)}&client_id={cid}"
     try:
         req = urllib.request.Request(api, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
         track_data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
@@ -314,23 +347,35 @@ def resolve_sc_stream_info(raw_url, bitrate=192):
         return ((t.get('format', {}) or {}).get('mime_type') or '')
 
     def preset_kbps(t):
-        try:
-            return int(((t.get('format', {}) or {}).get('preset') or '0').replace('kbps', '').replace('k', ''))
-        except Exception:
-            return 0
+        # preset бывает пустым, но битрейт всегда виден в URL: .../aac_160k/...
+        f = (t.get('format', {}) or {})
+        raw = str(f.get('preset') or '')
+        m = re.search(r'(\d{2,3})\s*k', raw) or re.search(r'aac_(\d{2,3})k', t.get('url') or '')
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return 0
+        return 0
 
     candidates = [t for t in trans if usable(t)]
-    candidates.sort(key=lambda t: (
-        0 if (t.get('format', {}) or {}).get('protocol') == 'progressive' else 1,
-        0 if 'mpeg' in mime(t) and 'mp4' not in mime(t) else 1,
-        -preset_kbps(t),
-    ))
+    target = max(64, min(320, int(bitrate or 128)))
 
-    media = None
-    progressive = False
-    for chosen in candidates:
-        progressive = (chosen.get('format', {}).get('protocol') == 'progressive')
-        stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
+    def kbps_of_media(url, fallback=0):
+        m = re.search(r'aac_(\d{2,3})k', url or '') or re.search(r'mp3_(\d{2,3})k', url or '')
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return fallback
+        return fallback
+
+    # Резолвим до 4 вариантов и выбираем ближайший к запрошенному битрейту:
+    # на слабом мобильном интернете 96k стартует заметно быстрее, чем 160k.
+    resolved = []
+    seen_media = set()
+    for chosen in candidates[:5]:
+        stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={cid}'
         if auth:
             stream_api += f"&track_authorization={auth}"
         try:
@@ -340,15 +385,29 @@ def resolve_sc_stream_info(raw_url, bitrate=192):
         except Exception as e:
             print(f"[AntiCensor] stream-url candidate failed ({mime(chosen)}): {e}", flush=True)
             media = None
-        if media:
+        if not media or media in seen_media:
+            continue
+        seen_media.add(media)
+        kbps = kbps_of_media(media, preset_kbps(chosen) or 0)
+        progressive = ((chosen.get('format', {}) or {}).get('protocol') == 'progressive')
+        resolved.append({"url": media, "kbps": kbps, "progressive": progressive})
+        if len(resolved) >= 4:
             break
-    if not media:
+
+    if not resolved:
         return None
 
-    result = {"url": media, "progressive": bool(progressive), "ts": now,
-              "cache_path": get_target_path(clean, bitrate)}
+    def pick_score(item):
+        # 1) progressive mp3 (кэшируется и точно сикается) 2) не выше target 3) ближе к target
+        proto = 0 if item["progressive"] else 1
+        above = 0 if (item["kbps"] or target) <= target else 1
+        return (proto, above, abs((item["kbps"] or target) - target))
+
+    best = sorted(resolved, key=pick_score)[0]
+    result = {"url": best["url"], "progressive": bool(best["progressive"]), "ts": now,
+              "preset": best["kbps"], "cache_path": get_target_path(clean, target)}
     with _sc_stream_lock:
-        _sc_stream_cache[clean] = result
+        _sc_stream_cache[cache_key] = result
     return result
 
 
@@ -611,7 +670,7 @@ def resolve_sc_to_file(raw_url, bitrate=192):
         try:
             # Resolve track metadata via SoundCloud API v2
             track_data = None
-            api_url = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(clean_url)}&client_id={SC_CLIENT_ID}"
+            api_url = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(clean_url)}&client_id={get_sc_client_id()}"
             try:
                 req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
                 track_data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
@@ -654,7 +713,7 @@ def resolve_sc_to_file(raw_url, bitrate=192):
 
             chosen = prog_mp3 or hls_mp3 or prog_any or hls_any
             is_native_mp3 = (chosen in (prog_mp3, hls_mp3))
-            stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
+            stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={get_sc_client_id()}'
             if track_auth:
                 stream_api += f"&track_authorization={track_auth}"
 
@@ -1264,10 +1323,30 @@ class AudioHandler(BaseHTTPRequestHandler):
         if parsed.path == '/resolve' and 'url' in params:
             # Только резолв: отдаём прямой CDN-URL SoundCloud, чтобы телефон качал
             # аудио напрямую (мгновенный старт), а не через transcode на сервере.
+            sc_url = params['url'][0]
             try:
-                info = resolve_sc_stream_info(params['url'][0], 128)
+                br = int(params.get('br', ['128'])[0])
+            except (ValueError, TypeError):
+                br = 128
+            br = max(64, min(320, br))
+            fresh = (params.get('fresh', ['0'])[0] == '1')
+            if fresh:
+                with _sc_stream_lock:
+                    for k in list(_sc_stream_cache.keys()):
+                        if k.startswith(sc_url.split('?')[0].strip()):
+                            _sc_stream_cache.pop(k, None)
+            info = None
+            try:
+                info = resolve_sc_stream_info(sc_url, br, force_refresh=fresh)
+                if not info:
+                    # Возможно, протух client_id — обновляем и пробуем ещё раз
+                    info = resolve_sc_stream_info(sc_url, br, force_refresh=True)
                 if info and info.get('url'):
-                    self.send_json(200, {"url": info['url'], "progressive": bool(info.get('progressive'))}, is_head=is_head)
+                    self.send_json(200, {
+                        "url": info['url'],
+                        "progressive": bool(info.get('progressive')),
+                        "preset": info.get('preset', 0),
+                    }, is_head=is_head)
                 else:
                     self.send_json(404, {"error": "not resolved"}, is_head=is_head)
             except Exception as e:
@@ -1275,9 +1354,15 @@ class AudioHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == '/preload' and 'url' in params:
+            # Только резолв (без ffmpeg): раньше /preload запускал полный transcode
+            # для каждого трека и перегружал free-инстанс (502/503).
             sc_url = params['url'][0]
-            threading.Thread(target=resolve_sc_to_file, args=(sc_url,), daemon=True).start()
-            self.send_json(200, {"status": "started"}, is_head=is_head)
+            try:
+                br = int(params.get('br', ['128'])[0])
+            except (ValueError, TypeError):
+                br = 128
+            threading.Thread(target=resolve_sc_stream_info, args=(sc_url, br), daemon=True).start()
+            self.send_json(200, {"status": "resolving"}, is_head=is_head)
             return
 
         if parsed.path == '/api/add_track' and 'url' in params and 'key' in params:
@@ -1307,9 +1392,9 @@ class AudioHandler(BaseHTTPRequestHandler):
         elif parsed.path == '/kugou' and 'hash' in params:
             file_to_stream = resolve_kugou_to_file(params['hash'][0])
         elif parsed.path == '/sc' and 'url' in params:
-            # Instant-start path: cached file -> direct proxy -> chunked transcode.
-            # The first byte never waits for a full transcode; concurrent requests for
-            # the same track wait on the per-URL lock instead of starting a duplicate.
+            # СТАБИЛЬНЫЙ путь: отдаём готовый файл (кэш) или перекодируем целиком.
+            # Чанк-стриминг оставлен только по явному ?stream=1 — Render free-план
+            # рвёт длинные стримы (502), из-за чего треки «вообще не грузились».
             try:
                 sc_url = params['url'][0]
                 try:
@@ -1318,35 +1403,19 @@ class AudioHandler(BaseHTTPRequestHandler):
                     bitrate = 128
                 bitrate = max(64, min(320, bitrate))
                 range_header = self.headers.get('Range')
-                lock_url = sc_url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
+                want_stream = (params.get('stream', ['0'])[0] == '1')
 
                 file_to_stream = find_cached_sc_file(sc_url, bitrate)
-
                 if not file_to_stream and not is_head:
                     info = resolve_sc_stream_info(sc_url, bitrate)
-                    if info:
-                        # Кто-то уже качает/конвертирует этот трек? Подключаемся к его
-                        # растущему файлу, а не ждём блокировку и не запускаем второй ffmpeg.
-                        with _sc_active_lock:
-                            active = _sc_active_transcodes.get(info['cache_path'])
-                        if active:
-                            if stream_growing_file(self, active):
-                                return
-                        handled = False
-                        with get_url_lock(lock_url):
-                            cached_now = find_cached_sc_file(sc_url, bitrate)
-                            if cached_now:
-                                file_to_stream = cached_now
-                            elif info.get('progressive'):
-                                handled = stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path'))
-                            else:
-                                stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
-                                handled = True
-                        if handled:
+                    if info and want_stream and not range_header:
+                        with get_url_lock(sc_url.split("?")[0]):
+                            stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
+                        return
+                    if info and info.get('progressive'):
+                        if stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path')):
                             return
-                    if not file_to_stream:
-                        # last resort: blocking transcode (also caches for the next request)
-                        file_to_stream = resolve_sc_to_file(sc_url, bitrate)
+                    file_to_stream = resolve_sc_to_file(sc_url, bitrate)
             except Exception as e:
                 print("[AntiCensor] SC Resolve Error:", e, flush=True)
 

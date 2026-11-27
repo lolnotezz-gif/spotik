@@ -5,7 +5,7 @@ name: Keep AntiCensor Bridge Warm
 # so SoundCloud tracks start instantly on mobile.
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:

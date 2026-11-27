@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.11-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112109
+#define ANTICENSOR_VERSION_STRING @"v5.6.12-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112110
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -134,7 +134,10 @@ static void prewarmServerForSoundCloud(NSString *scUrl) {
     [allowed removeCharactersInString:@":/?&=#+"];
     NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:allowed];
     NSString *server = getServerURL();
-    NSURL *preloadUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/preload?url=%@", server, encoded]];
+    // ВАЖНО: /resolve — это дешёвый JSON (~0.5 с). Раньше здесь был /preload,
+    // который запускал ПОЛНОЕ перекодирование на сервере для каждого трека сразу
+    // после запуска приложения — Render free захлёбывался и отдавал 502/503.
+    NSURL *preloadUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/resolve?url=%@", server, encoded]];
     if (!preloadUrl) return;
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:preloadUrl];
     req.timeoutInterval = 10.0;
@@ -173,6 +176,8 @@ static AVURLAsset *preloadedAssetForURLString(NSString *urlStr) {
 static double g_spotifyLastReportedPosition = 0.0;
 static CFTimeInterval g_spotifyLastReportedTimestamp = 0;
 static BOOL g_isPlayerFading = NO;
+// Сколько раз перезапускали резолв для текущего трека (анти-зависание на протухшей ссылке)
+static int g_replacementRetryCount = 0;
 static NSString *currentPlayingUrl = nil;
 
 #pragma mark - Fishhook (Mach-O Symbol Rebinding)
@@ -1590,7 +1595,7 @@ static void scAudioCachePruneLocked(void) {
     NSMutableArray *entries = [NSMutableArray array];
     unsigned long long total = 0;
     for (NSString *name in files) {
-        if (![name hasSuffix:@".mp3"]) continue;
+        if (!([name hasSuffix:@".mp3"] || [name hasSuffix:@".m4a"])) continue;
         NSString *full = [dir stringByAppendingPathComponent:name];
         NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
         unsigned long long size = [attrs fileSize];
@@ -1616,12 +1621,11 @@ static void scAudioCachePruneLocked(void) {
 }
 
 // Скачиваем аудио в фоне и кладём в постоянный кэш
+// Единый вход кэширования: mp3 качаем как файл, HLS экспортируем в .m4a нативно.
 static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrlString) {
     if (trackUrl.length < 8 || mediaUrlString.length < 8) return;
     NSString *lowMedia = mediaUrlString.lowercaseString;
     if (![lowMedia hasPrefix:@"http"]) return;
-    // HLS-плейлист (.m3u8) — это текст, а не аудио: кэшировать как mp3 нельзя
-    if ([lowMedia containsString:@".m3u8"] || [lowMedia containsString:@"mpegurl"]) return;
     NSString *key = scAudioCacheKey(trackUrl);
     if (scCachedAudioPathForTrack(trackUrl)) return;
 
@@ -1634,6 +1638,61 @@ static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrl
     }
     [g_scAudioCacheInflight addObject:key];
     [g_scAudioCacheLock unlock];
+
+    BOOL isHLS = ([lowMedia containsString:@".m3u8"] || [lowMedia containsString:@"mpegurl"]);
+    if (isHLS) {
+        // HLS: AVPlayer умеет играть поток, но файла на диске нет. Экспортируем
+        // поток в .m4a через AVAssetExportSession — дальше трек играет с диска.
+        NSURL *assetURL = [NSURL URLWithString:mediaUrlString];
+        if (!assetURL) {
+            [g_scAudioCacheLock lock];
+            [g_scAudioCacheInflight removeObject:key];
+            [g_scAudioCacheLock unlock];
+            return;
+        }
+        AVURLAsset *exportAsset = [AVURLAsset URLAssetWithURL:assetURL options:nil];
+        AVAssetExportSession *exporter = [[AVAssetExportSession alloc] initWithAsset:exportAsset
+                                                                         presetName:AVAssetExportPresetAppleM4A];
+        NSString *dir = getSCAudioCacheDirectory();
+        NSString *m4aName = [NSString stringWithFormat:@"%@.m4a", key];
+        NSString *dest = [dir stringByAppendingPathComponent:m4aName];
+        NSString *tmp = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.part.m4a", key]];
+        [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
+        exporter.outputURL = [NSURL fileURLWithPath:tmp];
+        exporter.outputFileType = AVFileTypeAppleM4A;
+        exporter.shouldOptimizeForNetworkUse = YES;
+        [exporter exportAsynchronouslyWithCompletionHandler:^{
+            BOOL okExport = (exporter.status == AVAssetExportSessionStatusCompleted);
+            unsigned long long size = 0;
+            if (okExport) {
+                size = [[[[NSFileManager defaultManager] attributesOfItemAtPath:tmp error:nil] objectForKey:NSFileSize] unsignedLongLongValue];
+                okExport = (size > 60000);
+            }
+            if (okExport) {
+                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+                NSError *mvErr = nil;
+                okExport = [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:dest error:&mvErr];
+                if (!okExport) NSLog(@"[AntiCensor] HLS export move failed: %@", mvErr);
+            }
+            if (okExport) {
+                dispatch_sync(scAudioCacheQueue(), ^{
+                    [g_scAudioCacheLock lock];
+                    scAudioCacheMapLocked()[key] = m4aName;
+                    scAudioCachePersistLocked();
+                    scAudioCachePruneLocked();
+                    [g_scAudioCacheLock unlock];
+                });
+                NSLog(@"[AntiCensor] HLS track cached as m4a (%.1f MB) — offline ready", size / 1048576.0);
+            } else {
+                [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
+                NSLog(@"[AntiCensor] HLS export failed: %@ (%ld)", exporter.error, (long)exporter.status);
+            }
+            [g_scAudioCacheLock lock];
+            [g_scAudioCacheInflight removeObject:key];
+            [g_scAudioCacheLock unlock];
+        }];
+        return;
+    }
 
     NSURL *mediaUrl = [NSURL URLWithString:mediaUrlString];
     if (!mediaUrl) {
@@ -1689,7 +1748,7 @@ static unsigned long long scAudioCacheTotalBytes(void) {
     NSArray *files = [fm contentsOfDirectoryAtPath:getSCAudioCacheDirectory() error:nil];
     unsigned long long total = 0;
     for (NSString *name in files) {
-        if (![name hasSuffix:@".mp3"]) continue;
+        if (!([name hasSuffix:@".mp3"] || [name hasSuffix:@".m4a"])) continue;
         total += [[fm attributesOfItemAtPath:[getSCAudioCacheDirectory() stringByAppendingPathComponent:name] error:nil] fileSize];
     }
     return total;
@@ -1795,7 +1854,11 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
             if (completion) completion(renderUrl);
         };
 
-        NSURL *resolveUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/resolve?url=%@", server, encoded]];
+        // Подсказываем серверу битрейт: на слабой сети берём 64-96k, а не 160k
+        int wantBr = (g_lastNetworkLatencyMs > 2000.0) ? 64 : (g_lastNetworkLatencyMs > 800.0) ? 96 : (g_lastNetworkLatencyMs > 400.0) ? 128 : 160;
+        // На повторе (watchdog) просим сервер резолвить заново, мимо его кэша
+        NSString *freshFlag = (g_replacementRetryCount > 0) ? @"&fresh=1" : @"";
+        NSURL *resolveUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/resolve?url=%@&br=%d%@", server, encoded, wantBr, freshFlag]];
         if (!resolveUrl) {
             legacyTranscodeFallback();
             return;
@@ -5097,7 +5160,26 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
                                                [orig.lowercaseString containsString:@"/sc?url="] ||
                                                [orig.lowercaseString containsString:@"onrender.com"]);
         if (looksLikeSC) {
-            scAudioCacheStoreInBackground(orig, streamUrl.absoluteString);
+            NSString *expectedUrl = orig;
+            NSString *mediaStr = streamUrl.absoluteString;
+            // Кэшируем не раньше, чем трек реально заиграл: иначе на слабом интернете
+            // фоновое скачивание отбирает полосу у воспроизведения и вызывает заикания.
+            __block int attempts = 0;
+            void (^tryCache)(void) = ^{
+                attempts++;
+                if (!expectedUrl || ![expectedUrl isEqualToString:currentPlayingUrl ?: @""]) return;
+                if (!ourAudioPlayer || ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+                    if (attempts < 4) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), tryCache);
+                    return;
+                }
+                double played = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+                if (isnan(played) || played < 8.0) {
+                    if (attempts < 4) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), tryCache);
+                    return;
+                }
+                scAudioCacheStoreInBackground(expectedUrl, mediaStr);
+            };
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), tryCache);
         }
     }
 
@@ -5113,6 +5195,42 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         [ourAudioPlayer pause];
     }
     updateNowPlayingCenter();
+
+    // АНТИ-ЗАВИСАНИЕ: если за 15 секунд звук так и не пошёл (протухший CDN-URL,
+    // холодный сервер, оборванная сессия) — сбрасываем кэш резолва и пробуем заново.
+    NSString *watchKey = [trackKey copy] ?: @"";
+    NSString *watchUrl = [currentPlayingUrl copy] ?: @"";
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (![watchKey isEqualToString:currentPlayingKey ?: @""]) return;
+        if (!ourAudioPlayer) return;
+        if (ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) return;
+        double progressed = 0.0;
+        if (ourAudioPlayer.currentItem) {
+            progressed = CMTimeGetSeconds(ourAudioPlayer.currentTime);
+            if (isnan(progressed)) progressed = 0.0;
+        }
+        if (progressed > 0.5) return;
+        if (g_replacementRetryCount >= 2) return;
+        g_replacementRetryCount++;
+        NSLog(@"[AntiCensor] Audio did not start in 15s (retry %d) — re-resolving %@", g_replacementRetryCount, watchUrl);
+        if (watchUrl.length > 5) {
+            [g_streamCache removeObjectForKey:watchUrl];
+            [g_streamCacheTimestamps removeObjectForKey:watchUrl];
+            NSString *cleanWatch = [watchUrl componentsSeparatedByString:@"?"].firstObject;
+            if (cleanWatch.length > 5) {
+                [g_streamCache removeObjectForKey:cleanWatch];
+                [g_streamCacheTimestamps removeObjectForKey:cleanWatch];
+            }
+            saveStreamCacheToDisk();
+            resolveSoundCloudUrl(watchUrl, ^(NSURL *freshUrl) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (freshUrl && [watchKey isEqualToString:currentPlayingKey ?: @""]) {
+                        playStreamUrl(freshUrl, watchKey, 0.0);
+                    }
+                });
+            });
+        }
+    });
 }
 
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
@@ -5132,6 +5250,7 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
         }
     }
 
+    if (![trackKey isEqualToString:currentPlayingKey]) g_replacementRetryCount = 0;
     currentPlayingKey = trackKey;
     currentPlayingUrl = scUrl;
     isReplacementLoading = YES;
@@ -6999,14 +7118,17 @@ static void preResolveAllOverridesInBackground(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
         NSDictionary *all = loadAllOverrides();
         if (!all || all.count == 0) return;
+        NSMutableSet *uniqueUrls = [NSMutableSet set];
         for (NSString *k in all) {
             NSString *url = all[k];
-            if ([url containsString:@"soundcloud.com"]) {
-                prewarmServerForSoundCloud(url);
-                resolveSoundCloudUrl(url, ^(NSURL *streamUrl) {
-                    if (streamUrl) preloadAssetForURLString(streamUrl.absoluteString);
-                });
-            }
+            if (![url containsString:@"soundcloud.com"]) continue;
+            if ([uniqueUrls containsObject:url]) continue;
+            if (uniqueUrls.count >= 6) break;   // не заваливаем мост пачкой резолвов
+            [uniqueUrls addObject:url];
+            prewarmServerForSoundCloud(url);
+            resolveSoundCloudUrl(url, ^(NSURL *streamUrl) {
+                if (streamUrl) preloadAssetForURLString(streamUrl.absoluteString);
+            });
         }
     });
 }
