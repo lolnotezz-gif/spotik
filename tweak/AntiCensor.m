@@ -5440,6 +5440,123 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     });
 }
 
+static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
+    if (!scUrl || scUrl.length == 0) return;
+
+    // КРИТИЧЕСКИЙ ФИКС: Если мы УЖЕ загружаем или играем этот трек — НИКОГДА не перезапускать его!
+    if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl]) {
+        if (isReplacementLoading) {
+            NSLog(@"[AntiCensor] Already resolving in background for %@, ignoring redundant call.", trackKey);
+            return;
+        }
+        if (ourAudioPlayer != nil) {
+            if (isSpotifyCurrentlyPlaying && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
+                [ourAudioPlayer play];
+            }
+            return;
+        }
+    }
+
+    if (![trackKey isEqualToString:currentPlayingKey]) { g_replacementRetryCount = 0; g_serverFallbackUsed = NO; }
+    currentPlayingKey = trackKey;
+    currentPlayingUrl = scUrl;
+    isReplacementLoading = YES;
+    g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];
+
+    // Spotify глушим сразу: Цензурный трек НИКОГДА не прорвется!
+    isMutingSpotify = YES;
+    applyMuteStateToAllUnits();
+
+    // Плавный переход: сразу гасим предыдущий трек, чтобы периодический тик
+    // не перезапускал его с начала во время асинхронного резолва нового.
+    if (ourAudioPlayer) {
+        if (isObservingPlayerItem) {
+            @try { [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:kStatusObserverContext]; } @catch (id ex) {}
+            isObservingPlayerItem = NO;
+        }
+        [ourAudioPlayer pause];
+        ourAudioPlayer = nil;
+    }
+
+    if (!g_streamCache || !g_streamCacheTimestamps) {
+        loadStreamCacheFromDisk();
+    }
+
+    NSURL *cached = g_streamCache[scUrl];
+    NSNumber *cachedTs = g_streamCacheTimestamps[scUrl];
+    if (cached) {
+        NSString *cStr = cached.absoluteString;
+        if ([cStr containsString:@"onrender.com"] || [cStr containsString:@"/sc?url="]) {
+            [g_streamCache removeObjectForKey:scUrl];
+            [g_streamCacheTimestamps removeObjectForKey:scUrl];
+        } else {
+            double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
+            if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
+                isReplacementLoading = NO;
+                playStreamUrl(cached, trackKey, 0.0);
+                return;
+            } else {
+                [g_streamCache removeObjectForKey:scUrl];
+                [g_streamCacheTimestamps removeObjectForKey:scUrl];
+            }
+        }
+    }
+
+    // Разрешаем в фоне
+    resolveSoundCloudUrl(scUrl, ^(NSURL *streamUrl) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            isReplacementLoading = NO;
+            if (![trackKey isEqualToString:currentPlayingKey]) {
+                NSLog(@"[AntiCensor] Track changed while resolving %@, discarding.", trackKey);
+                return;
+            }
+            if (!streamUrl) {
+                NSLog(@"[AntiCensor] Stream URL not resolved for %@. Spotify stays 100%% MUTED!", trackKey);
+                isMutingSpotify = YES;
+                applyMuteStateToAllUnits();
+                return;
+            }
+            playStreamUrl(streamUrl, trackKey, 0.0);
+        });
+    });
+}
+
+// Перезапуск замены БЕЗ возврата на Spotify-оригинал: Spotify остаётся заглушённым,
+// а трек с SoundCloud перезапускается с новым (свежим) медиа-URL. Пауза растёт до 30 с.
+static void retryReplacementPlayback(void) {
+    if (!currentPlayingKey) return;
+    NSString *scUrl = currentPlayingUrl;
+    if (scUrl.length < 8 || ![scUrl.lowercaseString containsString:@"soundcloud"]) {
+        scUrl = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist);
+    }
+    if (scUrl.length < 8) return;
+
+    g_retryAttempt++;
+    int delay = MIN(30, 2 + g_retryAttempt * 4);
+    NSLog(@"[AntiCensor] retry #%d in %d s (Spotify stays muted)", g_retryAttempt, delay);
+    NSString *expected = [scUrl copy];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (![expected isEqualToString:currentPlayingUrl ?: @""]) return;
+        if (g_retryAttempt > 20) {
+            NSLog(@"[AntiCensor] too many retries; keeping Spotify muted until track change");
+            return;
+        }
+        if (g_streamCache) {
+            [g_streamCache removeObjectForKey:expected];
+            if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:expected];
+        }
+        NSString *clean = [expected componentsSeparatedByString:@"?"].firstObject;
+        if (clean.length > 5 && g_streamCache) {
+            [g_streamCache removeObjectForKey:clean];
+            if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:clean];
+        }
+        saveStreamCacheToDisk();
+        isMutingSpotify = YES;
+        applyMuteStateToAllUnits();
+        startReplacementAudio(currentPlayingKey, expected, 0.0);
+    });
+}
+
 static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSString *trackURI, double position, BOOL isPlaying, BOOL hasElapsed, BOOL hasRate) {
     BOOL didTrackChange = NO;
     if (title && title.length > 0) {
