@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.14-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112112
+#define ANTICENSOR_VERSION_STRING @"v5.6.15-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112113
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -663,6 +663,33 @@ static NSArray<NSString *> *strictTrackMatchKeys(NSString *uri, NSString *title,
         [out addObject:k];
     }
     return out;
+}
+
+// Прогреваем серверный транскод в фоне: если прямой поток не стартует,
+// аварийный переход на MP3 будет мгновенным (файл уже готов на сервере).
+static NSMutableSet *g_serverWarmRequests = nil;
+
+static void warmServerTranscode(NSString *scUrl) {
+    if (scUrl.length < 8) return;
+    NSString *low = scUrl.lowercaseString;
+    if (![low containsString:@"soundcloud"]) return;
+    if (!g_serverWarmRequests) g_serverWarmRequests = [NSMutableSet set];
+    NSString *clean = [scUrl componentsSeparatedByString:@"?"].firstObject;
+    if ([g_serverWarmRequests containsObject:clean]) return;
+    [g_serverWarmRequests addObject:clean];
+
+    NSString *server = getServerURL();
+    NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+    [allowed removeCharactersInString:@":/?&=#+"];
+    NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    int br = (g_lastNetworkLatencyMs > 2000.0) ? 64 : (g_lastNetworkLatencyMs > 800.0) ? 96 : 128;
+    NSURL *warmURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@/warm?url=%@&br=%d", server, encoded, br]];
+    if (!warmURL) return;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:warmURL];
+    req.timeoutInterval = 8.0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSLog(@"[AntiCensor] server warm-up: %@ %@", e ? @"failed" : @"ok", clean.lastPathComponent);
+    }] resume];
 }
 
 static void clearStreamCacheForURL(NSString *url) {
@@ -1498,7 +1525,9 @@ static void loadStreamCacheFromDisk(void) {
 // основной путь — обычный MP3 с сервера, а HLS включается флагом.
 static BOOL useDirectHLS(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if ([d objectForKey:@"AntiCensor_UseDirectHLS"] == nil) return NO;   // по умолчанию ВЫКЛ
+    // HLS — самый быстрый путь (1-3 с), поэтому он снова основной.
+    // Если сеть его не тянет, watchdog один раз переключит на серверный MP3.
+    if ([d objectForKey:@"AntiCensor_UseDirectHLS"] == nil) return YES;
     return [d boolForKey:@"AntiCensor_UseDirectHLS"];
 }
 
@@ -5311,6 +5340,18 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
     }
 
+    // Прямой HLS обычно стартует за 1-3 с. Если за 3.5 с звук не пошёл —
+    // заранее готовим серверный MP3, чтобы аварийный переход был мгновенным.
+    if (urlLooksHLS(streamUrl.absoluteString) && currentPlayingUrl.length > 8) {
+        NSString *warmKey = [trackKey copy];
+        NSString *warmSc = [currentPlayingUrl copy];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (![warmKey isEqualToString:currentPlayingKey ?: @""]) return;
+            if (ourAudioPlayer && ourAudioPlayer.timeControlStatus == AVPlayerTimeControlStatusPlaying) return;
+            warmServerTranscode(warmSc);
+        });
+    }
+
     // Постоянный кэш: как только пошло воспроизведение — качаем трек в фон,
     // чтобы следующий запуск был мгновенным и работал без сети.
     if (!streamUrl.isFileURL) {
@@ -5372,6 +5413,7 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         }
         if (progressed > 0.5) return;
 
+        // Если звук уже играл (позиция ушла вперёд) — не сбрасываем его
         if (g_serverFallbackUsed) {
             // Второй раз не перезапускаем — просто возвращаем оригинал и говорим об этом
             NSLog(@"[AntiCensor] Replacement never started; restoring Spotify audio");

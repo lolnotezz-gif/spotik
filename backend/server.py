@@ -1353,6 +1353,25 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.send_json(500, {"error": str(e)}, is_head=is_head)
             return
 
+        if parsed.path == '/warm' and 'url' in params:
+            # Готовим серверный MP3 заранее (в фоне), чтобы аварийный переход
+            # на сервер был мгновенным. Стрим клиенту не отдаётся.
+            try:
+                sc_url = params['url'][0]
+                try:
+                    br = int(params.get('br', ['128'])[0])
+                except (ValueError, TypeError):
+                    br = 128
+                br = max(64, min(320, br))
+                if find_cached_sc_file(sc_url, br):
+                    self.send_json(200, {"status": "cached"}, is_head=is_head)
+                else:
+                    threading.Thread(target=resolve_sc_to_file, args=(sc_url, br), daemon=True).start()
+                    self.send_json(200, {"status": "warming"}, is_head=is_head)
+            except Exception as e:
+                self.send_json(500, {"error": str(e)}, is_head=is_head)
+            return
+
         if parsed.path == '/preload' and 'url' in params:
             # Только резолв (без ffmpeg): раньше /preload запускал полный transcode
             # для каждого трека и перегружал free-инстанс (502/503).
