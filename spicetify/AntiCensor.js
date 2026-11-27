@@ -25,7 +25,15 @@
 
   function normalizeKey(str) {
     if (!str || typeof str !== "string") return "";
-    return str.toLowerCase().replace(/•|\.\.\./g, "").replace(/\s+/g, " ").trim();
+    return str
+      .trim()
+      .toLowerCase()
+      .normalize("NFC")
+      .replace(/[…•·—–\u00a0]/g, " ")
+      .replace(/\.\.\./g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/ - remastered$/, "")
+      .trim();
   }
 
   const BUILTIN_OVERRIDES = {};
@@ -275,6 +283,7 @@
   }
 
   const LOCAL_BRIDGE_URL = "http://127.0.0.1:8989";
+  const DELETED_OVERRIDES_KEY = "anticensor_deleted_overrides";
   let cloudOverrides = {};
   let cloudConnected = false;
   let lastSyncTimestamp = 0;
@@ -287,6 +296,53 @@
     } catch (_) {
       return {};
     }
+  }
+
+  // --- Persistent tombstones: удалённая замена не воскресает из BUILTIN/облака ---
+  function getDeletedKeys() {
+    try {
+      const raw = localStorage.getItem(DELETED_OVERRIDES_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(arr) ? arr.filter((k) => typeof k === "string").map(normalizeKey) : []);
+    } catch (_) {
+      return new Set();
+    }
+  }
+
+  function saveDeletedKeys(set) {
+    try {
+      localStorage.setItem(DELETED_OVERRIDES_KEY, JSON.stringify([...set]));
+    } catch (_) {}
+  }
+
+  function markDeleted(keys) {
+    const set = getDeletedKeys();
+    let changed = false;
+    for (const k of keys || []) {
+      const nk = normalizeKey(k);
+      if (nk.length < 2) continue;
+      if (!set.has(nk)) {
+        set.add(nk);
+        changed = true;
+      }
+    }
+    if (changed) saveDeletedKeys(set);
+    return [...set];
+  }
+
+  function unmarkDeleted(keys) {
+    const set = getDeletedKeys();
+    let changed = false;
+    for (const k of keys || []) {
+      const nk = normalizeKey(k);
+      if (set.delete(nk)) changed = true;
+    }
+    if (changed) saveDeletedKeys(set);
+  }
+
+  function applyCloudTombstones(arr) {
+    if (!Array.isArray(arr) || arr.length === 0) return;
+    markDeleted(arr);
   }
 
   function fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
@@ -309,13 +365,19 @@
       const res = await fetchWithTimeout(`${activeServerUrl}/api/sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
-        body: JSON.stringify({ overrides: pushable, client: "pc" })
+        body: JSON.stringify({ overrides: pushable, deleted_overrides: [...getDeletedKeys()], client: "pc" })
       }, 35000);
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data && data.overrides && typeof data.overrides === "object") {
+        applyCloudTombstones(data.deleted_overrides);
         cloudOverrides = data.overrides;
+        // Чистим локальные/облачные остатки удалённых ключей
+        const gone = getDeletedKeys();
+        for (const k of Object.keys(cloudOverrides)) {
+          if (gone.has(normalizeKey(k))) delete cloudOverrides[k];
+        }
         cloudConnected = true;
         lastSyncTimestamp = Date.now();
         console.log("[AntiCensor PC] Bidirectional sync OK! Cloud total:", Object.keys(cloudOverrides).length, "PC pushed:", Object.keys(pushable).length);
@@ -325,7 +387,7 @@
           fetch(`${LOCAL_BRIDGE_URL}/api/sync`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ overrides: cloudOverrides })
+            body: JSON.stringify({ overrides: cloudOverrides, deleted_overrides: [...getDeletedKeys()] })
           }).catch(() => {});
         } catch (_) {}
 
@@ -355,15 +417,28 @@
 
   async function syncPushBatchToCloud(overridesMap, attempt = 1) {
     try {
+      const restored = Object.entries(overridesMap || {})
+        .filter(([, v]) => typeof v === "string" && v.trim().length > 0)
+        .map(([k]) => k);
       const res = await fetchWithTimeout(`${activeServerUrl}/api/sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
-        body: JSON.stringify({ overrides: overridesMap, client: "pc" })
+        body: JSON.stringify({
+          overrides: overridesMap,
+          restored_overrides: restored,
+          deleted_overrides: [...getDeletedKeys()],
+          client: "pc"
+        })
       }, 35000);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data && data.overrides && typeof data.overrides === "object") {
+        applyCloudTombstones(data.deleted_overrides);
         cloudOverrides = data.overrides;
+        const gone = getDeletedKeys();
+        for (const k of Object.keys(cloudOverrides)) {
+          if (gone.has(normalizeKey(k))) delete cloudOverrides[k];
+        }
         cloudConnected = true;
         lastSyncTimestamp = Date.now();
       }
@@ -416,8 +491,14 @@
       local[k] = val;
       cloudOverrides[k] = val;
     }
+    // Пользователь снова задал замену — снимаем с этих ключей «гробницу»
+    unmarkDeleted(keys);
     localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
     cleanTracklistRows();
+    // Явно сообщаем серверу, что ключи восстановлены (иначе он отклонит их как удалённые)
+    const restored = {};
+    for (const k of keys) restored[k] = val;
+    syncPushBatchToCloud(restored).catch(() => {});
     return keys;
   }
 
@@ -425,14 +506,39 @@
     const local = getLocalOverridesOnly();
     const keys = buildTrackSyncKeys(uri, trackId, title, artist);
     if (uri) keys.push(uri);
-    const uniqueKeys = [...new Set(keys)];
-    for (const k of uniqueKeys) {
+    if (uri) keys.push(uri.toLowerCase());
+    const gone = getDeletedKeys();
+    const uniqueKeys = new Set(keys);
+    // Гасим не только собранные ключи, но и всё, что уже лежит в базе под этими вариантами
+    for (const k of Object.keys(local)) {
+      if (gone.has(normalizeKey(k))) continue;
+      for (const cand of keys) {
+        if (normalizeKey(k) === normalizeKey(cand)) {
+          uniqueKeys.add(k);
+          break;
+        }
+      }
+    }
+    const list = [...uniqueKeys];
+    for (const k of list) {
       delete local[k];
       delete cloudOverrides[k];
     }
+    markDeleted(list);
     localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
     cleanTracklistRows();
-    return uniqueKeys;
+    return list;
+  }
+
+  // Удалённые ключи не должны воскресать из BUILTIN/облака ни при каком порядке синхронизации
+  function filterTombstoned(map) {
+    const gone = getDeletedKeys();
+    if (gone.size === 0) return map;
+    const out = {};
+    for (const [k, v] of Object.entries(map)) {
+      if (!gone.has(normalizeKey(k))) out[k] = v;
+    }
+    return out;
   }
 
   let localBridgeAlive = false;
@@ -984,6 +1090,7 @@
             delete cloudOverrides[k];
             delPayload[k] = "";
           }
+          markDeleted(keyList);
           localStorage.setItem(OVERRIDES_KEY, JSON.stringify(local));
           await syncPushBatchToCloud(delPayload);
           btn.parentElement.remove();
@@ -1013,7 +1120,8 @@
 
   function getOverrides() {
     const local = getLocalOverridesOnly();
-    return Object.assign({}, BUILTIN_OVERRIDES, cloudOverrides, local);
+    // filterTombstoned критичен: без него удалённая замена возвращалась из BUILTIN_OVERRIDES/облака
+    return filterTombstoned(Object.assign({}, BUILTIN_OVERRIDES, cloudOverrides, local));
   }
 
   function getReplacementUrlForInfo(info) {

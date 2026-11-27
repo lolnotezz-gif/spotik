@@ -4,6 +4,7 @@ import json
 import re
 import time
 import hashlib
+import unicodedata
 import urllib.request
 import urllib.parse
 import subprocess
@@ -49,9 +50,39 @@ def normalize_sync_key(key):
     if not isinstance(key, str):
         return ""
     s = key.strip().lower()
-    s = re.sub(r'[•]+|\.\.\.', ' ', s)
+    s = unicodedata.normalize("NFC", s)
+    s = re.sub(r'[…•·—–\u00a0]+|\.\.\.', ' ', s)
     s = re.sub(r'\s+', ' ', s).strip()
+    if s.endswith(" - remastered"):
+        s = s[:-len(" - remastered")].strip()
     return s
+
+def _tombstone_variants(raw_key):
+    """Все варианты ключа, которыми трек мог быть сохранён (uri/id/title/artist-title)."""
+    if not isinstance(raw_key, str):
+        return []
+    base = raw_key.strip()
+    if len(base) < 2:
+        return []
+    variants = {base, normalize_sync_key(base)}
+    low = base.lower()
+    if low.startswith("spotify:track:"):
+        tid = base.split(":")[-1].strip()
+        if len(tid) >= 10:
+            variants.add(tid)
+            variants.add(tid.lower())
+    return [v for v in variants if isinstance(v, str) and len(v) >= 2]
+
+def _scrub_tombstoned(mapping, tombstones):
+    """Удаляет из mapping все ключи, помеченные как удалённые (включая builtin)."""
+    if not tombstones:
+        return 0
+    removed = 0
+    for k in list(mapping.keys()):
+        if k in tombstones or normalize_sync_key(k) in tombstones:
+            del mapping[k]
+            removed += 1
+    return removed
 
 def get_target_path(clean_url, bitrate=192):
     slug = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)[-50:].strip('_')
@@ -524,7 +555,13 @@ def load_sync_db():
     with sync_lock:
         if _sync_db_cache is not None:
             return _sync_db_cache
-        db = {"overrides": dict(DEFAULT_OVERRIDES), "lyrics": {}, "updated_at": 0}
+        db = {
+            "overrides": dict(DEFAULT_OVERRIDES),
+            "lyrics": {},
+            "deleted_overrides": [],
+            "deleted_lyrics": [],
+            "updated_at": 0,
+        }
         if os.path.exists(SYNC_DB_FILE):
             try:
                 with open(SYNC_DB_FILE, "r", encoding="utf-8") as f:
@@ -538,12 +575,23 @@ def load_sync_db():
                             for k, v in disk_db["lyrics"].items():
                                 if isinstance(v, str) and v.strip():
                                     db["lyrics"][k] = v
+                        for tomb_key in ("deleted_overrides", "deleted_lyrics"):
+                            if isinstance(disk_db.get(tomb_key), list):
+                                db[tomb_key] = [normalize_sync_key(x) for x in disk_db[tomb_key] if isinstance(x, str) and len(x) >= 2]
                         if isinstance(disk_db.get("updated_at"), (int, float)):
                             db["updated_at"] = disk_db["updated_at"]
             except Exception as e:
                 print("[AntiCensor] Load sync DB error:", e, flush=True)
+        # Гробницы применяются и к builtin-дефолтам: удалённая замена не воскресает
+        _apply_tombstones(db)
         _sync_db_cache = db
         return _sync_db_cache
+
+def _apply_tombstones(db):
+    gone_o = set(db.get("deleted_overrides") or [])
+    gone_l = set(db.get("deleted_lyrics") or [])
+    _scrub_tombstoned(db["overrides"], gone_o)
+    _scrub_tombstoned(db["lyrics"], gone_l)
 
 def save_sync_db(db):
     global _sync_db_cache
@@ -562,15 +610,20 @@ def save_sync_db(db):
                 except OSError:
                     pass
 
+def _mark_tombstones(db, raw_keys, for_lyrics):
+    """Помечает ключи удалёнными НАВСЕГДА и сразу вычищает их из базы."""
+    tomb_key = "deleted_lyrics" if for_lyrics else "deleted_overrides"
+    gone = set(db.get(tomb_key) or [])
+    for raw in raw_keys:
+        for v in _tombstone_variants(raw):
+            gone.add(normalize_sync_key(v))
+    db[tomb_key] = sorted(gone)
+    _scrub_tombstoned(db["lyrics" if for_lyrics else "overrides"], gone)
+
 def _delete_key_variants(mapping, raw_key):
     if not isinstance(raw_key, str) or not raw_key.strip():
         return
-    variants = {raw_key, raw_key.strip(), raw_key.strip().lower(), normalize_sync_key(raw_key)}
-    low = raw_key.strip().lower()
-    if low.startswith("spotify:track:"):
-        tid = raw_key.strip().split(":")[-1]
-        variants.add(tid)
-        variants.add(tid.lower())
+    variants = set(_tombstone_variants(raw_key))
     for k in list(mapping.keys()):
         if k in variants or k.lower() in variants or normalize_sync_key(k) in variants:
             del mapping[k]
@@ -583,6 +636,36 @@ def merge_sync_payload(payload):
         pushed_lyrics = 0
         changed = False
 
+        # Гробницы из клиента (iOS/PC удалили замену или текст)
+        if isinstance(payload.get("deleted_overrides"), list) and payload["deleted_overrides"]:
+            _mark_tombstones(db, payload["deleted_overrides"], for_lyrics=False)
+            changed = True
+        if isinstance(payload.get("deleted_lyrics"), list) and payload["deleted_lyrics"]:
+            _mark_tombstones(db, payload["deleted_lyrics"], for_lyrics=True)
+            changed = True
+
+        # Клиент может снова ЯВНО задать замену — снимаем её с гробницы.
+        # Важно: обычная синхронизация (push локальной базы) НЕ должна воскрешать
+        # удалённое, иначе ПК с устаревшим localStorage вернёт замену назад.
+        if isinstance(payload.get("restored_overrides"), list) and payload["restored_overrides"]:
+            gone_o = set(db.get("deleted_overrides") or [])
+            before = len(gone_o)
+            for raw_k in payload["restored_overrides"]:
+                for v in _tombstone_variants(raw_k):
+                    gone_o.discard(normalize_sync_key(v))
+            if len(gone_o) != before:
+                db["deleted_overrides"] = sorted(gone_o)
+                changed = True
+        if isinstance(payload.get("restored_lyrics"), list) and payload["restored_lyrics"]:
+            gone_l = set(db.get("deleted_lyrics") or [])
+            before = len(gone_l)
+            for raw_k in payload["restored_lyrics"]:
+                for v in _tombstone_variants(raw_k):
+                    gone_l.discard(normalize_sync_key(v))
+            if len(gone_l) != before:
+                db["deleted_lyrics"] = sorted(gone_l)
+                changed = True
+
         if isinstance(payload.get("overrides"), dict):
             for raw_k, raw_v in payload["overrides"].items():
                 if not isinstance(raw_k, str):
@@ -594,15 +677,21 @@ def merge_sync_payload(payload):
                 low_k = k.lower()
                 if "spotify:track:spotify:" in low_k or low_k.startswith(("spotify:album:", "spotify:playlist:", "spotify:artist:")):
                     _delete_key_variants(db["overrides"], k)
+                    _mark_tombstones(db, [k], for_lyrics=False)
                     changed = True
                     continue
                 val = str(raw_v).strip() if raw_v is not None else ""
                 if not val:
-                    _delete_key_variants(db["overrides"], k)
+                    # Пустое значение = удаление: ставим вечную гробницу, иначе builtin вернёт замену
+                    _mark_tombstones(db, [k], for_lyrics=False)
                     changed = True
                     continue
                 # Never sync device-local iOS file paths to cloud
                 if val.startswith("local://"):
+                    continue
+                # Удалённую замену нельзя вернуть обычной синхронизацией (только restored_overrides)
+                gone_now = set(db.get("deleted_overrides") or [])
+                if any(normalize_sync_key(v) in gone_now for v in _tombstone_variants(k)) or normalize_sync_key(k) in gone_now:
                     continue
                 # Strip SoundCloud tracking query params (?si=...&utm_...)
                 if "soundcloud.com/" in val and "?" in val and "on.soundcloud.com" not in val:
@@ -636,7 +725,7 @@ def merge_sync_payload(payload):
                     continue
                 val = str(raw_v) if raw_v is not None else ""
                 if not val.strip():
-                    _delete_key_variants(db["lyrics"], k)
+                    _mark_tombstones(db, [k], for_lyrics=True)
                     changed = True
                     continue
                 if db["lyrics"].get(k) != val:
@@ -655,6 +744,8 @@ def merge_sync_payload(payload):
         return {
             "overrides": dict(db["overrides"]),
             "lyrics": dict(db["lyrics"]),
+            "deleted_overrides": list(db.get("deleted_overrides") or []),
+            "deleted_lyrics": list(db.get("deleted_lyrics") or []),
             "updated_at": db["updated_at"],
             "pushed_overrides": pushed_overrides,
             "pushed_lyrics": pushed_lyrics,
@@ -667,6 +758,8 @@ def get_sync_snapshot():
         return {
             "overrides": dict(db["overrides"]),
             "lyrics": dict(db["lyrics"]),
+            "deleted_overrides": list(db.get("deleted_overrides") or []),
+            "deleted_lyrics": list(db.get("deleted_lyrics") or []),
             "updated_at": db["updated_at"],
             "server_time": time.time(),
         }
@@ -801,6 +894,8 @@ class AudioHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "overrides_count": len(snapshot["overrides"]),
                 "lyrics_count": len(snapshot["lyrics"]),
+                "deleted_overrides_count": len(snapshot.get("deleted_overrides") or []),
+                "deleted_lyrics_count": len(snapshot.get("deleted_lyrics") or []),
                 "updated_at": snapshot["updated_at"],
                 "server_time": snapshot["server_time"],
             }, is_head=is_head)

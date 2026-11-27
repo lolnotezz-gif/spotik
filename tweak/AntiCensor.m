@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.6-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112104
+#define ANTICENSOR_VERSION_STRING @"v5.6.8-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112106
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -55,6 +55,12 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
 static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition);
 static void stopReplacementAudio(void);
 static void safeSeekPlayerToTime(double targetSeconds);
+static NSMutableDictionary<NSString *, NSURL *> *g_streamCache;
+static NSMutableDictionary<NSString *, NSNumber *> *g_streamCacheTimestamps;
+static void loadStreamCacheFromDisk(void);
+static void saveStreamCacheToDisk(void);
+static void deleteOverrideForTrack(NSString *uri, NSString *title, NSString *artist);
+static void deleteLyricsForTrack(NSString *uri, NSString *title, NSString *artist);
 static NSURLSessionDataTask *(*orig_dataTaskWithRequest_completionHandler)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
 static NSURLSessionDataTask *custom_dataTaskWithRequest_completionHandler(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *));
 static void (*orig_setNowPlayingInfo)(id, SEL, NSDictionary *) = NULL;
@@ -436,19 +442,230 @@ static OSStatus custom_AudioComponentInstanceDispose(void *inInstance) {
 
 #pragma mark - Persistent JSON Storage with Strict Isolation
 
+// Универсальная нормализация ключей (iOS + ПК + сервер дают одинаковый результат!)
 static NSString *normalizeKey(NSString *str) {
     if (!str || ![str isKindOfClass:[NSString class]]) return @"";
-    NSString *clean = [[str lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    // Убираем точки, дефисы и лишние пробелы для точного совпадения
-    clean = [clean stringByReplacingOccurrencesOfString:@"…" withString:@""];
-    clean = [clean stringByReplacingOccurrencesOfString:@"..." withString:@""];
-    return clean;
+    NSString *clean = [str stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    clean = [[clean lowercaseString] decomposedStringWithCanonicalMapping];
+    NSArray *noise = @[@"…", @"...", @"•", @"·", @"—", @"–", @"\u00a0"];
+    for (NSString *n in noise) {
+        clean = [clean stringByReplacingOccurrencesOfString:n withString:@" "];
+    }
+    while ([clean containsString:@"  "]) {
+        clean = [clean stringByReplacingOccurrencesOfString:@"  " withString:@" "];
+    }
+    NSString *suffix = @" - remastered";
+    if ([clean hasSuffix:suffix]) clean = [clean substringToIndex:clean.length - suffix.length];
+    if ([clean hasSuffix:@" - single"]) clean = [clean substringToIndex:clean.length - 9];
+    return [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
 static NSString *getStorageFilePath(void) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docDir = paths.firstObject;
     return [docDir stringByAppendingPathComponent:@"AntiCensor_Overrides.json"];
+}
+
+#pragma mark - Persistent Tombstones (удалённое НИКОГДА не воскресает)
+
+// Гробницы удалённых ключей. Раньше удаление убирало ОДИН ключ, а builtin-дефолты,
+// облако и заголовочные алиасы возвращали замену обратно — из-за этого «удалённый»
+// трек продолжал играть с чужой заменой. Теперь удаление навсегда метит все ключи трека.
+static NSMutableSet *g_deletedOverrideKeys = nil;
+static NSMutableSet *g_deletedLyricsKeys = nil;
+static NSString *const kDeletedOverridesDefaultsKey = @"AntiCensor_DeletedOverrides";
+static NSString *const kDeletedLyricsDefaultsKey = @"AntiCensor_DeletedLyrics";
+
+static BOOL keyEqualsDefaultsKey(NSString *key, NSString *defaultsKey) {
+    if (!key || !defaultsKey) return NO;
+    return [key isEqualToString:defaultsKey];
+}
+
+static NSMutableSet *getTombstoneSet(NSString *defaultsKey) {
+    if (keyEqualsDefaultsKey(defaultsKey, kDeletedOverridesDefaultsKey)) {
+        if (g_deletedOverrideKeys) return g_deletedOverrideKeys;
+        NSArray *arr = [[NSUserDefaults standardUserDefaults] arrayForKey:defaultsKey];
+        NSMutableSet *set = [NSMutableSet set];
+        if ([arr isKindOfClass:[NSArray class]]) {
+            for (id k in arr) {
+                if ([k isKindOfClass:[NSString class]] && [(NSString *)k length] > 0) [set addObject:k];
+            }
+        }
+        g_deletedOverrideKeys = set;
+        return set;
+    }
+    if (g_deletedLyricsKeys) return g_deletedLyricsKeys;
+    NSArray *arr = [[NSUserDefaults standardUserDefaults] arrayForKey:defaultsKey];
+    NSMutableSet *set = [NSMutableSet set];
+    if ([arr isKindOfClass:[NSArray class]]) {
+        for (id k in arr) {
+            if ([k isKindOfClass:[NSString class]] && [(NSString *)k length] > 0) [set addObject:k];
+        }
+    }
+    g_deletedLyricsKeys = set;
+    return set;
+}
+
+static void persistTombstoneSet(NSString *defaultsKey) {
+    NSMutableSet *set = getTombstoneSet(defaultsKey);
+    [[NSUserDefaults standardUserDefaults] setObject:[set allObjects] forKey:defaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static BOOL isTombstoneKey(NSString *key, BOOL forLyrics) {
+    NSString *norm = normalizeKey(key);
+    if (norm.length == 0) return NO;
+    return [getTombstoneSet(forLyrics ? kDeletedLyricsDefaultsKey : kDeletedOverridesDefaultsKey) containsObject:norm];
+}
+
+static BOOL isOverrideKeyDeleted(NSString *key) { return isTombstoneKey(key, NO); }
+static BOOL isLyricsKeyDeleted(NSString *key) { return isTombstoneKey(key, YES); }
+
+static void setTombstoneKeys(NSArray *keys, BOOL deleted, BOOL forLyrics) {
+    if (!keys || keys.count == 0) return;
+    NSMutableSet *set = getTombstoneSet(forLyrics ? kDeletedLyricsDefaultsKey : kDeletedOverridesDefaultsKey);
+    BOOL changed = NO;
+    for (NSString *raw in keys) {
+        NSString *k = normalizeKey(raw);
+        if (k.length < 2) continue;
+        if (deleted) {
+            if (![set containsObject:k]) { [set addObject:k]; changed = YES; }
+        } else {
+            if ([set containsObject:k]) { [set removeObject:k]; changed = YES; }
+        }
+    }
+    if (changed) persistTombstoneSet(forLyrics ? kDeletedLyricsDefaultsKey : kDeletedOverridesDefaultsKey);
+}
+
+// Все ключи, под которыми трек мог быть сохранён в базе (URI / ID / заголовки / артист-заголовок)
+static NSArray<NSString *> *trackLookupKeys(NSString *uri, NSString *title, NSString *artist) {
+    NSMutableArray *keys = [NSMutableArray array];
+    NSString *u = uri.length > 0 ? [uri componentsSeparatedByString:@"?"].firstObject : nil;
+    if (u.length > 0) {
+        [keys addObject:u];
+        [keys addObject:normalizeKey(u)];
+        NSString *lowerU = u.lowercaseString;
+        if ([lowerU hasPrefix:@"spotify:track:"]) {
+            NSString *tid = [u substringFromIndex:@"spotify:track:".length];
+            if (tid.length >= 10) {
+                [keys addObject:tid];
+                [keys addObject:tid.lowercaseString];
+            }
+        }
+    }
+    NSString *t = title.length > 0 ? title : nil;
+    NSString *a = artist.length > 0 ? artist : nil;
+    if (t) {
+        NSString *nt = normalizeKey(t);
+        if (nt.length >= 3) [keys addObject:nt];
+    }
+    if (a && t) {
+        for (NSString *sep in @[@" - ", @" — ", @" • ", @" – "]) {
+            NSString *combined = normalizeKey([NSString stringWithFormat:@"%@%@%@", a, sep, t]);
+            if (combined.length >= 3) [keys addObject:combined];
+        }
+        // Только первый артист (Spotify склеивает фитов через запятую/амперсанд)
+        NSString *firstArtist = [[a componentsSeparatedByString:@","] firstObject];
+        if (!firstArtist) firstArtist = [[a componentsSeparatedByString:@"&"] firstObject];
+        firstArtist = normalizeKey(firstArtist);
+        if (firstArtist.length >= 2 && ![firstArtist isEqualToString:normalizeKey(a)]) {
+            for (NSString *sep in @[@" - ", @" • "]) {
+                NSString *firstCombined = normalizeKey([NSString stringWithFormat:@"%@%@%@", firstArtist, sep, t]);
+                if (firstCombined.length >= 3) [keys addObject:firstCombined];
+            }
+        }
+    }
+    // Пользовательские ключи вида «Артист — Трек» / «Артист • Трек» / «Трек (feat. ...)»
+    if (t) {
+        for (NSString *sep in @[@" - ", @" — ", @" • ", @" – "]) {
+            NSRange r = [t rangeOfString:sep];
+            if (r.location != NSNotFound && r.location > 0) {
+                NSString *left = [t substringToIndex:r.location];
+                NSString *right = [t substringFromIndex:r.location + r.length];
+                NSString *tk = normalizeKey(right);
+                NSString *ak = normalizeKey(left);
+                if (tk.length >= 3) [keys addObject:tk];
+                if (ak.length >= 3) [keys addObject:ak];
+                if (ak.length >= 2 && tk.length >= 3) [keys addObject:normalizeKey([NSString stringWithFormat:@"%@ - %@", ak, tk])];
+            }
+        }
+    }
+    NSMutableArray *unique = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSString *k in keys) {
+        if (k.length < 2 || [seen containsObject:k]) continue;
+        [seen addObject:k];
+        [unique addObject:k];
+    }
+    return unique;
+}
+
+// Расширяем набор ключей теми вариантами, которые уже физически лежат в базе
+static NSArray<NSString *> *matchingKeysInDict(NSDictionary *dict, NSArray<NSString *> *candidates) {
+    NSMutableArray *found = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSString *c in candidates) {
+        if (c.length > 0 && dict[c] && ![seen containsObject:c]) {
+            [seen addObject:c];
+            [found addObject:c];
+        }
+    }
+    for (NSString *k in dict.allKeys) {
+        if (![k isKindOfClass:[NSString class]]) continue;
+        NSString *nk = normalizeKey(k);
+        if (nk.length < 2 || [seen containsObject:k]) continue;
+        for (NSString *c in candidates) {
+            if (c.length >= 3 && [nk isEqualToString:c]) {
+                [seen addObject:k];
+                [found addObject:k];
+                break;
+            }
+        }
+    }
+    return found;
+}
+
+// Все существующие ключи трека, включая точные строки из хранилища (для удаления)
+static NSArray<NSString *> *allKeysForTrackInDict(NSDictionary *dict, NSString *uri, NSString *title, NSString *artist) {
+    NSArray *candidates = trackLookupKeys(uri, title, artist);
+    NSMutableArray *all = [NSMutableArray arrayWithArray:candidates];
+    [all addObjectsFromArray:matchingKeysInDict(dict, candidates)];
+    NSMutableArray *unique = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSString *k in all) {
+        NSString *nk = normalizeKey(k);
+        if (nk.length < 2 || [seen containsObject:nk]) continue;
+        [seen addObject:nk];
+        [unique addObject:nk];
+    }
+    return unique;
+}
+
+// Ключи, по которым трек реально ищется при воспроизведении (без «голого» названия,
+// когда артист известен — иначе ловятся чужие треки с тем же названием).
+static NSArray<NSString *> *strictTrackMatchKeys(NSString *uri, NSString *title, NSString *artist) {
+    NSString *t = title.length > 0 ? title : nil;
+    NSString *a = artist.length > 0 ? artist : nil;
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *k in trackLookupKeys(uri, title, artist)) {
+        if (k.length < 3) continue;
+        if (t && a) {
+            NSString *normTitle = normalizeKey(t);
+            if ([k isEqualToString:normTitle]) continue;
+        }
+        [out addObject:k];
+    }
+    return out;
+}
+
+static void clearStreamCacheForURL(NSString *url) {
+    if (!url || url.length == 0) return;
+    if (!g_streamCache || !g_streamCacheTimestamps) {
+        loadStreamCacheFromDisk();
+    }
+    if (g_streamCache) [g_streamCache removeObjectForKey:url];
+    if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:url];
+    saveStreamCacheToDisk();
 }
 
 static NSString *getLocalAudioDirectoryPath(void) {
@@ -640,6 +857,12 @@ static NSDictionary *getBuiltinDefaultOverrides(void) {
     return builtin;
 }
 
+static BOOL looksLikePlayableOverrideValue(NSString *val) {
+    if (!val || val.length <= 5) return NO;
+    NSString *low = val.lowercaseString;
+    return [low hasPrefix:@"http"] || [low hasPrefix:@"local://"] || [low hasPrefix:@"file://"];
+}
+
 static NSMutableDictionary *loadAllOverrides(void) {
     NSMutableDictionary *cleaned = [NSMutableDictionary dictionaryWithDictionary:getBuiltinDefaultOverrides()];
     NSString *path = getStorageFilePath();
@@ -662,10 +885,17 @@ static NSMutableDictionary *loadAllOverrides(void) {
                 ![normK isEqualToString:@"spotify:track:"] &&
                 ![normK isEqualToString:@"spotify:"]) {
                 NSString *val = [rawDict[k] description];
-                if (val && val.length > 5 && ([val containsString:@"soundcloud"] || [val containsString:@"http"] || [val containsString:@"local://"] || [val containsString:@"file://"])) {
+                if (looksLikePlayableOverrideValue(val)) {
                     cleaned[normK] = val;
                 }
             }
+        }
+    }
+    // Убираем всё, что пользователь когда-либо удалил (builtin/облако больше не воскрешают замену)
+    NSMutableSet *tombstones = getTombstoneSet(kDeletedOverridesDefaultsKey);
+    if (tombstones.count > 0) {
+        for (NSString *k in cleaned.allKeys) {
+            if ([tombstones containsObject:normalizeKey(k)]) [cleaned removeObjectForKey:k];
         }
     }
     return cleaned;
@@ -736,6 +966,16 @@ static NSMutableDictionary *loadAllLyrics(void) {
             }
         }
     }
+    // Удалённые пользователем тексты больше не возвращаются из облака/бэкапа
+    NSMutableSet *tombstones = getTombstoneSet(kDeletedLyricsDefaultsKey);
+    if (tombstones.count > 0) {
+        for (NSString *k in cleaned.allKeys) {
+            if ([tombstones containsObject:normalizeKey(k)]) {
+                [cleaned removeObjectForKey:k];
+                needsPersist = YES;
+            }
+        }
+    }
     if (needsPersist) {
         persistLyrics(cleaned);
     }
@@ -756,6 +996,16 @@ static void applyCloudSyncJSON(NSDictionary *json, NSUInteger *outUpdated, NSUIn
     NSUInteger updatedCount = 0;
     NSUInteger totalCount = 0;
 
+    // 0. Гробницы, пришедшие из облака (удаления с ПК/другого iPhone)
+    NSArray *remoteDeletedOverrides = json[@"deleted_overrides"];
+    if ([remoteDeletedOverrides isKindOfClass:[NSArray class]] && remoteDeletedOverrides.count > 0) {
+        setTombstoneKeys(remoteDeletedOverrides, YES, NO);
+    }
+    NSArray *remoteDeletedLyrics = json[@"deleted_lyrics"];
+    if ([remoteDeletedLyrics isKindOfClass:[NSArray class]] && remoteDeletedLyrics.count > 0) {
+        setTombstoneKeys(remoteDeletedLyrics, YES, YES);
+    }
+
     // 1. Оверрайды треков из облака (ПК ↔ Мобилка)
     NSDictionary *remoteOverrides = json[@"overrides"];
     if (remoteOverrides && [remoteOverrides isKindOfClass:[NSDictionary class]]) {
@@ -763,8 +1013,10 @@ static void applyCloudSyncJSON(NSDictionary *json, NSUInteger *outUpdated, NSUIn
         for (NSString *k in remoteOverrides) {
             NSString *normK = normalizeKey(k);
             if (normK.length < 2) continue;
+            // Не воскрешаем ключи, которые пользователь явно удалил на этом устройстве
+            if (isOverrideKeyDeleted(normK)) continue;
             NSString *remoteVal = [remoteOverrides[k] description];
-            if (remoteVal.length > 0 && ![remoteVal hasPrefix:@"local://"]) {
+            if (looksLikePlayableOverrideValue(remoteVal) && ![remoteVal.lowercaseString hasPrefix:@"local://"]) {
                 totalCount++;
                 if ([remoteVal containsString:@"soundcloud.com"]) {
                     prewarmServerForSoundCloud(remoteVal);
@@ -788,6 +1040,7 @@ static void applyCloudSyncJSON(NSDictionary *json, NSUInteger *outUpdated, NSUIn
         for (NSString *k in remoteLyrics) {
             NSString *normK = normalizeKey(k);
             if (normK.length < 2) continue;
+            if (isLyricsKeyDeleted(normK)) continue;
             NSString *remoteTxt = [remoteLyrics[k] description];
             if (remoteTxt.length > 0) {
                 totalCount++;
@@ -851,6 +1104,31 @@ static void syncPushToCloud(NSString *key, NSString *value, BOOL isLyrics) {
     syncPushToCloudWithRetry(key, value, isLyrics, 1);
 }
 
+// Сообщаем облаку, что пользователь ЯВНО снова задал замену/текст — только так
+// снимается серверная «гробница» (обычная синхронизация ничего не воскрешает).
+static void syncRestoredKeysToCloud(NSArray *keys, BOOL isLyrics) {
+    if (!keys || keys.count == 0) return;
+    NSString *server = getServerURL();
+    NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
+    if (!syncUrl) return;
+    NSDictionary *payload = isLyrics ? @{ @"restored_lyrics": keys, @"client": @"ios" }
+                                     : @{ @"restored_overrides": keys, @"client": @"ios" };
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!bodyData) return;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:syncUrl];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+    req.HTTPBody = bodyData;
+    req.timeoutInterval = 15.0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSHTTPURLResponse *h = [r isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)r : nil;
+        if (e || !h || h.statusCode != 200) {
+            NSLog(@"[AntiCensor] restore-keys sync failed: %@ status=%ld", e, (long)h.statusCode);
+        }
+    }] resume];
+}
+
 static void syncBidirectionalWithRetry(int attempt, void (^completion)(BOOL success, NSUInteger pushedCount, NSUInteger totalCount)) {
     NSString *server = getServerURL();
     NSURL *syncUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/sync", server]];
@@ -864,7 +1142,7 @@ static void syncBidirectionalWithRetry(int attempt, void (^completion)(BOOL succ
     NSMutableDictionary *pushableOverrides = [NSMutableDictionary dictionary];
     for (NSString *k in allLocalOverrides) {
         NSString *val = [allLocalOverrides[k] description];
-        if (k.length >= 2 && val.length > 0 && ![val hasPrefix:@"local://"]) {
+        if (k.length >= 2 && val.length > 0 && ![val hasPrefix:@"local://"] && !isOverrideKeyDeleted(k)) {
             pushableOverrides[k] = val;
         }
     }
@@ -881,6 +1159,8 @@ static void syncBidirectionalWithRetry(int attempt, void (^completion)(BOOL succ
     NSDictionary *payload = @{
         @"overrides": pushableOverrides,
         @"lyrics": pushableLyrics,
+        @"deleted_overrides": [getTombstoneSet(kDeletedOverridesDefaultsKey) allObjects],
+        @"deleted_lyrics": [getTombstoneSet(kDeletedLyricsDefaultsKey) allObjects],
         @"client": @"ios"
     };
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
@@ -953,19 +1233,54 @@ static void syncPullFromCloud(void (^completion)(BOOL success, NSUInteger count)
 static void saveLyricsForTrack(NSString *trackKey, NSString *lyrics) {
     if (!trackKey) return;
     NSString *normKey = normalizeKey(trackKey);
-    if (normKey.length < 3) return;
+    if (normKey.length < 3 ||
+        [normKey isEqualToString:@"текущий трек spotify"] ||
+        [normKey isEqualToString:@"выбранный трек"] ||
+        [normKey isEqualToString:@"текущий трек"]) {
+        return;
+    }
 
     NSMutableDictionary *dict = loadAllLyrics();
     if (lyrics && lyrics.length > 0) {
+        if ([dict[normKey] isEqualToString:lyrics]) return;
         dict[normKey] = lyrics;
+        // Снятие «гробницы»: пользователь снова добавил текст вручную
+        NSArray *reviveKeys = trackLookupKeys(nil, normKey, nil);
+        setTombstoneKeys(reviveKeys, NO, YES);
+        persistLyrics(dict);
         syncPushToCloud(normKey, lyrics, YES);
+        syncRestoredKeysToCloud(reviveKeys, YES);
     } else {
-        [dict removeObjectForKey:normKey];
-        syncPushToCloud(normKey, @"", YES);
+        // Удаление: убираем ВСЕ варианты ключа и навсегда помечаем их удалёнными
+        NSArray *keys = allKeysForTrackInDict(dict, normKey, normKey, nil);
+        if (keys.count == 0) keys = trackLookupKeys(nil, normKey, nil);
+        for (NSString *k in keys) {
+            [dict removeObjectForKey:k];
+        }
+        setTombstoneKeys(keys, YES, YES);
+        persistLyrics(dict);
+        for (NSString *k in keys) syncPushToCloud(k, @"", YES);
     }
-    persistLyrics(dict);
 }
 
+// Полное удаление текста по треку (все варианты ключей + гробница)
+static void deleteLyricsForTrack(NSString *uri, NSString *title, NSString *artist) {
+    NSMutableDictionary *dict = loadAllLyrics();
+    NSArray *keys = allKeysForTrackInDict(dict, uri, title, artist);
+    if (keys.count == 0) keys = trackLookupKeys(uri, title, artist);
+    NSMutableSet *keySet = [NSMutableSet setWithArray:keys];
+    [keySet addObjectsFromArray:trackLookupKeys(uri, title, artist)];
+    for (NSString *k in keySet) {
+        [dict removeObjectForKey:k];
+    }
+    setTombstoneKeys(keySet.allObjects, YES, YES);
+    persistLyrics(dict);
+    for (NSString *k in keySet) syncPushToCloud(k, @"", YES);
+    NSLog(@"[AntiCensor] Lyrics deleted for %@ / %@ (%lu keys tombstoned)", uri ?: @"", title ?: @"", (unsigned long)keySet.count);
+}
+
+// Строгий поиск текста: только точные ключи трека. Никаких containsString —
+// именно он привязывал текст (и «удалённые» замены) к совершенно другим песням.
 static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *artist) {
     if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
         return nil;
@@ -973,51 +1288,25 @@ static NSString *getLyricsForTrack(NSString *uri, NSString *title, NSString *art
     NSDictionary *dict = loadAllLyrics();
     if (!dict || dict.count == 0) return nil;
 
-    // 1. Strict match by URI (supports both spotify:track:... AND mobile spotify:local:...!)
-    if (uri && uri.length > 5) {
-        NSString *val = dict[normalizeKey(uri)];
+    NSArray *keys = strictTrackMatchKeys(uri, title, artist);
+    for (NSString *k in keys) {
+        if (k.length < 3) continue;
+        if (isLyricsKeyDeleted(k)) continue;
+        NSString *val = dict[k];
         if (val && val.length > 0) return val;
     }
-
-    // 2. Strict match by Artist - Title
-    if (title && title.length > 1 && artist && artist.length > 1) {
-        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
-        NSString *val = dict[normalizeKey(combined)];
-        if (val && val.length > 0) return val;
-
-        NSString *combined2 = [NSString stringWithFormat:@"%@ • %@", artist, title];
-        NSString *val2 = dict[normalizeKey(combined2)];
-        if (val2 && val2.length > 0) return val2;
-
-        NSString *combined3 = [NSString stringWithFormat:@"%@ — %@", artist, title];
-        NSString *val3 = dict[normalizeKey(combined3)];
-        if (val3 && val3.length > 0) return val3;
-    }
-
-    // 3. Match by track Title (required for tracks added from device/mobile without complete ID3 tags)
-    if (title && title.length >= 3) {
-        NSString *normTitle = normalizeKey(title);
-        NSString *val = dict[normTitle];
-        if (val && val.length > 0) return val;
-    }
-
-    // 4. Fuzzy scan: find any key that CONTAINS the normalized title (for local:// URI stored keys)
-    if (title && title.length >= 3) {
-        NSString *normTitle = normalizeKey(title);
-        for (NSString *k in dict.allKeys) {
-            if ([k containsString:normTitle] || [normTitle containsString:k]) {
-                NSString *val = dict[k];
-                if (val && val.length > 0) return val;
-            }
-        }
-    }
-
     return nil;
+}
+
+#pragma mark - Override save / delete / strict lookup
+
+static NSString *canonicalOverrideKey(NSString *trackKey) {
+    return normalizeKey(trackKey);
 }
 
 static void saveOverride(NSString *trackKey, NSString *scUrl) {
     if (!trackKey) return;
-    NSString *normKey = normalizeKey(trackKey);
+    NSString *normKey = canonicalOverrideKey(trackKey);
     if (normKey.length < 3 ||
         [normKey isEqualToString:@"текущий трек spotify"] ||
         [normKey isEqualToString:@"выбранный трек"] ||
@@ -1028,15 +1317,77 @@ static void saveOverride(NSString *trackKey, NSString *scUrl) {
     NSMutableDictionary *dict = loadAllOverrides();
     if (scUrl && scUrl.length > 0) {
         NSString *cleanVal = [scUrl stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (cleanVal.length < 6) return;
+        if ([dict[normKey] isEqualToString:cleanVal]) return;
         dict[normKey] = cleanVal;
+        // Пользователь снова задал замену — снимаем гробницу со ВСЕХ ключей этого трека,
+        // иначе окно замены снова увидит «удалено» и не применит новую ссылку.
+        NSArray *reviveKeys = trackLookupKeys(normKey, normKey, nil);
+        setTombstoneKeys(reviveKeys, NO, NO);
+        persistOverrides(dict);
         syncPushToCloud(normKey, cleanVal, NO);
+        syncRestoredKeysToCloud(reviveKeys, NO);
     } else {
-        [dict removeObjectForKey:normKey];
-        syncPushToCloud(normKey, @"", NO);
+        // Удаление: чистим ВСЕ ключи, по которым трек мог быть найден
+        NSArray *keys = allKeysForTrackInDict(dict, normKey, normKey, nil);
+        for (NSString *k in keys) {
+            [dict removeObjectForKey:k];
+        }
+        setTombstoneKeys(keys, YES, NO);
+        persistOverrides(dict);
+        for (NSString *k in keys) syncPushToCloud(k, @"", NO);
     }
-    persistOverrides(dict);
 }
 
+// Полное удаление замены по треку: гасятся URI, ID, title, artist-title и все
+// их нормализованные варианты, чтобы builtin-дефолт не «воскресил» замену.
+static void deleteOverrideForTrack(NSString *uri, NSString *title, NSString *artist) {
+    NSMutableDictionary *dict = loadAllOverrides();
+    NSString *playableUrl = nil;
+    NSMutableSet *keySet = [NSMutableSet set];
+    NSString *u = uri.length > 0 ? [uri componentsSeparatedByString:@"?"].firstObject : nil;
+    if (u.length > 0) {
+        playableUrl = dict[normalizeKey(u)];
+        if (!playableUrl && title.length > 0) {
+            playableUrl = dict[normalizeKey(title)];
+        }
+    } else if (title.length > 0) {
+        playableUrl = dict[normalizeKey(title)];
+    }
+    [keySet addObjectsFromArray:allKeysForTrackInDict(dict, uri, title, artist)];
+    // Если заменённый URL реально привязан к нескольким ключам — снимаем и их:
+    // иначе чужой «двойник» с тем же значением воскресит замену на другом треке.
+    if (playableUrl && playableUrl.length > 6) {
+        for (NSString *k in dict.allKeys) {
+            NSString *v = [dict[k] description];
+            if ([v isEqualToString:playableUrl]) [keySet addObject:normalizeKey(k)];
+        }
+    }
+    if (keySet.count == 0) {
+        [keySet addObjectsFromArray:trackLookupKeys(uri, title, artist)];
+    }
+    // Блокируем ВСЕ варианты трека (uri/id/title/artist-title), а не только найденные в базе:
+    // иначе builtin-дефолт под artist-title воскресит замену на следующем тике плеера.
+    [keySet addObjectsFromArray:trackLookupKeys(uri, title, artist)];
+    for (NSString *k in keySet) {
+        [dict removeObjectForKey:k];
+    }
+    setTombstoneKeys(keySet.allObjects, YES, NO);
+    persistOverrides(dict);
+
+    for (NSString *k in keySet) syncPushToCloud(k, @"", NO);
+    // Не оставляем и «мёртвый» кэш потока, иначе удалённый трек доигрывает из памяти
+    if (playableUrl && [playableUrl containsString:@"soundcloud.com"]) {
+        clearStreamCacheForURL(playableUrl);
+    }
+    stopReplacementAudio();
+    NSLog(@"[AntiCensor] Override deleted for %@ / %@ (%lu keys tombstoned)",
+          uri ?: @"", title ?: @"", (unsigned long)keySet.count);
+}
+
+// Строгий поиск замены. Порядок: URI → ID → точное название трека.
+// Матч по одному названию допустим ТОЛЬКО когда артист неизвестен, иначе
+// любой чужой трек с похожим названием получал чужую замену.
 static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *artist) {
     if ((!uri || uri.length < 5) && (!title || title.length < 2)) {
         return nil;
@@ -1045,29 +1396,23 @@ static NSString *getOverrideForTrack(NSString *uri, NSString *title, NSString *a
     NSDictionary *dict = loadAllOverrides();
     if (!dict || dict.count == 0) return nil;
 
-    // 1. Поиск по точному Spotify URI (например spotify:track:6wLq5...)
-    if (uri && [uri hasPrefix:@"spotify:track:"] && uri.length > 15) {
-        NSString *normUri = normalizeKey(uri);
-        NSString *val = dict[normUri];
+    NSString *t = title.length > 0 ? title : nil;
+    NSString *a = artist.length > 0 ? artist : nil;
+
+    for (NSString *k in strictTrackMatchKeys(uri, title, artist)) {
+        if (k.length < 3) continue;
+        if (isOverrideKeyDeleted(k)) continue;
+        NSString *val = dict[k];
         if (val && val.length > 5) return val;
     }
 
-    // 2. Поиск по «Артист - Название» (гарантирует уникальность трека в альбоме!)
-    if (title && title.length > 1 && artist && artist.length > 1) {
-        NSString *combined = [NSString stringWithFormat:@"%@ - %@", artist, title];
-        NSString *val = dict[normalizeKey(combined)];
-        if (val && val.length > 5) return val;
-
-        NSString *combined2 = [NSString stringWithFormat:@"%@ — %@", artist, title];
-        NSString *val2 = dict[normalizeKey(combined2)];
-        if (val2 && val2.length > 5) return val2;
-    }
-
-    // 3. Точное название песни
-    if (title && title.length > 2) {
-        NSString *normTitle = normalizeKey(title);
-        NSString *val = dict[normTitle];
-        if (val && val.length > 5) return val;
+    // Название без артиста — только как последний шанс и только без артиста
+    if (t && t.length > 2 && (!a || a.length < 2)) {
+        NSString *normTitle = normalizeKey(t);
+        if (!isOverrideKeyDeleted(normTitle)) {
+            NSString *val = dict[normTitle];
+            if (val && val.length > 5) return val;
+        }
     }
 
     return nil;
@@ -1382,6 +1727,43 @@ static NSTimeInterval lastSpotifyPositionTimestamp = 0.0;
 static BOOL isSpotifyCurrentlyPlaying = NO;
 static NSTimeInterval g_lastForegroundOrScreenTransitionTimestamp = 0;
 
+// --- Защита ручной перемотки (тап по тексту / скраббер) ---
+// Spotify асинхронно отдаёт СТАРУЮ позицию (Now Playing / ползунок) в течение
+// ~0.3-1.5 сек после нашей перемотки. Старый код верил ей и откатывал звук назад —
+// отсюда «тыкаю по тексту, а он не перекидывает». Теперь цель перемотки
+// защищена на короткое окно, а чужие/устаревшие позиции игнорируются.
+static double g_protectedSeekTarget = -1.0;
+static NSTimeInterval g_protectedSeekUntil = 0.0;
+static NSTimeInterval g_lastUserManualSeekTimestamp = 0.0;
+static double g_lastUserManualSeekTarget = -1.0;
+
+static void protectManualSeekTarget(double target) {
+    g_protectedSeekTarget = target;
+    g_protectedSeekUntil = [NSDate timeIntervalSinceReferenceDate] + 2.0;
+    g_lastUserManualSeekTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    g_lastUserManualSeekTarget = target;
+}
+
+// Внутренняя защита (старт трека / синхронизация ползунка): окно короче и НЕ помечает
+// действие как ручное, чтобы не глотать реальные тапы пользователя по тексту.
+static void protectSeekTargetShort(double target) {
+    g_protectedSeekTarget = target;
+    g_protectedSeekUntil = [NSDate timeIntervalSinceReferenceDate] + 1.2;
+}
+
+static BOOL isElapsedPositionTrusted(double position) {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (g_protectedSeekTarget >= 0.0 && now < g_protectedSeekUntil) {
+        // Пока наша перемотка «не долетела» до Spotify, его позиция устаревшая
+        if (fabs(position - g_protectedSeekTarget) > 2.5) return NO;
+    }
+    // Любые внешние обновления в первые 0.6 сек после тапа по тексту игнорируем
+    if (g_lastUserManualSeekTimestamp > 0.0 && now - g_lastUserManualSeekTimestamp < 0.6) {
+        if (g_lastUserManualSeekTarget >= 0.0 && fabs(position - g_lastUserManualSeekTarget) > 2.5) return NO;
+    }
+    return YES;
+}
+
 static NSTimer *periodicSyncTimer = nil;
 static UIButton *floatingPillButton = nil;
 
@@ -1408,8 +1790,14 @@ static double getCurrentSpotifyPreciseTime(void) {
     if (ourAudioPlayer && ourAudioPlayer.currentItem) {
         double ourPos = CMTimeGetSeconds(ourAudioPlayer.currentTime);
         if (!isnan(ourPos) && ourPos >= 0) {
+            // Пока идёт защищённая ручная перемотка, подсветка текста не должна
+            // отпрыгивать на старую позицию, если плеер ещё не «долетел» до цели.
+            NSTimeInterval nowTs = [NSDate timeIntervalSinceReferenceDate];
+            if (g_protectedSeekTarget >= 0.0 && nowTs < g_protectedSeekUntil && fabs(ourPos - g_protectedSeekTarget) > 3.0) {
+                return g_protectedSeekTarget;
+            }
             lastKnownSpotifyPosition = ourPos;
-            lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
+            lastSpotifyPositionTimestamp = nowTs;
             return ourPos;
         }
         if (lastKnownSpotifyPosition >= 0.0) {
@@ -1554,6 +1942,10 @@ static void safeSeekPlayerToTime(double targetSeconds) {
     lastKnownSpotifyPosition = targetSeconds;
     lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
     g_pendingSeekTarget = targetSeconds;
+    // Защищаем фактическую (уже обрезанную по длине) цель перемотки
+    if (g_protectedSeekTarget >= 0.0 && [NSDate timeIntervalSinceReferenceDate] < g_protectedSeekUntil) {
+        g_protectedSeekTarget = targetSeconds;
+    }
 
     if (g_isPlayerSeeking) {
         return;
@@ -1577,7 +1969,8 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         }
     });
 
-    [ourAudioPlayer seekToTime:seekTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
+    CMTime seekTol = CMTimeMakeWithSeconds(0.15, NSEC_PER_SEC);
+    [ourAudioPlayer seekToTime:seekTime toleranceBefore:seekTol toleranceAfter:seekTol completionHandler:^(BOOL finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             g_isPlayerSeeking = NO;
             lastKnownSpotifyPosition = toSeek;
@@ -1800,25 +2193,22 @@ static UIImage *getAlbumArtworkImage(void) {
 }
 
 
+// Строгое определение «трека из встроенного альбома»: раньше ЛЮБОЙ трек с
+// артистом m1raontheblock или словом «эйфория» получал чужую обложку/альбом.
 static BOOL isCurrentTrackFromAlbum(NSString *uri, NSString *title, NSString *artist, NSString *streamUrl) {
-    if (streamUrl && [streamUrl containsString:@"spotik-in4b.onrender.com/audio/"]) {
-        return YES;
-    }
-    if (uri && [uri containsString:@"1f1OCxkJ43A1qy9qqFNfuX"]) {
-        return YES;
-    }
+    if (!streamUrl || streamUrl.length == 0) return NO;
+    NSString *lowStream = streamUrl.lowercaseString;
+    if ([lowStream containsString:@"soundcloud"] || [lowStream containsString:@"sndcdn"]) return NO;
+    if ([lowStream containsString:@"spotik-in4b.onrender.com/audio/"]) return YES;
+    if ([lowStream hasPrefix:@"file://"] || [lowStream hasPrefix:@"local://"]) return YES;
+    if (!uri || uri.length == 0) return NO;
     for (int i = 0; i < 12; i++) {
-        if (uri && [uri containsString:kAlbumURIs[i]]) return YES;
         NSString *idStr = [kAlbumURIs[i] stringByReplacingOccurrencesOfString:@"spotify:track:" withString:@""];
-        if (uri && [uri containsString:idStr]) return YES;
+        if (idStr.length > 5 && [uri containsString:idStr]) return YES;
     }
-    NSString *aLower = artist.lowercaseString ?: @"";
-    if ([aLower containsString:@"m1raontheblock"]) {
-        return YES;
-    }
-    if (title && identifyAlbumTrackIndex(title) >= 0) {
-        return YES;
-    }
+    if ([uri containsString:@"1f1OCxkJ43A1qy9qqFNfuX"]) return YES;
+    // Название/артист сами по себе НЕ признак альбома — нужен либо URI из списка,
+    // либо реально играющий встроенный аудиофайл.
     return NO;
 }
 
@@ -3143,6 +3533,12 @@ static void seekSpotifyPlayback(double targetSeconds, double duration) {
     lastSpotifyPositionTimestamp = now;
     g_spotifyLastReportedPosition = seekTarget;
     g_spotifyLastReportedTimestamp = now;
+    // Защищаем цель: устаревшая позиция от Spotify (Now Playing / ползунок) её не откатит.
+    // Если цель уже защищена ручной перемоткой — НЕ укорачиваем окно.
+    NSTimeInterval protectNow = [NSDate timeIntervalSinceReferenceDate];
+    if (!(g_protectedSeekTarget >= 0.0 && protectNow < g_protectedSeekUntil && fabs(g_protectedSeekTarget - seekTarget) < 1.0)) {
+        protectSeekTargetShort(seekTarget);
+    }
 
     // 1. Перематываем наш аудиоплеер (если играет кастомный трек / файл с устройства)
     safeSeekPlayerToTime(seekTarget);
@@ -4627,11 +5023,17 @@ static void handleTrackPlaybackUpdate(NSString *title, NSString *artist, NSStrin
             NSTimeInterval sinceFg = [NSDate timeIntervalSinceReferenceDate] - g_lastForegroundOrScreenTransitionTimestamp;
             BOOL justReturnedFromBg = (sinceFg >= 0.0 && sinceFg < 2.0);
 
-            if (!isStartupNoise && !g_isPlayerSeeking && !didTrackChange && !justReturnedFromBg) {
+            if (!isStartupNoise && !didTrackChange && !justReturnedFromBg) {
                 // Если разница во времени больше 0.8 сек — ЭТО ТАП ПО ТЕКСТУ В СПОТИФАЕ ИЛИ ПЕРЕМОТКА!
-                BOOL spuriousZero = (position < 1.0 && ourTime > 15.0);
-                if (!spuriousZero && fabs(position - ourTime) > 0.8) {
+                // spuriousZero оставлен только как защита от дикого «0» глубоко в треке;
+                // порог снижен, чтобы тап по ранним строкам текста не игнорировался.
+                BOOL spuriousZero = (position < 0.5 && ourTime > 30.0);
+                // ГЛАВНЫЙ ФИКС ЗАДЕРЖКИ ПЕРЕМОТКИ: позиция, пришедшая из Spotify уже после
+                // нашей собственной перемотки (устаревшая/откатывающая), игнорируется.
+                BOOL positionTrusted = isElapsedPositionTrusted(position);
+                if (positionTrusted && !spuriousZero && fabs(position - ourTime) > 0.8) {
                     NSLog(@"[AntiCensor] >>> SPOTIFY LYRICS TAP DETECTED: %.2f -> %.2f. Seeking custom player! <<<", ourTime, position);
+                    protectManualSeekTarget(position);
                     safeSeekPlayerToTime(position);
                     lastKnownSpotifyPosition = position;
                     lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
@@ -4911,8 +5313,43 @@ static void showManageAllTracksDialog(void) {
             return;
         }
 
+        // Группируем ключи одного трека (uri / id / title / artist-title) в ОДНУ строку,
+        // иначе список превращается в простыню и удалить нужное невозможно.
+        NSMutableArray<NSString *> *canonicalKeys = [NSMutableArray array];
+        NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *groups = [NSMutableDictionary dictionary];
+        for (NSString *key in allOverrides) {
+            if (![key isKindOfClass:[NSString class]] || key.length < 2) continue;
+            NSString *canon = canonicalOverrideKey(key);
+            if (canon.length < 2) continue;
+            NSMutableSet *pool = groups[canon];
+            if (!pool) {
+                pool = [NSMutableSet set];
+                groups[canon] = pool;
+                [canonicalKeys addObject:canon];
+            }
+            [pool addObject:key];
+            // Склеиваем варианты одного трека: если у ключа есть uri-собрат, группа расширяется
+            for (NSString *other in groups.allKeys.copy) {
+                if ([other isEqualToString:canon]) continue;
+                NSMutableSet *otherPool = groups[other];
+                BOOL intersects = NO;
+                for (NSString *candidate in otherPool) {
+                    for (NSString *mine in pool) {
+                        if ([normalizeKey(candidate) isEqualToString:normalizeKey(mine)]) { intersects = YES; break; }
+                    }
+                    if (intersects) break;
+                }
+                if (intersects) {
+                    [pool unionSet:otherPool];
+                    [groups removeObjectForKey:other];
+                    [canonicalKeys removeObject:other];
+                }
+            }
+        }
+        [canonicalKeys sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+
         UIAlertController *manageAlert = [UIAlertController alertControllerWithTitle:@"База данных AntiCensor"
-                                                                             message:[NSString stringWithFormat:@"Замен треков: %lu | Текстов: %lu", (unsigned long)allOverrides.count, (unsigned long)allLyrics.count]
+                                                                             message:[NSString stringWithFormat:@"Замен: %lu | Текстов: %lu", (unsigned long)canonicalKeys.count, (unsigned long)allLyrics.count]
                                                                       preferredStyle:UIAlertControllerStyleActionSheet];
 
         UIAlertAction *otaUpdateAction = [UIAlertAction actionWithTitle:@"🚀 Обновить AntiCensor по воздуху (OTA)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a) {
@@ -4925,31 +5362,76 @@ static void showManageAllTracksDialog(void) {
         }];
         [manageAlert addAction:cloudSyncAction];
 
-        for (NSString *key in allOverrides) {
-            NSString *val = allOverrides[key];
-            NSString *icon = [val hasPrefix:@"local://"] ? @"📁" : @"☁️";
-            NSString *rowTitle = [NSString stringWithFormat:@"%@ Удалить замену: %@", icon, key];
-            [manageAlert addAction:[UIAlertAction actionWithTitle:rowTitle style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-                saveOverride(key, nil);
-                if ([normalizeKey(currentActiveSpotifyTrackTitle) isEqualToString:key] ||
-                    [normalizeKey(currentActiveSpotifyTrackURI) isEqualToString:key]) {
-                    stopReplacementAudio();
+        for (NSString *canon in canonicalKeys) {
+            NSMutableSet *pool = groups[canon];
+            NSString *bestUri = nil;
+            NSString *bestTitle = nil;
+            NSString *bestValue = nil;
+            BOOL hasLocalFile = NO;
+            for (NSString *k in pool) {
+                NSString *v = allOverrides[k];
+                if (!bestValue) bestValue = v;
+                if ([v.lowercaseString hasPrefix:@"local://"]) hasLocalFile = YES;
+                if ([k.lowercaseString hasPrefix:@"spotify:track:"]) {
+                    bestUri = k;
+                } else if (!bestUri && [k.lowercaseString rangeOfString:@" - "].location == NSNotFound) {
+                    bestTitle = k;
                 }
+            }
+            NSString *icon = hasLocalFile ? @"📁" : @"☁️";
+            NSString *rowTitle = [NSString stringWithFormat:@"%@ Удалить замену: %@", icon, bestUri ?: (bestTitle ?: canon)];
+            [manageAlert addAction:[UIAlertAction actionWithTitle:rowTitle style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+                // Удаляем по ВСЕМ ключам группы сразу: никакой «воскрешённой» замены не останется
+                NSMutableDictionary *dict = loadAllOverrides();
+                NSMutableSet *toDelete = [NSMutableSet setWithArray:pool.allObjects];
+                for (NSString *k in pool) {
+                    [toDelete addObjectsFromArray:allKeysForTrackInDict(dict, k, k, nil)];
+                }
+                [toDelete addObjectsFromArray:allKeysForTrackInDict(dict, bestUri, bestTitle, nil)];
+                for (NSString *k in toDelete) [dict removeObjectForKey:k];
+                setTombstoneKeys(toDelete.allObjects, YES, NO);
+                persistOverrides(dict);
+                for (NSString *k in toDelete) syncPushToCloud(k, @"", NO);
+                if (bestValue && [bestValue containsString:@"soundcloud.com"]) clearStreamCacheForURL(bestValue);
+                stopReplacementAudio();
+                g_activeInjectedLyricsTrackKey = nil;
+                checkAndSyncLyricsOnScreen();
+                NSLog(@"[AntiCensor] Group override deleted (%lu keys): %@", (unsigned long)toDelete.count, rowTitle);
             }]];
         }
 
         for (NSString *key in allLyrics) {
             NSString *rowTitle = [NSString stringWithFormat:@"📝 Удалить текст: %@", key];
             [manageAlert addAction:[UIAlertAction actionWithTitle:rowTitle style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-                saveLyricsForTrack(key, nil);
+                deleteLyricsForTrack(nil, key, nil);
+                g_currentKaraokeTrackKey = nil;
+                g_currentKaraokeItems = nil;
+                g_currentKaraokeLabels = nil;
+                g_lastActiveKaraokeIdx = -1;
+                checkAndSyncLyricsOnScreen();
             }]];
         }
 
-        [manageAlert addAction:[UIAlertAction actionWithTitle:@"Очистить ВСЕ замены" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-            persistOverrides(@{});
+        [manageAlert addAction:[UIAlertAction actionWithTitle:@"🧹 Очистить ВСЕ замены" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+            NSMutableDictionary *dict = loadAllOverrides();
+            NSArray *keys = dict.allKeys.copy;
+            setTombstoneKeys(keys, YES, NO);
             if (g_streamCache) [g_streamCache removeAllObjects];
+            if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeAllObjects];
+            saveStreamCacheToDisk();
+            persistOverrides(@{});
+            for (NSString *k in keys) syncPushToCloud(k, @"", NO);
             stopReplacementAudio();
+            NSLog(@"[AntiCensor] Cleared all %lu overrides (tombstoned).", (unsigned long)keys.count);
         }]];
+
+        if ([getTombstoneSet(kDeletedOverridesDefaultsKey) count] > 0) {
+            [manageAlert addAction:[UIAlertAction actionWithTitle:@"↩️ Вернуть встроенные замены (снять блокировку)" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                setTombstoneKeys([getTombstoneSet(kDeletedOverridesDefaultsKey) allObjects], NO, NO);
+                stopReplacementAudio();
+                checkAndSyncLyricsOnScreen();
+            }]];
+        }
 
         [manageAlert addAction:[UIAlertAction actionWithTitle:@"Закрыть" style:UIAlertActionStyleCancel handler:nil]];
 
@@ -5350,9 +5832,7 @@ static void showLyricsManagerDialog(NSString *targetURI, NSString *targetTitle, 
         UIAlertAction *deleteAction = nil;
         if (hasLyrics) {
             deleteAction = [UIAlertAction actionWithTitle:@"🗑️ Удалить этот текст" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull a) {
-                saveLyricsForTrack(uri ?: (title ?: disp), nil);
-                if (title && title.length > 0) saveLyricsForTrack(title, nil);
-                if (artist && title) saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
+                deleteLyricsForTrack(uri ?: (title ?: disp), title, artist);
                 g_currentKaraokeTrackKey = nil;
                 g_currentKaraokeItems = nil;
                 g_currentKaraokeLabels = nil;
@@ -5437,17 +5917,17 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
             performAntiCensorCloudSync();
         }];
 
-        // 5. Удалить замену (если есть)
+        // 5. Удалить замену (если есть). Удаление всегда полное и постоянное:
+        // гасятся URI, ID, название и artist-title, чтобы builtin/облако не вернули замену.
         UIAlertAction *removeOverrideAction = nil;
-        if (existingUrl.length > 0) {
-            removeOverrideAction = [UIAlertAction actionWithTitle:@"🗑️ Сбросить замену звука (Оригинал Spotify)"
+        if (existingUrl.length > 0 || title.length > 0 || uri.length > 0) {
+            removeOverrideAction = [UIAlertAction actionWithTitle:(existingUrl.length > 0 ? @"🗑️ Удалить замену звука (вернуть Spotify)" : @"🧹 Удалить все замены этого трека")
                                                             style:UIAlertActionStyleDestructive
                                                           handler:^(UIAlertAction * _Nonnull a) {
-                if (uri && uri.length > 5) saveOverride(uri, nil);
-                if (displayTrack.length > 1) saveOverride(displayTrack, nil);
-                if (title && title.length > 1) saveOverride(title, nil);
-                if (artist && title) saveOverride([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
-                stopReplacementAudio();
+                deleteOverrideForTrack(uri, title, artist);
+                g_currentKaraokeTrackKey = nil;
+                g_activeInjectedLyricsTrackKey = nil;
+                checkAndSyncLyricsOnScreen();
             }];
         }
 
@@ -5457,13 +5937,7 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
             removeLyricsAction = [UIAlertAction actionWithTitle:@"🗑️ Сбросить / Удалить текст песни"
                                                           style:UIAlertActionStyleDestructive
                                                         handler:^(UIAlertAction * _Nonnull a) {
-                if (uri && uri.length > 5) saveLyricsForTrack(uri, nil);
-                if (displayTrack.length > 1) saveLyricsForTrack(displayTrack, nil);
-                if (title && title.length > 1) saveLyricsForTrack(title, nil);
-                if (artist && title) {
-                    saveLyricsForTrack([NSString stringWithFormat:@"%@ - %@", artist, title], nil);
-                    saveLyricsForTrack([NSString stringWithFormat:@"%@ — %@", artist, title], nil);
-                }
+                deleteLyricsForTrack(uri, title, artist);
                 g_currentKaraokeTrackKey = nil;
                 g_currentKaraokeItems = nil;
                 g_currentKaraokeLabels = nil;
@@ -6163,7 +6637,6 @@ static void custom_presentViewController(UIViewController *callerVC, SEL _cmd, U
         }
     }
 
-    g_lastForegroundOrScreenTransitionTimestamp = [NSDate timeIntervalSinceReferenceDate];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         checkAndInjectProfileDrawerButton();
     });
@@ -6320,6 +6793,7 @@ static void custom_UIControl_sendActionsForControlEvents(UIControl *self, SEL _c
                             // Реагируем если пользователь тянет пальцем (isTracking) ИЛИ произошел скачок > 0.8 сек (тап по строке текста в Спотифае):
                             if ((slider.isTracking || fabs(targetSec - ourCurrent) > 0.8) && !isStartupNoise && !g_isPlayerSeeking) {
                                 NSLog(@"[AntiCensor] >>> SLIDER / LYRICS TAP JUMP: %.2f -> %.2f. Seeking custom player! <<<", ourCurrent, targetSec);
+                                protectManualSeekTarget(targetSec);
                                 safeSeekPlayerToTime(targetSec);
                                 lastKnownSpotifyPosition = targetSec;
                                 lastSpotifyPositionTimestamp = [NSDate timeIntervalSinceReferenceDate];
