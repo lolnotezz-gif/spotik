@@ -428,30 +428,36 @@ def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
     except OSError:
         fh = None
 
-    handler.send_response(200)
-    handler.send_cors()
-    handler.send_header('Content-Type', 'audio/mpeg')
-    handler.send_header('Transfer-Encoding', 'chunked')
-    handler.send_header('Accept-Ranges', 'none')
-    handler.send_header('Cache-Control', 'no-store')
-    handler.end_headers()
-
     wrote_any = False
     try:
-        while True:
-            chunk = proc.stdout.read(65536)
-            if not chunk:
-                break
-            if not wrote_any:
-                if not _mp3_head_ok(chunk):
-                    print("[AntiCensor] transcode produced non-MP3 head!", flush=True)
-                wrote_any = True
+        first_chunk = proc.stdout.read(65536)
+        if not first_chunk:
+            handler.send_response(404)
+            handler.send_cors()
+            handler.send_header('Content-Length', '0')
+            handler.end_headers()
+            return
+        if not _mp3_head_ok(first_chunk):
+            print("[AntiCensor] transcode produced non-MP3 head!", flush=True)
+
+        handler.send_response(200)
+        handler.send_cors()
+        handler.send_header('Content-Type', 'audio/mpeg')
+        handler.send_header('Transfer-Encoding', 'chunked')
+        handler.send_header('Accept-Ranges', 'none')
+        handler.send_header('Cache-Control', 'no-store')
+        handler.end_headers()
+
+        chunk = first_chunk
+        while chunk:
+            wrote_any = True
             if fh:
                 fh.write(chunk)
             handler.wfile.write(b"%x\r\n" % len(chunk))
             handler.wfile.write(chunk)
             handler.wfile.write(b"\r\n")
             handler.wfile.flush()
+            chunk = proc.stdout.read(65536)
         handler.wfile.write(b"0\r\n\r\n")
         handler.wfile.flush()
     except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
@@ -1214,7 +1220,7 @@ class AudioHandler(BaseHTTPRequestHandler):
                     if info and info.get('progressive') and not is_head:
                         if stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path')):
                             return
-                    if info and not is_head:
+                    if info and not is_head and not range_header:
                         stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
                         return
                     # last resort: old blocking behaviour (also caches for next time)
