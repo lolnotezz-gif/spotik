@@ -227,6 +227,10 @@ def save_uploaded_audio_to_mp3(raw_bytes, ext_hint="mp3"):
 
 # --- Instant-start streaming helpers -------------------------------------
 _sc_stream_cache = {}
+# cache_path -> {"part": path, "done": Event}: allows Range requests to attach to a
+# running transcode instead of starting a duplicate (or blocking for a minute).
+_sc_active_transcodes = {}
+_sc_active_lock = threading.Lock()
 _sc_stream_lock = threading.Lock()
 SC_STREAM_TTL = 20 * 60  # media URLs are signed; keep them short-lived
 
@@ -433,6 +437,62 @@ def stream_progressive_proxy(handler, media_url, range_header=None, cache_path=N
             pass
 
 
+def stream_growing_file(handler, entry):
+    """Stream a transcode that is still being written (chunked, from byte 0).
+
+    Used when the client asks for a Range while the first transcode is running:
+    better to deliver audio from the start than to block for tens of seconds.
+    """
+    part = entry.get("part")
+    done = entry.get("done")
+    waited = 0.0
+    while part and not os.path.exists(part) and waited < 3.0:
+        time.sleep(0.1)
+        waited += 0.1
+    if not part or not os.path.exists(part):
+        return False
+    handler.send_response(200)
+    handler.send_cors()
+    handler.send_header('Content-Type', 'audio/mpeg')
+    handler.send_header('Transfer-Encoding', 'chunked')
+    handler.send_header('Accept-Ranges', 'none')
+    handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+    sent = 0
+    idle = 0
+    try:
+        f = open(part, "rb")
+    except OSError:
+        return False
+    try:
+        while True:
+            chunk = f.read(65536)
+            if chunk:
+                idle = 0
+                handler.wfile.write(b"%x\r\n" % len(chunk))
+                handler.wfile.write(chunk)
+                handler.wfile.write(b"\r\n")
+                handler.wfile.flush()
+                sent += len(chunk)
+                continue
+            if done is not None and done.is_set():
+                break
+            idle += 1
+            if idle > 150:  # ~30s without progress -> give up
+                break
+            time.sleep(0.2)
+        handler.wfile.write(b"0\r\n\r\n")
+        handler.wfile.flush()
+        return True
+    except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+        return True
+    finally:
+        try:
+            f.close()
+        except Exception:
+            pass
+
+
 def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
     """ffmpeg -> socket (chunked) while teeing into the cache file.
 
@@ -442,6 +502,9 @@ def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
            "-c:a", "libmp3lame", "-b:a", f"{bitrate}k", "-f", "mp3", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=65536)
     tmp = f"{cache_path}.{threading.get_ident()}.part.mp3"
+    done_evt = threading.Event()
+    with _sc_active_lock:
+        _sc_active_transcodes[cache_path] = {"part": tmp, "done": done_evt}
     fh = None
     try:
         fh = open(tmp, "wb")
@@ -483,6 +546,9 @@ def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
     except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
         pass
     finally:
+        with _sc_active_lock:
+            _sc_active_transcodes.pop(cache_path, None)
+        done_evt.set()
         finished = False
         try:
             proc.wait(timeout=5)
@@ -1246,6 +1312,13 @@ class AudioHandler(BaseHTTPRequestHandler):
                 if not file_to_stream and not is_head:
                     info = resolve_sc_stream_info(sc_url, bitrate)
                     if info:
+                        # Кто-то уже качает/конвертирует этот трек? Подключаемся к его
+                        # растущему файлу, а не ждём блокировку и не запускаем второй ffmpeg.
+                        with _sc_active_lock:
+                            active = _sc_active_transcodes.get(info['cache_path'])
+                        if active:
+                            if stream_growing_file(self, active):
+                                return
                         handled = False
                         with get_url_lock(lock_url):
                             cached_now = find_cached_sc_file(sc_url, bitrate)
@@ -1253,7 +1326,7 @@ class AudioHandler(BaseHTTPRequestHandler):
                                 file_to_stream = cached_now
                             elif info.get('progressive'):
                                 handled = stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path'))
-                            elif not range_header:
+                            else:
                                 stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
                                 handled = True
                         if handled:
