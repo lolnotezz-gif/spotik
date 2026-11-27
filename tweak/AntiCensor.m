@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.12-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112110
+#define ANTICENSOR_VERSION_STRING @"v5.6.13-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112111
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1595,7 +1595,7 @@ static void scAudioCachePruneLocked(void) {
     NSMutableArray *entries = [NSMutableArray array];
     unsigned long long total = 0;
     for (NSString *name in files) {
-        if (!([name hasSuffix:@".mp3"] || [name hasSuffix:@".m4a"])) continue;
+        if (!([name hasSuffix:@".mp3"] || [name hasSuffix:@".m4a"] || [name hasSuffix:@".ts"] || [name hasSuffix:@".mp4"])) continue;
         NSString *full = [dir stringByAppendingPathComponent:name];
         NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
         unsigned long long size = [attrs fileSize];
@@ -1622,7 +1622,180 @@ static void scAudioCachePruneLocked(void) {
 
 // Скачиваем аудио в фоне и кладём в постоянный кэш
 // Единый вход кэширования: mp3 качаем как файл, HLS экспортируем в .m4a нативно.
+// --- Р‘РµР·РѕРїР°СЃРЅС‹Р№ РѕС„С„Р»Р°Р№РЅ-РєСЌС€: HLS РєР°С‡Р°РµРј СЃРµРіРјРµРЅС‚Р°РјРё, Р‘Р•Р— AVAssetExportSession ---
+// AVAssetExportSession РЅР° HLS-РїРѕС‚РѕРєРµ РІР°Р»РёР» РїСЂРёР»РѕР¶РµРЅРёРµ (РєСЂСЌС€ С‡РµСЂРµР· ~10 СЃ РїРѕСЃР»Рµ СЃС‚Р°СЂС‚Р°),
+// РїРѕСЌС‚РѕРјСѓ СЃРµРіРјРµРЅС‚С‹ СЃРєР°С‡РёРІР°СЋС‚СЃСЏ РІСЂСѓС‡РЅСѓСЋ Рё СЃРєР»РµРёРІР°СЋС‚СЃСЏ РІ РѕРґРёРЅ .ts/.mp4 РЅР° РґРёСЃРєРµ.
+static BOOL g_audioCacheEnabledFlag = YES;
+static BOOL g_audioCacheFlagLoaded = NO;
+
+static BOOL isAudioCacheEnabled(void) {
+    if (!g_audioCacheFlagLoaded) {
+        g_audioCacheFlagLoaded = YES;
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        g_audioCacheEnabledFlag = ([d objectForKey:@"AntiCensor_AudioCacheEnabled"] != nil)
+            ? [d boolForKey:@"AntiCensor_AudioCacheEnabled"] : YES;
+    }
+    return g_audioCacheEnabledFlag;
+}
+
+static void setAudioCacheEnabled(BOOL enabled) {
+    g_audioCacheEnabledFlag = enabled;
+    g_audioCacheFlagLoaded = YES;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"AntiCensor_AudioCacheEnabled"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static dispatch_queue_t scHLSQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        q = dispatch_queue_create("anticensor.hls.cache", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+static void scHLSCacheFinishFail(NSString *key, NSString *partPath) {
+    if (partPath.length > 0) [[NSFileManager defaultManager] removeItemAtPath:partPath error:nil];
+    if (!g_scAudioCacheLock) g_scAudioCacheLock = [[NSLock alloc] init];
+    [g_scAudioCacheLock lock];
+    [g_scAudioCacheInflight removeObject:key ?: @""];
+    [g_scAudioCacheLock unlock];
+}
+
+static void scHLSCacheSegments(NSString *trackUrl, NSString *playlistUrl, NSString *key) {
+    if (!isAudioCacheEnabled()) return;
+    NSURL *plURL = [NSURL URLWithString:playlistUrl ?: @""];
+    if (!plURL) return;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:plURL];
+    req.timeoutInterval = 20.0;
+    [req setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *plData, NSURLResponse *plResp, NSError *plErr) {
+        NSString *pl = plData ? [[NSString alloc] initWithData:plData encoding:NSUTF8StringEncoding] : nil;
+        if (!pl || pl.length < 20) {
+            NSLog(@"[AntiCensor] HLS playlist unavailable: %@", plErr);
+            scHLSCacheFinishFail(key, nil);
+            return;
+        }
+        NSMutableArray<NSString *> *segs = [NSMutableArray array];
+        NSString *initURI = nil;
+        BOOL encrypted = NO;
+        for (NSString *rawLine in [pl componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+            NSString *line = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (line.length == 0) continue;
+            if ([line hasPrefix:@"#EXT-X-KEY"]) {
+                if (![line containsString:@"METHOD=NONE"]) encrypted = YES;
+                continue;
+            }
+            if ([line hasPrefix:@"#EXT-X-MAP"]) {
+                NSRange r = [line rangeOfString:@"URI=\""];
+                if (r.location != NSNotFound) {
+                    NSUInteger from = r.location + r.length;
+                    NSRange q = [line rangeOfString:@"\"" options:0 range:NSMakeRange(from, line.length - from)];
+                    if (q.location != NSNotFound) initURI = [line substringWithRange:NSMakeRange(from, q.location - from)];
+                }
+                continue;
+            }
+            if ([line hasPrefix:@"#"]) continue;
+            [segs addObject:line];
+        }
+        if (encrypted || segs.count == 0 || segs.count > 4000) {
+            NSLog(@"[AntiCensor] HLS not cacheable (encrypted=%d segs=%lu)", encrypted, (unsigned long)segs.count);
+            scHLSCacheFinishFail(key, nil);
+            return;
+        }
+
+        BOOL fmp4 = (initURI != nil) || [[segs firstObject] containsString:@".m4s"] || [[segs firstObject] containsString:@".mp4"];
+        NSString *ext = fmp4 ? @"mp4" : @"ts";
+        NSString *dir = getSCAudioCacheDirectory();
+        NSString *finalName = [NSString stringWithFormat:@"%@.%@", key, ext];
+        NSString *finalPath = [dir stringByAppendingPathComponent:finalName];
+        NSString *partPath = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.part.%@", key, ext]];
+        [[NSFileManager defaultManager] removeItemAtPath:partPath error:nil];
+        [[NSFileManager defaultManager] createFileAtPath:partPath contents:nil attributes:nil];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:partPath];
+        if (!fh) {
+            scHLSCacheFinishFail(key, partPath);
+            return;
+        }
+
+        __block void (^fetchNext)(NSUInteger);
+        __block unsigned long long totalBytes = 0;
+        __block BOOL failed = NO;
+        NSMutableArray<NSString *> *queue = [NSMutableArray array];
+        if (fmp4 && initURI.length > 0) [queue addObject:initURI];
+        [queue addObjectsFromArray:segs];
+
+        fetchNext = ^(NSUInteger i) {
+            if (failed) return;
+            if (i >= queue.count) {
+                [fh closeFile];
+                unsigned long long size = [[[[NSFileManager defaultManager] attributesOfItemAtPath:partPath error:nil] objectForKey:NSFileSize] unsignedLongLongValue];
+                if (size < 60000) {
+                    scHLSCacheFinishFail(key, partPath);
+                    return;
+                }
+                [[NSFileManager defaultManager] removeItemAtPath:finalPath error:nil];
+                NSError *mvErr = nil;
+                if (![[NSFileManager defaultManager] moveItemAtPath:partPath toPath:finalPath error:&mvErr]) {
+                    NSLog(@"[AntiCensor] HLS cache move failed: %@", mvErr);
+                    scHLSCacheFinishFail(key, partPath);
+                    return;
+                }
+                dispatch_sync(scAudioCacheQueue(), ^{
+                    [g_scAudioCacheLock lock];
+                    scAudioCacheMapLocked()[key] = finalName;
+                    scAudioCachePersistLocked();
+                    scAudioCachePruneLocked();
+                    [g_scAudioCacheLock unlock];
+                });
+                NSLog(@"[AntiCensor] HLS cached offline (%.1f MB, %lu segments)", size / 1048576.0, (unsigned long)queue.count);
+                [g_scAudioCacheLock lock];
+                [g_scAudioCacheInflight removeObject:key];
+                [g_scAudioCacheLock unlock];
+                return;
+            }
+            NSString *rel = queue[i];
+            NSURL *segURL = [NSURL URLWithString:rel relativeToURL:plURL];
+            if (!segURL) {
+                failed = YES;
+                [fh closeFile];
+                scHLSCacheFinishFail(key, partPath);
+                return;
+            }
+            [[[NSURLSession sharedSession] dataTaskWithURL:segURL completionHandler:^(NSData *segData, NSURLResponse *segResp, NSError *segErr) {
+                if (failed) return;
+                if (!segData || segData.length == 0 || segErr) {
+                    failed = YES;
+                    [fh closeFile];
+                    scHLSCacheFinishFail(key, partPath);
+                    return;
+                }
+                @try {
+                    [fh writeData:segData];
+                } @catch (id ex) {
+                    failed = YES;
+                    [fh closeFile];
+                    scHLSCacheFinishFail(key, partPath);
+                    return;
+                }
+                totalBytes += segData.length;
+                if (totalBytes > 120ULL * 1024 * 1024) {   // РїСЂРµРґРѕС…СЂР°РЅРёС‚РµР»СЊ
+                    failed = YES;
+                    [fh closeFile];
+                    scHLSCacheFinishFail(key, partPath);
+                    return;
+                }
+                fetchNext(i + 1);
+            }] resume];
+        };
+        fetchNext(0);
+    }] resume];
+}
+
 static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrlString) {
+    if (!isAudioCacheEnabled()) return;
     if (trackUrl.length < 8 || mediaUrlString.length < 8) return;
     NSString *lowMedia = mediaUrlString.lowercaseString;
     if (![lowMedia hasPrefix:@"http"]) return;
@@ -1639,58 +1812,9 @@ static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrl
     [g_scAudioCacheInflight addObject:key];
     [g_scAudioCacheLock unlock];
 
-    BOOL isHLS = ([lowMedia containsString:@".m3u8"] || [lowMedia containsString:@"mpegurl"]);
-    if (isHLS) {
-        // HLS: AVPlayer умеет играть поток, но файла на диске нет. Экспортируем
-        // поток в .m4a через AVAssetExportSession — дальше трек играет с диска.
-        NSURL *assetURL = [NSURL URLWithString:mediaUrlString];
-        if (!assetURL) {
-            [g_scAudioCacheLock lock];
-            [g_scAudioCacheInflight removeObject:key];
-            [g_scAudioCacheLock unlock];
-            return;
-        }
-        AVURLAsset *exportAsset = [AVURLAsset URLAssetWithURL:assetURL options:nil];
-        AVAssetExportSession *exporter = [[AVAssetExportSession alloc] initWithAsset:exportAsset
-                                                                         presetName:AVAssetExportPresetAppleM4A];
-        NSString *dir = getSCAudioCacheDirectory();
-        NSString *m4aName = [NSString stringWithFormat:@"%@.m4a", key];
-        NSString *dest = [dir stringByAppendingPathComponent:m4aName];
-        NSString *tmp = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.part.m4a", key]];
-        [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
-        exporter.outputURL = [NSURL fileURLWithPath:tmp];
-        exporter.outputFileType = AVFileTypeAppleM4A;
-        exporter.shouldOptimizeForNetworkUse = YES;
-        [exporter exportAsynchronouslyWithCompletionHandler:^{
-            BOOL okExport = (exporter.status == AVAssetExportSessionStatusCompleted);
-            unsigned long long size = 0;
-            if (okExport) {
-                size = [[[[NSFileManager defaultManager] attributesOfItemAtPath:tmp error:nil] objectForKey:NSFileSize] unsignedLongLongValue];
-                okExport = (size > 60000);
-            }
-            if (okExport) {
-                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
-                NSError *mvErr = nil;
-                okExport = [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:dest error:&mvErr];
-                if (!okExport) NSLog(@"[AntiCensor] HLS export move failed: %@", mvErr);
-            }
-            if (okExport) {
-                dispatch_sync(scAudioCacheQueue(), ^{
-                    [g_scAudioCacheLock lock];
-                    scAudioCacheMapLocked()[key] = m4aName;
-                    scAudioCachePersistLocked();
-                    scAudioCachePruneLocked();
-                    [g_scAudioCacheLock unlock];
-                });
-                NSLog(@"[AntiCensor] HLS track cached as m4a (%.1f MB) — offline ready", size / 1048576.0);
-            } else {
-                [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
-                NSLog(@"[AntiCensor] HLS export failed: %@ (%ld)", exporter.error, (long)exporter.status);
-            }
-            [g_scAudioCacheLock lock];
-            [g_scAudioCacheInflight removeObject:key];
-            [g_scAudioCacheLock unlock];
-        }];
+    // HLS-РїРѕС‚РѕРє (.m3u8): РєР°С‡Р°РµРј СЃРµРіРјРµРЅС‚С‹ Рё СЃРєР»РµРёРІР°РµРј РІ С„Р°Р№Р» вЂ” Р±РµР· AVFoundation-СЌРєСЃРїРѕСЂС‚Р°
+    if ([lowMedia containsString:@".m3u8"] || [lowMedia containsString:@"mpegurl"]) {
+        scHLSCacheSegments(trackUrl, mediaUrlString, key);
         return;
     }
 
@@ -1706,35 +1830,39 @@ static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrl
     req.timeoutInterval = 60.0;
 
     [[[NSURLSession sharedSession] downloadTaskWithRequest:req completionHandler:^(NSURL *location, NSURLResponse *resp, NSError *err) {
-        NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
-        BOOL ok = (!err && location && (!http || http.statusCode == 200 || http.statusCode == 206));
-        unsigned long long size = 0;
-        if (ok) {
-            NSNumber *len = [[[NSFileManager defaultManager] attributesOfItemAtPath:location.path error:nil] objectForKey:NSFileSize];
-            size = len.unsignedLongLongValue;
-            if (size < 60000) ok = NO; // битый/пустой ответ
-        }
-        if (ok) {
-            NSString *dir = getSCAudioCacheDirectory();
-            NSString *name = [NSString stringWithFormat:@"%@.mp3", key];
-            NSString *dest = [dir stringByAppendingPathComponent:name];
-            NSError *mvErr = nil;
-            [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
-            if (![[NSFileManager defaultManager] moveItemAtPath:location.path toPath:dest error:&mvErr]) {
-                ok = NO;
-                NSLog(@"[AntiCensor] SC cache move failed: %@", mvErr);
-            } else {
-                dispatch_sync(scAudioCacheQueue(), ^{
-                    [g_scAudioCacheLock lock];
-                    scAudioCacheMapLocked()[key] = name;
-                    scAudioCachePersistLocked();
-                    scAudioCachePruneLocked();
-                    [g_scAudioCacheLock unlock];
-                });
-                NSLog(@"[AntiCensor] SC track cached locally (%.1f MB) for instant replay", size / 1048576.0);
+        @try {
+            NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+            BOOL ok = (!err && location && (!http || http.statusCode == 200 || http.statusCode == 206));
+            unsigned long long size = 0;
+            if (ok) {
+                NSNumber *len = [[[NSFileManager defaultManager] attributesOfItemAtPath:location.path error:nil] objectForKey:NSFileSize];
+                size = len.unsignedLongLongValue;
+                if (size < 60000) ok = NO;
             }
-        } else {
-            NSLog(@"[AntiCensor] SC cache download skipped: %@ status=%ld", err, (long)http.statusCode);
+            if (ok) {
+                NSString *dir = getSCAudioCacheDirectory();
+                NSString *name = [NSString stringWithFormat:@"%@.mp3", key];
+                NSString *dest = [dir stringByAppendingPathComponent:name];
+                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+                NSError *mvErr = nil;
+                if (![[NSFileManager defaultManager] moveItemAtPath:location.path toPath:dest error:&mvErr]) {
+                    ok = NO;
+                    NSLog(@"[AntiCensor] SC cache move failed: %@", mvErr);
+                } else {
+                    dispatch_sync(scAudioCacheQueue(), ^{
+                        [g_scAudioCacheLock lock];
+                        scAudioCacheMapLocked()[key] = name;
+                        scAudioCachePersistLocked();
+                        scAudioCachePruneLocked();
+                        [g_scAudioCacheLock unlock];
+                    });
+                    NSLog(@"[AntiCensor] SC track cached (%.1f MB) вЂ” offline ready", size / 1048576.0);
+                }
+            } else {
+                NSLog(@"[AntiCensor] SC cache skipped: %@ status=%ld", err, (long)http.statusCode);
+            }
+        } @catch (id ex) {
+            NSLog(@"[AntiCensor] SC cache exception: %@", ex);
         }
         [g_scAudioCacheLock lock];
         [g_scAudioCacheInflight removeObject:key];
@@ -1748,7 +1876,7 @@ static unsigned long long scAudioCacheTotalBytes(void) {
     NSArray *files = [fm contentsOfDirectoryAtPath:getSCAudioCacheDirectory() error:nil];
     unsigned long long total = 0;
     for (NSString *name in files) {
-        if (!([name hasSuffix:@".mp3"] || [name hasSuffix:@".m4a"])) continue;
+        if (!([name hasSuffix:@".mp3"] || [name hasSuffix:@".m4a"] || [name hasSuffix:@".ts"] || [name hasSuffix:@".mp4"])) continue;
         total += [[fm attributesOfItemAtPath:[getSCAudioCacheDirectory() stringByAppendingPathComponent:name] error:nil] fileSize];
     }
     return total;
@@ -5165,7 +5293,8 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
             // Кэшируем не раньше, чем трек реально заиграл: иначе на слабом интернете
             // фоновое скачивание отбирает полосу у воспроизведения и вызывает заикания.
             __block int attempts = 0;
-            void (^tryCache)(void) = ^{
+            __block void (^tryCache)(void) = nil;
+            tryCache = ^{
                 attempts++;
                 if (!expectedUrl || ![expectedUrl isEqualToString:currentPlayingUrl ?: @""]) return;
                 if (!ourAudioPlayer || ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
@@ -6363,6 +6492,19 @@ static void showAntiCensorMainOptionsDialog(NSString *targetURI, NSString *targe
             triggerAntiCensorOTACheck(YES);
         }];
         [sheet addAction:otaAction];
+
+        // 5.7 Оффлайн-кэш аудио (аварийный выключатель, если что-то падает)
+        BOOL cacheOn = isAudioCacheEnabled();
+        unsigned long long cacheBytes = scAudioCacheTotalBytes();
+        NSString *cacheTitle = [NSString stringWithFormat:@"💾 Оффлайн-кэш: %@ (%.0f МБ)",
+                                cacheOn ? @"ВКЛ" : @"ВЫКЛ", cacheBytes / 1048576.0];
+        UIAlertAction *cacheAction = [UIAlertAction actionWithTitle:cacheTitle
+                                                              style:UIAlertActionStyleDefault
+                                                            handler:^(UIAlertAction * _Nonnull a) {
+            setAudioCacheEnabled(!cacheOn);
+            showAntiCensorToast(cacheOn ? @"💾 Кэш выключен" : @"💾 Кэш включён");
+        }];
+        [sheet addAction:cacheAction];
 
         // 6. Список всех замен
         UIAlertAction *manageAction = [UIAlertAction actionWithTitle:@"⚙️ Список всех замен и текстов"
