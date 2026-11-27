@@ -5,7 +5,7 @@ TOKEN = "9229103805:AAGg97RS7iF9qfkypwjxYUTHyt883ZZpTvM"
 CHAT_ID = -1004210923223
 API_BASE = f"https://api.telegram.org/bot{TOKEN}"
 
-SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.9-OTA: МГНОВЕННЫЙ СТАРТ SOUNDCLOUD НА СЛАБОМ МОБИЛЬНОМ ИНТЕРНЕТЕ!</b> ⚡️
+SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.11-OTA: МГНОВЕННЫЙ СТАРТ SOUNDCLOUD НА СЛАБОМ МОБИЛЬНОМ ИНТЕРНЕТЕ!</b> ⚡️
 
 ══════════════════════════════
 🛠 <b>ЧТО ПОФИКШЕНО:</b>
@@ -21,7 +21,7 @@ SUMMARY_TEXT = """⚡️ <b>AntiCensor v5.6.9-OTA: МГНОВЕННЫЙ СТАР
    • Тап по строке текста мгновенно прыгает на нужный тайминг (убрана 2-сек блокировка при открытии экрана + быстрее seek).
 
 ══════════════════════════════
-📦 <b>Файл AntiCensor.dylib (v5.6.9-OTA, Build 2026112107) прикреплён ниже!</b>"""
+📦 <b>Файл AntiCensor.dylib (v5.6.11-OTA, Build 2026112109) прикреплён ниже!</b>"""
 
 def send_report(dylib_path):
     print("Posting report to Telegram...")
@@ -40,7 +40,7 @@ def send_report(dylib_path):
             files = {"document": ("AntiCensor.dylib", f, "application/octet-stream")}
             data = {
                 "chat_id": CHAT_ID,
-                "caption": "🚀 <b>AntiCensor.dylib (v5.6.9-OTA, Build 2026112107)</b>\nПроксирование SoundCloud без перекодирования, прогрев сервера, локальный кэш аудио",
+                "caption": "🚀 <b>AntiCensor.dylib (v5.6.11-OTA, Build 2026112109)</b>\nРезолв через мост + прямое аудио с CDN SoundCloud, локальный кэш, прогрев сервера",
                 "parse_mode": "HTML"
             }
             r_doc = requests.post(f"{API_BASE}/sendDocument", data=data, files=files)
