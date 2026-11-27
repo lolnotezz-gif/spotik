@@ -1261,6 +1261,19 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
 
+        if parsed.path == '/resolve' and 'url' in params:
+            # Только резолв: отдаём прямой CDN-URL SoundCloud, чтобы телефон качал
+            # аудио напрямую (мгновенный старт), а не через transcode на сервере.
+            try:
+                info = resolve_sc_stream_info(params['url'][0], 128)
+                if info and info.get('url'):
+                    self.send_json(200, {"url": info['url'], "progressive": bool(info.get('progressive'))}, is_head=is_head)
+                else:
+                    self.send_json(404, {"error": "not resolved"}, is_head=is_head)
+            except Exception as e:
+                self.send_json(500, {"error": str(e)}, is_head=is_head)
+            return
+
         if parsed.path == '/preload' and 'url' in params:
             sc_url = params['url'][0]
             threading.Thread(target=resolve_sc_to_file, args=(sc_url,), daemon=True).start()

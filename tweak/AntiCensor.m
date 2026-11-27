@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.9-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112107
+#define ANTICENSOR_VERSION_STRING @"v5.6.10-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112108
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1774,12 +1774,48 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         NSMutableCharacterSet *scAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
         [scAllowed removeCharactersInString:@":/?&=#+"];
         NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:scAllowed];
-        // Адаптация под слабый интернет: на медленной связи просим меньший битрейт
-        int br = (g_lastNetworkLatencyMs > 2000.0) ? 96 : (g_lastNetworkLatencyMs > 800.0) ? 128 : 192;
-        NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@&br=%d", server, encoded, br]];
-        NSLog(@"[AntiCensor] SoundCloud playback via Render fallback: %@", renderUrl);
-        // СТРОГО: НЕ сохраняем Render ссылки в постоянный диск-кеш!
-        if (completion) completion(renderUrl);
+
+        // ГЛАВНЫЙ ПУТЬ ДЛЯ СЛАБОГО МОБИЛЬНОГО ИНТЕРНЕТА:
+        // просим у моста только ПРЯМОЙ CDN-адрес SoundCloud (это ~1 КБ JSON за 0.3-1 с),
+        // а само аудио телефон тянет напрямую с CDN — без перекодирования на сервере,
+        // без холодного старта и без обрывов длинных стримов.
+        void (^legacyTranscodeFallback)(void) = ^{
+            int br = (g_lastNetworkLatencyMs > 2000.0) ? 96 : (g_lastNetworkLatencyMs > 800.0) ? 128 : 192;
+            NSURL *renderUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@&br=%d", server, encoded, br]];
+            NSLog(@"[AntiCensor] Last-resort server transcode: %@", renderUrl);
+            if (completion) completion(renderUrl);
+        };
+
+        NSURL *resolveUrl = [NSURL URLWithString:[NSString stringWithFormat:@"%@/resolve?url=%@", server, encoded]];
+        if (!resolveUrl) {
+            legacyTranscodeFallback();
+            return;
+        }
+        NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:resolveUrl];
+        [rq setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+        [rq setTimeoutInterval:12.0];
+        [[[NSURLSession sharedSession] dataTaskWithRequest:rq completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if (data && !err) {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                id media = [json isKindOfClass:[NSDictionary class]] ? json[@"url"] : nil;
+                if ([media isKindOfClass:[NSString class]] && [(NSString *)media length] > 10) {
+                    NSURL *direct = [NSURL URLWithString:(NSString *)media];
+                    if (direct) {
+                        g_streamCache[rawUrl] = direct;
+                        g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+                        if (clean.length > 0) {
+                            g_streamCache[clean] = direct;
+                            g_streamCacheTimestamps[clean] = @([NSDate timeIntervalSinceReferenceDate]);
+                        }
+                        NSLog(@"[AntiCensor] Resolved via bridge -> direct SoundCloud CDN (no transcode)");
+                        if (completion) completion(direct);
+                        return;
+                    }
+                }
+            }
+            NSLog(@"[AntiCensor] bridge resolve failed (%@), falling back to server transcode", err);
+            legacyTranscodeFallback();
+        }] resume];
     };
 
     // SoundCloud API v2 резолвер
