@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.16-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112114
+#define ANTICENSOR_VERSION_STRING @"v5.6.17-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112115
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -56,6 +56,8 @@ static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double in
 static void stopReplacementAudio(void);
 static void safeSeekPlayerToTime(double targetSeconds);
 static void showAntiCensorToast(NSString *text);
+static void retryReplacementPlayback(void);
+static int g_retryAttempt = 0;
 static NSMutableDictionary<NSString *, NSURL *> *g_streamCache;
 static NSMutableDictionary<NSString *, NSNumber *> *g_streamCacheTimestamps;
 static void loadStreamCacheFromDisk(void);
@@ -2555,6 +2557,7 @@ static void safeSeekPlayerToTime(double targetSeconds) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!ourAudioPlayer) return;
                 ourAudioPlayer.volume = 1.0f;
+                g_retryAttempt = 0;
                 if (isSpotifyCurrentlyPlaying) {
                     [ourAudioPlayer play];
                 } else {
@@ -2565,34 +2568,11 @@ static void safeSeekPlayerToTime(double targetSeconds) {
         } else if (item.status == AVPlayerItemStatusFailed) {
             NSLog(@"[AntiCensor] AVPlayerItem failed: %@", item.error);
             dispatch_async(dispatch_get_main_queue(), ^{
-                // Один аварийный переход на серверный MP3, без циклов.
-                if (!g_serverFallbackUsed) {
-                    NSString *scPage = currentPlayingUrl ?: @"";
-                    if (![scPage.lowercaseString containsString:@"soundcloud"]) {
-                        scPage = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist) ?: @"";
-                    }
-                    if (scPage.length > 8) {
-                        g_serverFallbackUsed = YES;
-                        if (g_streamCache) {
-                            [g_streamCache removeObjectForKey:scPage];
-                            if (g_streamCacheTimestamps) [g_streamCacheTimestamps removeObjectForKey:scPage];
-                            saveStreamCacheToDisk();
-                        }
-                        int br = (g_lastNetworkLatencyMs > 2000.0) ? 64 : (g_lastNetworkLatencyMs > 800.0) ? 96 : 128;
-                        NSString *server = getServerURL();
-                        NSString *clean = [scPage componentsSeparatedByString:@"?"].firstObject;
-                        NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
-                        [allowed removeCharactersInString:@":/?&=#+"];
-                        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-                        NSURL *fallbackURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@&br=%d", server, encoded, br]];
-                        NSLog(@"[AntiCensor] Item failed -> server MP3 fallback: %@", fallbackURL);
-                        if (fallbackURL && currentPlayingKey) playStreamUrl(fallbackURL, currentPlayingKey, 0.0);
-                        return;
-                    }
-                }
-                // Совсем не вышло — отдаём оригинал, вместо бесконечной тишины
-                stopReplacementAudio();
-                showAntiCensorToast(@"⚠️ Замена не загрузилась — играет оригинал Spotify");
+                // Реагируем только на падение АКТУАЛЬНОГО элемента
+                if (!ourAudioPlayer || item != ourAudioPlayer.currentItem) return;
+                // НИКАКОГО возврата на Spotify-оригинал: он остаётся заглушённым,
+                // а замена перезапускается с новым медиа-URL.
+                retryReplacementPlayback();
             });
         }
     }
@@ -5367,13 +5347,13 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     if (@available(iOS 10.0, *)) {
         // Адаптивный буфер вперед для слабого интернета (чем хуже связь — тем больше буфер)
         if (g_lastNetworkLatencyMs > 2000.0) {
-            item.preferredForwardBufferDuration = 12.0;   // 2G/EDGE
+            item.preferredForwardBufferDuration = 15.0;   // 2G/EDGE
         } else if (g_lastNetworkLatencyMs > 800.0) {
-            item.preferredForwardBufferDuration = 8.0;    // 3G
+            item.preferredForwardBufferDuration = 10.0;   // 3G
         } else if (g_lastNetworkLatencyMs > 400.0) {
-            item.preferredForwardBufferDuration = 4.0;    // средняя связь
+            item.preferredForwardBufferDuration = 6.0;    // средняя связь
         } else {
-            item.preferredForwardBufferDuration = 2.0;    // LTE/WiFi
+            item.preferredForwardBufferDuration = 3.0;    // LTE/WiFi
         }
     }
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
@@ -5384,9 +5364,8 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
         ourAudioPlayer.automaticallyWaitsToMinimizeStalling = (g_lastNetworkLatencyMs > 400.0);
     }
 
-    // Прямой HLS обычно стартует за 1-3 с. Если за 3.5 с звук не пошёл —
-    // заранее готовим серверный MP3, чтобы аварийный переход был мгновенным.
-    if (urlLooksHLS(streamUrl.absoluteString) && currentPlayingUrl.length > 8) {
+    // Серверный прогрев отключён: SoundCloud отдаёт Render 403, /warm бесполезен.
+    if (NO && urlLooksHLS(streamUrl.absoluteString) && currentPlayingUrl.length > 8) {
         NSString *warmKey = [trackKey copy];
         NSString *warmSc = [currentPlayingUrl copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -5441,9 +5420,8 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     }
     updateNowPlayingCenter();
 
-    // АНТИ-ЗАВИСАНИЕ (без циклов!): если звук не пошёл за 12 секунд —
-    // один раз переключаемся на надёжный MP3 с сервера. Если и он не заиграл —
-    // снимаем мьют и отдаём оригинал, чтобы не было бесконечной тишины.
+    // АНТИ-ЗАВИСАНИЕ: если звук не пошёл за 12 секунд — перезапускаем заново
+    // (свежий URL, растущая пауза). Spotify НЕ размьючиваем и на оригинал НЕ откатываем.
     NSString *watchKey = [trackKey copy] ?: @"";
     NSString *watchUrl = [currentPlayingUrl copy] ?: @"";
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -5456,116 +5434,9 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
             if (isnan(progressed)) progressed = 0.0;
         }
         if (progressed > 0.5) return;
-
-        // Если звук уже играл (позиция ушла вперёд) — не сбрасываем его
-        if (g_serverFallbackUsed) {
-            // Второй раз не перезапускаем — просто возвращаем оригинал и говорим об этом
-            NSLog(@"[AntiCensor] Replacement never started; restoring Spotify audio");
-            stopReplacementAudio();
-            showAntiCensorToast(@"⚠️ Замена не загрузилась — играет оригинал Spotify");
-            return;
-        }
-
-        NSString *scPage = watchUrl;
-        if (scPage.length < 8 || ![scPage.lowercaseString containsString:@"soundcloud"]) {
-            scPage = getOverrideForTrack(currentActiveSpotifyTrackURI, currentActiveSpotifyTrackTitle, currentActiveSpotifyTrackArtist) ?: @"";
-        }
-        if (scPage.length < 8) {
-            stopReplacementAudio();
-            return;
-        }
-
-        g_serverFallbackUsed = YES;
-        int br = (g_lastNetworkLatencyMs > 2000.0) ? 64 : (g_lastNetworkLatencyMs > 800.0) ? 96 : 128;
-        NSString *server = getServerURL();
-        NSString *clean = [scPage componentsSeparatedByString:@"?"].firstObject;
-        NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
-        [allowed removeCharactersInString:@":/?&=#+"];
-        NSString *encoded = [clean stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-        NSURL *fallbackURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@/sc?url=%@&br=%d", server, encoded, br]];
-        NSLog(@"[AntiCensor] Watchdog: switching to server MP3 (%d kbps) — %@", br, fallbackURL);
-        if (fallbackURL) playStreamUrl(fallbackURL, watchKey, 0.0);
-    });
-}
-
-static void startReplacementAudio(NSString *trackKey, NSString *scUrl, double initialPosition) {
-    if (!scUrl || scUrl.length == 0) return;
-
-    // КРИТИЧЕСКИЙ ФИКС: Если мы УЖЕ загружаем или играем этот трек — НИКОГДА не перезапускать его!
-    if ([trackKey isEqualToString:currentPlayingKey] && [scUrl isEqualToString:currentPlayingUrl]) {
-        if (isReplacementLoading) {
-            NSLog(@"[AntiCensor] Already resolving in background for %@, ignoring redundant call.", trackKey);
-            return;
-        }
-        if (ourAudioPlayer != nil) {
-            if (isSpotifyCurrentlyPlaying && ourAudioPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying && !g_isPlayerSeeking) {
-                [ourAudioPlayer play];
-            }
-            return;
-        }
-    }
-
-    if (![trackKey isEqualToString:currentPlayingKey]) { g_replacementRetryCount = 0; g_serverFallbackUsed = NO; }
-    currentPlayingKey = trackKey;
-    currentPlayingUrl = scUrl;
-    isReplacementLoading = YES;
-    g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];
-
-    // Spotify глушим сразу: Цензурный трек НИКОГДА не прорвется!
-    isMutingSpotify = YES;
-    applyMuteStateToAllUnits();
-
-    // Плавный переход: сразу гасим предыдущий трек, чтобы периодический тик
-    // не перезапускал его с начала во время асинхронного резолва нового.
-    if (ourAudioPlayer) {
-        if (isObservingPlayerItem) {
-            @try { [ourAudioPlayer.currentItem removeObserver:g_playerObserver forKeyPath:@"status" context:kStatusObserverContext]; } @catch (id ex) {}
-            isObservingPlayerItem = NO;
-        }
-        [ourAudioPlayer pause];
-        ourAudioPlayer = nil;
-    }
-
-    if (!g_streamCache || !g_streamCacheTimestamps) {
-        loadStreamCacheFromDisk();
-    }
-
-    NSURL *cached = g_streamCache[scUrl];
-    NSNumber *cachedTs = g_streamCacheTimestamps[scUrl];
-    if (cached) {
-        NSString *cStr = cached.absoluteString;
-        if ([cStr containsString:@"onrender.com"] || [cStr containsString:@"/sc?url="]) {
-            [g_streamCache removeObjectForKey:scUrl];
-            [g_streamCacheTimestamps removeObjectForKey:scUrl];
-        } else {
-            double maxAge = ([cStr containsString:@"soundcloud.cloud"] || [cStr containsString:@"sndcdn.com"]) ? 120.0 : 7200.0;
-            if (!cachedTs || ([NSDate timeIntervalSinceReferenceDate] - [cachedTs doubleValue] < maxAge)) {
-                isReplacementLoading = NO;
-                playStreamUrl(cached, trackKey, 0.0);
-                return;
-            } else {
-                [g_streamCache removeObjectForKey:scUrl];
-                [g_streamCacheTimestamps removeObjectForKey:scUrl];
-            }
-        }
-    }
-
-    // Разрешаем в фоне
-    resolveSoundCloudUrl(scUrl, ^(NSURL *streamUrl) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            isReplacementLoading = NO;
-            if (![trackKey isEqualToString:currentPlayingKey]) {
-                NSLog(@"[AntiCensor] Track changed while resolving %@, discarding.", trackKey);
-                return;
-            }
-            if (!streamUrl) {
-                NSLog(@"[AntiCensor] Stream URL not resolved for %@. Spotify stays 100%% MUTED!", trackKey);
-                isMutingSpotify = YES;
-                applyMuteStateToAllUnits();
-                return;
-            }
-            playStreamUrl(streamUrl, trackKey, 0.0);
-        });
+        NSLog(@"[AntiCensor] no audio after 12s -> retrying (was %@)", watchUrl.lastPathComponent);
+        g_retryAttempt = 0;
+        retryReplacementPlayback();
     });
 }
 
