@@ -1353,6 +1353,32 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.send_json(500, {"error": str(e)}, is_head=is_head)
             return
 
+        if parsed.path == '/debug2' and 'url' in params:
+            out = {"stage": "start"}
+            try:
+                sc = params['url'][0]
+                cid = get_sc_client_id()
+                out["client_id"] = cid[:10] + "..."
+                api = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(sc, safe='')}&client_id={cid}"
+                req = urllib.request.Request(api, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                try:
+                    with urllib.request.urlopen(req, timeout=12) as r:
+                        out["api_status"] = r.status
+                        out["api_body"] = r.read(200).decode('utf-8', 'replace')
+                except Exception as e:
+                    out["api_error"] = str(e)
+                    if hasattr(e, 'code'):
+                        out["api_status"] = e.code
+                    if hasattr(e, 'read'):
+                        try:
+                            out["api_body"] = e.read(200).decode('utf-8', 'replace')
+                        except Exception:
+                            pass
+            except Exception as e:
+                out["error"] = str(e)
+            self.send_json(200, out, is_head=is_head)
+            return
+
         if parsed.path == '/debug' and 'url' in params:
             # Диагностика: синхронно повторяем путь /sc и отдаём ошибку текстом
             out = {"ok": False, "stage": "start"}
