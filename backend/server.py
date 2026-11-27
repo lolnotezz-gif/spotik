@@ -1353,6 +1353,36 @@ class AudioHandler(BaseHTTPRequestHandler):
                 self.send_json(500, {"error": str(e)}, is_head=is_head)
             return
 
+        if parsed.path == '/debug' and 'url' in params:
+            # Диагностика: синхронно повторяем путь /sc и отдаём ошибку текстом
+            out = {"ok": False, "stage": "start"}
+            try:
+                sc_url = params['url'][0]
+                try:
+                    br = int(params.get('br', ['96'])[0])
+                except (ValueError, TypeError):
+                    br = 96
+                out["stage"] = "cached"
+                cached = find_cached_sc_file(sc_url, br)
+                out["cached"] = bool(cached)
+                out["stage"] = "stream_info"
+                info = resolve_sc_stream_info(sc_url, br)
+                out["info"] = bool(info)
+                if info:
+                    out["progressive"] = bool(info.get("progressive"))
+                    out["preset"] = info.get("preset")
+                out["stage"] = "transcode"
+                path = resolve_sc_to_file(sc_url, br)
+                out["path"] = path
+                out["size"] = os.path.getsize(path) if path else 0
+                out["ok"] = bool(path)
+            except Exception as e:
+                import traceback
+                out["error"] = f"{type(e).__name__}: {e}"
+                out["trace"] = traceback.format_exc()[-800:]
+            self.send_json(200, out, is_head=is_head)
+            return
+
         if parsed.path == '/warm' and 'url' in params:
             # Готовим серверный MP3 заранее (в фоне), чтобы аварийный переход
             # на сервер был мгновенным. Стрим клиенту не отдаётся.
