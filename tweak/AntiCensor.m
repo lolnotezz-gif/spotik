@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.10-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112108
+#define ANTICENSOR_VERSION_STRING @"v5.6.11-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112109
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1565,7 +1565,13 @@ static NSString *scCachedAudioPathForTrack(NSString *trackUrl) {
         [g_scAudioCacheLock unlock];
         if (name.length > 0) {
             NSString *full = [getSCAudioCacheDirectory() stringByAppendingPathComponent:name];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:full]) {
+            NSNumber *sizeNum = [[[NSFileManager defaultManager] attributesOfItemAtPath:full error:nil] objectForKey:NSFileSize];
+            if (sizeNum && sizeNum.unsignedLongLongValue < 60000) {
+                // обрезанный/битый файл: удаляем и качаем заново
+                [[NSFileManager defaultManager] removeItemAtPath:full error:nil];
+                name = nil;
+            }
+            if (name.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:full]) {
                 // обновляем mtime, чтобы LRU не удалил то, что реально слушают
                 [[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: [NSDate date]}
                                                  ofItemAtPath:full error:nil];
@@ -1612,7 +1618,10 @@ static void scAudioCachePruneLocked(void) {
 // Скачиваем аудио в фоне и кладём в постоянный кэш
 static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrlString) {
     if (trackUrl.length < 8 || mediaUrlString.length < 8) return;
-    if (![mediaUrlString.lowercaseString hasPrefix:@"http"]) return;
+    NSString *lowMedia = mediaUrlString.lowercaseString;
+    if (![lowMedia hasPrefix:@"http"]) return;
+    // HLS-плейлист (.m3u8) — это текст, а не аудио: кэшировать как mp3 нельзя
+    if ([lowMedia containsString:@".m3u8"] || [lowMedia containsString:@"mpegurl"]) return;
     NSString *key = scAudioCacheKey(trackUrl);
     if (scCachedAudioPathForTrack(trackUrl)) return;
 
