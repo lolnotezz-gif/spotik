@@ -396,9 +396,11 @@ def stream_progressive_proxy(handler, media_url, range_header=None, cache_path=N
                 fh.write(first)
             except OSError:
                 fh = None
+        completed = False
         while True:
             chunk = up.read(65536)
             if not chunk:
+                completed = True
                 break
             handler.wfile.write(chunk)
             if fh:
@@ -410,7 +412,11 @@ def stream_progressive_proxy(handler, media_url, range_header=None, cache_path=N
         if fh:
             try:
                 fh.close()
-                if os.path.getsize(tmp) > 50000:
+                # Кэшируем ТОЛЬКО полностью скачанный трек: обрыв клиента не должен
+                # оставлять в кэше обрезанный mp3 (иначе трек будет «кончаться» на середине).
+                expected = int(clen) if (clen and str(clen).isdigit()) else 0
+                size_ok = expected == 0 or os.path.getsize(tmp) >= expected
+                if completed and size_ok and os.path.getsize(tmp) > 50000:
                     os.replace(tmp, cache_path)
                     print(f"[AntiCensor] progressive proxy cached: {cache_path}", flush=True)
                 elif os.path.exists(tmp):
@@ -477,6 +483,12 @@ def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
     except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
         pass
     finally:
+        finished = False
+        try:
+            proc.wait(timeout=5)
+            finished = (proc.returncode == 0)
+        except Exception:
+            finished = False
         try:
             proc.kill()
         except Exception:
@@ -484,7 +496,8 @@ def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
         if fh:
             fh.close()
         try:
-            if wrote_any and fh and os.path.getsize(tmp) > 50000:
+            # Только успешно завершённый transcode попадает в кэш
+            if finished and wrote_any and fh and os.path.getsize(tmp) > 50000:
                 os.replace(tmp, cache_path)
                 print(f"[AntiCensor] chunked transcode cached: {cache_path}", flush=True)
             elif os.path.exists(tmp):
