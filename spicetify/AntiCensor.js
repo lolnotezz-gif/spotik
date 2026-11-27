@@ -1164,7 +1164,10 @@
       }
     }
 
-    if (info.title) {
+    // Матч по ОДНОМУ названию — только если артист неизвестен.
+    // Иначе любой чужой трек с похожим названием получал чужую замену (та самая
+    // «подвязалась замена, которую я не ставил»).
+    if (info.title && !info.artist) {
       const titleLower = normalizeKey(info.title);
       if (titleLower.length >= 2 && isPlayable(normMap[titleLower])) {
         return normMap[titleLower];
