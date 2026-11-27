@@ -225,6 +225,254 @@ def save_uploaded_audio_to_mp3(raw_bytes, ext_hint="mp3"):
                     pass
     return None, None
 
+# --- Instant-start streaming helpers -------------------------------------
+_sc_stream_cache = {}
+_sc_stream_lock = threading.Lock()
+SC_STREAM_TTL = 20 * 60  # media URLs are signed; keep them short-lived
+
+
+def find_cached_sc_file(raw_url, bitrate=192):
+    """Return an already fully transcoded MP3 for this URL (never blocks)."""
+    url = raw_url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
+    for br in (bitrate, 192, 128, 96, 64):
+        target = get_target_path(url, br)
+        if is_real_mp3(target):
+            return target
+    slug = re.sub(r'[^a-zA-Z0-9]', '_', url)[-50:].strip('_')
+    legacy = os.path.join(CACHE_DIR, f"{slug}.mp3")
+    if is_real_mp3(legacy):
+        return legacy
+    return None
+
+
+def resolve_sc_stream_info(raw_url, bitrate=192):
+    """Resolve SoundCloud -> direct media URL WITHOUT downloading/transcoding.
+
+    Returns dict(url=..., progressive=bool) or None. Cached for SC_STREAM_TTL.
+    """
+    url = raw_url.strip()
+    if any(d in url for d in ("on.soundcloud.com", "t.co", "bit.ly")):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                url = resp.geturl()
+        except Exception as e:
+            print("[AntiCensor] shortlink error:", e, flush=True)
+
+    clean = url.split("?")[0].strip().replace("m.soundcloud.com", "soundcloud.com")
+    now = time.time()
+    with _sc_stream_lock:
+        hit = _sc_stream_cache.get(clean)
+        if hit and now - hit["ts"] < SC_STREAM_TTL:
+            return hit
+
+    track_data = None
+    api = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(clean)}&client_id={SC_CLIENT_ID}"
+    try:
+        req = urllib.request.Request(api, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        track_data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
+    except Exception as e:
+        print(f"[AntiCensor] fast resolve API error ({clean}): {e}", flush=True)
+
+    trans = track_data.get('media', {}).get('transcodings', []) if track_data else []
+    auth = track_data.get('track_authorization') if track_data else None
+
+    if not trans:
+        try:
+            hreq = urllib.request.Request(clean, headers={'User-Agent': 'Mozilla/5.0 AppleWebKit/537.36'})
+            with urllib.request.urlopen(hreq, timeout=6) as h:
+                html = h.read().decode('utf-8', errors='ignore')
+            m = re.findall(r'<script>window\.__sc_hydration\s*=\s*(\[.*?\]);</script>', html)
+            if m:
+                for it in json.loads(m[0]):
+                    d = it.get('data')
+                    if isinstance(d, dict) and 'media' in d:
+                        trans = d.get('media', {}).get('transcodings', [])
+                        auth = d.get('track_authorization')
+                        break
+        except Exception as e:
+            print(f"[AntiCensor] fast hydration error: {e}", flush=True)
+
+    if not trans:
+        return None
+
+    def pick(proto, mime_part=None):
+        for t in trans:
+            f = t.get('format', {}) or {}
+            if f.get('protocol') != proto:
+                continue
+            if mime_part and mime_part not in (f.get('mime_type') or ''):
+                continue
+            if 'encrypted' in (f.get('protocol') or '') or 'skd:' in (t.get('url') or ''):
+                continue
+            return t
+        return None
+
+    chosen = pick('progressive', 'mpeg') or pick('progressive') or pick('hls', 'mpeg') or pick('hls')
+    if not chosen:
+        return None
+
+    progressive = (chosen.get('format', {}).get('protocol') == 'progressive')
+    stream_api = chosen['url'] + ('&' if '?' in chosen['url'] else '?') + f'client_id={SC_CLIENT_ID}'
+    if auth:
+        stream_api += f"&track_authorization={auth}"
+
+    try:
+        req = urllib.request.Request(stream_api, headers={'User-Agent': 'Mozilla/5.0'})
+        info = json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
+        media = info.get('url')
+    except Exception as e:
+        print(f"[AntiCensor] fast stream-url error: {e}", flush=True)
+        return None
+    if not media:
+        return None
+
+    result = {"url": media, "progressive": bool(progressive), "ts": now,
+              "cache_path": get_target_path(clean, bitrate)}
+    with _sc_stream_lock:
+        _sc_stream_cache[clean] = result
+    return result
+
+
+def _mp3_head_ok(chunk):
+    return chunk.startswith(b'ID3') or (len(chunk) >= 2 and chunk[0] == 0xFF and (chunk[1] & 0xE0) == 0xE0)
+
+
+def stream_progressive_proxy(handler, media_url, range_header=None, cache_path=None):
+    """Pipe SoundCloud's own progressive MP3 to the client 1:1 (zero transcode).
+
+    Also tees the full (non-range) stream into cache_path for instant replay.
+    """
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    if range_header:
+        headers['Range'] = range_header
+    up = urllib.request.urlopen(urllib.request.Request(media_url, headers=headers), timeout=15)
+    try:
+        status = getattr(up, 'status', 200)
+        if status not in (200, 206):
+            return False
+        first = up.read(4096)
+        if not _mp3_head_ok(first):
+            print("[AntiCensor] upstream is not raw MP3, falling back to transcode", flush=True)
+            return False
+        ctype = up.headers.get('Content-Type', 'audio/mpeg')
+        clen = up.headers.get('Content-Length')
+        crange = up.headers.get('Content-Range')
+
+        handler.send_response(206 if status == 206 else 200)
+        handler.send_cors()
+        handler.send_header('Content-Type', 'audio/mpeg' if 'mpeg' in (ctype or '') else ctype)
+        if crange:
+            handler.send_header('Content-Range', crange)
+        if clen:
+            handler.send_header('Content-Length', clen)
+        else:
+            handler.send_header('Connection', 'close')
+            handler.close_connection = True
+        handler.send_header('Accept-Ranges', 'bytes')
+        handler.send_header('Cache-Control', 'no-store')
+        handler.end_headers()
+        handler.wfile.write(first)
+        fh = None
+        tmp = None
+        if cache_path and not range_header and (not clen or int(clen) > 50000):
+            tmp = f"{cache_path}.{threading.get_ident()}.part.mp3"
+            try:
+                fh = open(tmp, "wb")
+                fh.write(first)
+            except OSError:
+                fh = None
+        while True:
+            chunk = up.read(65536)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+            if fh:
+                try:
+                    fh.write(chunk)
+                except OSError:
+                    pass
+        handler.wfile.flush()
+        if fh:
+            try:
+                fh.close()
+                if os.path.getsize(tmp) > 50000:
+                    os.replace(tmp, cache_path)
+                    print(f"[AntiCensor] progressive proxy cached: {cache_path}", flush=True)
+                elif os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+        return True
+    except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+        return True
+    finally:
+        try:
+            up.close()
+        except Exception:
+            pass
+
+
+def stream_transcode_chunked(handler, media_url, bitrate, cache_path):
+    """ffmpeg -> socket (chunked) while teeing into the cache file.
+
+    First audio bytes arrive in ~1-2s instead of after a full transcode.
+    """
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-i", media_url, "-vn",
+           "-c:a", "libmp3lame", "-b:a", f"{bitrate}k", "-f", "mp3", "pipe:1"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=65536)
+    tmp = f"{cache_path}.{threading.get_ident()}.part.mp3"
+    fh = None
+    try:
+        fh = open(tmp, "wb")
+    except OSError:
+        fh = None
+
+    handler.send_response(200)
+    handler.send_cors()
+    handler.send_header('Content-Type', 'audio/mpeg')
+    handler.send_header('Transfer-Encoding', 'chunked')
+    handler.send_header('Accept-Ranges', 'none')
+    handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+
+    wrote_any = False
+    try:
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                break
+            if not wrote_any:
+                if not _mp3_head_ok(chunk):
+                    print("[AntiCensor] transcode produced non-MP3 head!", flush=True)
+                wrote_any = True
+            if fh:
+                fh.write(chunk)
+            handler.wfile.write(b"%x\r\n" % len(chunk))
+            handler.wfile.write(chunk)
+            handler.wfile.write(b"\r\n")
+            handler.wfile.flush()
+        handler.wfile.write(b"0\r\n\r\n")
+        handler.wfile.flush()
+    except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+        pass
+    finally:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        if fh:
+            fh.close()
+        try:
+            if wrote_any and fh and os.path.getsize(tmp) > 50000:
+                os.replace(tmp, cache_path)
+                print(f"[AntiCensor] chunked transcode cached: {cache_path}", flush=True)
+            elif os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
 def resolve_sc_to_file(raw_url, bitrate=192):
     url = raw_url.strip()
 
@@ -769,6 +1017,8 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 class AudioHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format, *args):
         sys.stdout.write("[AntiCensor HTTP] %s - %s\n" % (self.address_string(), format % args))
         sys.stdout.flush()
@@ -945,14 +1195,30 @@ class AudioHandler(BaseHTTPRequestHandler):
         elif parsed.path == '/kugou' and 'hash' in params:
             file_to_stream = resolve_kugou_to_file(params['hash'][0])
         elif parsed.path == '/sc' and 'url' in params:
+            # Instant-start path: cached file -> direct proxy -> chunked transcode.
+            # Never block the first byte on a full transcode.
             try:
                 sc_url = params['url'][0]
                 try:
-                    bitrate = int(params.get('br', ['192'])[0])
+                    bitrate = int(params.get('br', ['128'])[0])
                 except (ValueError, TypeError):
-                    bitrate = 192
+                    bitrate = 128
                 bitrate = max(64, min(320, bitrate))
-                file_to_stream = resolve_sc_to_file(sc_url, bitrate)
+                range_header = self.headers.get('Range')
+
+                cached_file = find_cached_sc_file(sc_url, bitrate)
+                if cached_file:
+                    file_to_stream = cached_file
+                else:
+                    info = resolve_sc_stream_info(sc_url, bitrate)
+                    if info and info.get('progressive') and not is_head:
+                        if stream_progressive_proxy(self, info['url'], range_header, info.get('cache_path')):
+                            return
+                    if info and not is_head:
+                        stream_transcode_chunked(self, info['url'], bitrate, info['cache_path'])
+                        return
+                    # last resort: old blocking behaviour (also caches for next time)
+                    file_to_stream = resolve_sc_to_file(sc_url, bitrate)
             except Exception as e:
                 print("[AntiCensor] SC Resolve Error:", e, flush=True)
 
@@ -979,6 +1245,7 @@ class AudioHandler(BaseHTTPRequestHandler):
                         self.send_response(416)
                         self.send_cors()
                         self.send_header('Content-Range', f'bytes */{file_size}')
+                        self.send_header('Content-Length', '0')
                         self.end_headers()
                         return
                     length = end - start + 1

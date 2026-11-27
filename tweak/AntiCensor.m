@@ -21,8 +21,8 @@
 #define DEFAULTS_VERSION_KEY_36    @"AntiCensor_Storage_v3_6_Restore"
 #define DEFAULTS_VERSION_KEY_38    @"AntiCensor_Storage_v3_8_Fixes"
 #define DEFAULTS_VERSION_KEY_39    @"AntiCensor_Storage_v3_9_Fixes"
-#define ANTICENSOR_VERSION_STRING @"v5.6.8-OTA"
-#define ANTICENSOR_BUILD_NUMBER   2026112106
+#define ANTICENSOR_VERSION_STRING @"v5.6.9-OTA"
+#define ANTICENSOR_BUILD_NUMBER   2026112107
 
 #define DEFAULTS_VERSION_KEY_40    @"AntiCensor_Storage_v4_0_Sync"
 #define DEFAULTS_LYRICS_KEY        @"AntiCensor_Lyrics"
@@ -1484,6 +1484,208 @@ static void loadStreamCacheFromDisk(void) {
     }
 }
 
+#pragma mark - Persistent SoundCloud Audio Cache (instant start on weak mobile)
+
+// Скачанный один раз трек больше НИКОГДА не грузится из сети: старт мгновенный,
+// работает в метро/на EDGE, экономит трафик. Ограничение 700 МБ с LRU-чисткой.
+#define SC_AUDIO_CACHE_MAX_BYTES (700LL * 1024 * 1024)
+
+static NSMutableDictionary *g_scAudioCacheMap = nil;
+static NSMutableSet *g_scAudioCacheInflight = nil;
+static NSLock *g_scAudioCacheLock = nil;
+
+static dispatch_queue_t scAudioCacheQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        q = dispatch_queue_create("anticensor.sc.audiocache", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+static NSString *getSCAudioCacheDirectory(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *dir = [paths.firstObject stringByAppendingPathComponent:@"AntiCensor_SC_Cache"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    // Аудиокэш не должен раздувать iCloud-бэкап
+    static dispatch_once_t onceBackupFlag;
+    dispatch_once(&onceBackupFlag, ^{
+        NSURL *dirURL = [NSURL fileURLWithPath:dir isDirectory:YES];
+        [dirURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    });
+    return dir;
+}
+
+static NSString *getSCAudioCacheMapPath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    return [paths.firstObject stringByAppendingPathComponent:@"AntiCensor_SCCache.json"];
+}
+
+static NSString *scStableHash(NSString *s) {
+    uint64_t h = 1469598103934665603ULL;
+    const char *c = s.UTF8String;
+    while (c && *c) {
+        h ^= (unsigned char)*c++;
+        h *= 1099511628211ULL;
+    }
+    return [NSString stringWithFormat:@"%016llx", (unsigned long long)h];
+}
+
+static NSString *scAudioCacheKey(NSString *trackUrl) {
+    // Ключ не зависит от ?si=/utm_ и регистра: одна и та же ссылка SoundCloud = один файл
+    NSString *clean = [trackUrl componentsSeparatedByString:@"?"].firstObject.lowercaseString;
+    if (clean.length == 0) clean = trackUrl.lowercaseString;
+    return scStableHash(clean ?: trackUrl);
+}
+
+static NSMutableDictionary *scAudioCacheMapLocked(void) {
+    if (!g_scAudioCacheMap) {
+        NSData *d = [NSData dataWithContentsOfFile:getSCAudioCacheMapPath()];
+        id j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+        g_scAudioCacheMap = [j isKindOfClass:[NSDictionary class]] ? [j mutableCopy] : [NSMutableDictionary dictionary];
+    }
+    return g_scAudioCacheMap;
+}
+
+static void scAudioCachePersistLocked(void) {
+    if (!g_scAudioCacheMap) return;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:g_scAudioCacheMap options:0 error:nil];
+    if (data) [data writeToFile:getSCAudioCacheMapPath() atomically:YES];
+}
+
+// Возвращает путь к уже скачанному файлу трека (или nil)
+static NSString *scCachedAudioPathForTrack(NSString *trackUrl) {
+    if (trackUrl.length < 8) return nil;
+    NSString *key = scAudioCacheKey(trackUrl);
+    __block NSString *path = nil;
+    dispatch_sync(scAudioCacheQueue(), ^{
+        if (!g_scAudioCacheLock) g_scAudioCacheLock = [[NSLock alloc] init];
+        [g_scAudioCacheLock lock];
+        NSString *name = scAudioCacheMapLocked()[key];
+        [g_scAudioCacheLock unlock];
+        if (name.length > 0) {
+            NSString *full = [getSCAudioCacheDirectory() stringByAppendingPathComponent:name];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:full]) {
+                // обновляем mtime, чтобы LRU не удалил то, что реально слушают
+                [[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: [NSDate date]}
+                                                 ofItemAtPath:full error:nil];
+                path = full;
+            }
+        }
+    });
+    return path;
+}
+
+static void scAudioCachePruneLocked(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = getSCAudioCacheDirectory();
+    NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
+    if (files.count == 0) return;
+    NSMutableArray *entries = [NSMutableArray array];
+    unsigned long long total = 0;
+    for (NSString *name in files) {
+        if (![name hasSuffix:@".mp3"]) continue;
+        NSString *full = [dir stringByAppendingPathComponent:name];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+        unsigned long long size = [attrs fileSize];
+        NSDate *mtime = attrs[NSFileModificationDate] ?: [NSDate distantPast];
+        total += size;
+        [entries addObject:@{@"path": full, @"size": @(size), @"mtime": mtime, @"name": name}];
+    }
+    if (total <= SC_AUDIO_CACHE_MAX_BYTES) return;
+    [entries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"mtime"] compare:b[@"mtime"]];
+    }];
+    for (NSDictionary *e in entries) {
+        if (total <= (SC_AUDIO_CACHE_MAX_BYTES * 8 / 10)) break;
+        if ([fm removeItemAtPath:e[@"path"] error:nil]) {
+            total -= [e[@"size"] unsignedLongLongValue];
+            for (NSString *k in g_scAudioCacheMap.allKeys) {
+                if ([g_scAudioCacheMap[k] isEqualToString:e[@"name"]]) [g_scAudioCacheMap removeObjectForKey:k];
+            }
+            NSLog(@"[AntiCensor] SC cache pruned: %@", e[@"name"]);
+        }
+    }
+    scAudioCachePersistLocked();
+}
+
+// Скачиваем аудио в фоне и кладём в постоянный кэш
+static void scAudioCacheStoreInBackground(NSString *trackUrl, NSString *mediaUrlString) {
+    if (trackUrl.length < 8 || mediaUrlString.length < 8) return;
+    if (![mediaUrlString.lowercaseString hasPrefix:@"http"]) return;
+    NSString *key = scAudioCacheKey(trackUrl);
+    if (scCachedAudioPathForTrack(trackUrl)) return;
+
+    if (!g_scAudioCacheLock) g_scAudioCacheLock = [[NSLock alloc] init];
+    [g_scAudioCacheLock lock];
+    if (!g_scAudioCacheInflight) g_scAudioCacheInflight = [NSMutableSet set];
+    if ([g_scAudioCacheInflight containsObject:key]) {
+        [g_scAudioCacheLock unlock];
+        return;
+    }
+    [g_scAudioCacheInflight addObject:key];
+    [g_scAudioCacheLock unlock];
+
+    NSURL *mediaUrl = [NSURL URLWithString:mediaUrlString];
+    if (!mediaUrl) {
+        [g_scAudioCacheLock lock];
+        [g_scAudioCacheInflight removeObject:key];
+        [g_scAudioCacheLock unlock];
+        return;
+    }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:mediaUrl];
+    [req setValue:@"Mozilla/5.0" forHTTPHeaderField:@"User-Agent"];
+    req.timeoutInterval = 60.0;
+
+    [[[NSURLSession sharedSession] downloadTaskWithRequest:req completionHandler:^(NSURL *location, NSURLResponse *resp, NSError *err) {
+        NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+        BOOL ok = (!err && location && (!http || http.statusCode == 200 || http.statusCode == 206));
+        unsigned long long size = 0;
+        if (ok) {
+            NSNumber *len = [[[NSFileManager defaultManager] attributesOfItemAtPath:location.path error:nil] objectForKey:NSFileSize];
+            size = len.unsignedLongLongValue;
+            if (size < 60000) ok = NO; // битый/пустой ответ
+        }
+        if (ok) {
+            NSString *dir = getSCAudioCacheDirectory();
+            NSString *name = [NSString stringWithFormat:@"%@.mp3", key];
+            NSString *dest = [dir stringByAppendingPathComponent:name];
+            NSError *mvErr = nil;
+            [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+            if (![[NSFileManager defaultManager] moveItemAtPath:location.path toPath:dest error:&mvErr]) {
+                ok = NO;
+                NSLog(@"[AntiCensor] SC cache move failed: %@", mvErr);
+            } else {
+                dispatch_sync(scAudioCacheQueue(), ^{
+                    [g_scAudioCacheLock lock];
+                    scAudioCacheMapLocked()[key] = name;
+                    scAudioCachePersistLocked();
+                    scAudioCachePruneLocked();
+                    [g_scAudioCacheLock unlock];
+                });
+                NSLog(@"[AntiCensor] SC track cached locally (%.1f MB) for instant replay", size / 1048576.0);
+            }
+        } else {
+            NSLog(@"[AntiCensor] SC cache download skipped: %@ status=%ld", err, (long)http.statusCode);
+        }
+        [g_scAudioCacheLock lock];
+        [g_scAudioCacheInflight removeObject:key];
+        [g_scAudioCacheLock unlock];
+    }] resume];
+}
+
+static unsigned long long scAudioCacheTotalBytes(void) __attribute__((unused));
+static unsigned long long scAudioCacheTotalBytes(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *files = [fm contentsOfDirectoryAtPath:getSCAudioCacheDirectory() error:nil];
+    unsigned long long total = 0;
+    for (NSString *name in files) {
+        if (![name hasSuffix:@".mp3"]) continue;
+        total += [[fm attributesOfItemAtPath:[getSCAudioCacheDirectory() stringByAppendingPathComponent:name] error:nil] fileSize];
+    }
+    return total;
+}
+
 
 static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *streamUrl)) {
     if (!rawUrl || rawUrl.length == 0) {
@@ -1527,6 +1729,17 @@ static void resolveSoundCloudUrl(NSString *rawUrl, void (^completion)(NSURL *str
         NSURL *u = [NSURL URLWithString:rawUrl];
         g_streamCache[rawUrl] = u;
         g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+        if (completion) completion(u);
+        return;
+    }
+
+    // 2.1 ЛОКАЛЬНЫЙ КЭШ: трек уже скачан раньше → играем с диска, 0 сетевых запросов.
+    NSString *cachedLocalPath = scCachedAudioPathForTrack(rawUrl);
+    if (cachedLocalPath) {
+        NSURL *u = [NSURL fileURLWithPath:cachedLocalPath];
+        g_streamCache[rawUrl] = u;
+        g_streamCacheTimestamps[rawUrl] = @([NSDate timeIntervalSinceReferenceDate]);
+        NSLog(@"[AntiCensor] SC track served from local cache (instant start): %@", cachedLocalPath.lastPathComponent);
         if (completion) completion(u);
         return;
     }
@@ -4825,7 +5038,22 @@ static void playStreamUrl(NSURL *streamUrl, NSString *trackKey, double initialPo
     }
     ourAudioPlayer = [AVPlayer playerWithPlayerItem:item];
     if (@available(iOS 10.0, *)) {
-        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = (g_lastNetworkLatencyMs > 400.0) ? YES : NO;
+        // СТАРТ ВАЖНЕЕ ИДЕАЛЬНОГО БУФЕРА: раньше на слабом интернете включался
+        // automaticallyWaitsToMinimizeStalling = YES и плеер ЖДАЛ накопления буфера —
+        // отсюда «по 30-60 секунд до старта». Стартуем сразу, догружаем на ходу.
+        ourAudioPlayer.automaticallyWaitsToMinimizeStalling = NO;
+    }
+
+    // Постоянный кэш: как только пошло воспроизведение — качаем трек в фон,
+    // чтобы следующий запуск был мгновенным и работал без сети.
+    if (!streamUrl.isFileURL) {
+        NSString *orig = currentPlayingUrl;
+        BOOL looksLikeSC = orig.length > 8 && ([orig.lowercaseString containsString:@"soundcloud"] ||
+                                               [orig.lowercaseString containsString:@"/sc?url="] ||
+                                               [orig.lowercaseString containsString:@"onrender.com"]);
+        if (looksLikeSC) {
+            scAudioCacheStoreInBackground(orig, streamUrl.absoluteString);
+        }
     }
 
     g_lastReplacementStartTime = [NSDate timeIntervalSinceReferenceDate];

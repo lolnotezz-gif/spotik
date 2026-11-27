@@ -1,0 +1,24 @@
+name: Keep AntiCensor Bridge Warm
+
+# Render free tier sleeps after ~15 min idle; a cold start costs 30-60s for the
+# first /sc request. A cheap ping every 10 minutes keeps the instance responsive
+# so SoundCloud tracks start instantly on mobile.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health and /api/status
+        run: |
+          set -e
+          for i in 1 2 3; do
+            echo "attempt $i"
+            curl -fsS --max-time 60 https://spotik-in4b.onrender.com/health && break
+            sleep 20
+          done
+          curl -fsS --max-time 60 https://spotik-in4b.onrender.com/api/status | head -c 300 || true
